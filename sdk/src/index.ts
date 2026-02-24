@@ -1,0 +1,427 @@
+import * as fs          from 'fs'
+import * as net         from 'net'
+import * as os          from 'os'
+import * as path        from 'path'
+import { spawn, ChildProcess } from 'child_process'
+import WebSocket               from 'ws'
+
+// ============================================================================
+// Public config / types
+// ============================================================================
+
+export interface Zerox1AgentConfig {
+  /**
+   * 32-byte Ed25519 secret key as Uint8Array, OR a path to an existing
+   * key file (raw 32 bytes). If the path does not exist, the node
+   * generates a new key and writes it there.
+   */
+  keypair:   Uint8Array | string
+  /** Display name broadcast in BEACON/ADVERTISE. Default: 'zerox1-agent'. */
+  name?:     string
+  /**
+   * SATI mint address as hex (32 bytes). Required for mainnet.
+   * Omit to run in dev mode (SATI checks are advisory only).
+   */
+  satiMint?: string
+  /** Solana RPC URL. Default: mainnet-beta. */
+  rpcUrl?:   string
+  /** Directory for per-epoch envelope logs. Default: current dir. */
+  logDir?:   string
+  /** Additional bootstrap peer multiaddrs. */
+  bootstrap?: string[]
+}
+
+export type MsgType =
+  | 'ADVERTISE' | 'DISCOVER'
+  | 'PROPOSE'   | 'COUNTER' | 'ACCEPT' | 'REJECT'
+  | 'DELIVER'
+  | 'NOTARIZE_BID' | 'NOTARIZE_ASSIGN'
+  | 'VERDICT'
+  | 'FEEDBACK'
+  | 'DISPUTE'
+
+export interface SendParams {
+  msgType:        MsgType
+  /** Hex-encoded 32-byte agent ID. Omit for broadcast types. */
+  recipient?:     string
+  /** Hex-encoded 16-byte conversation ID. */
+  conversationId: string
+  payload:        Buffer | Uint8Array
+}
+
+export interface SentConfirmation {
+  nonce:       number
+  payloadHash: string
+}
+
+export interface FeedbackPayload {
+  conversationId: string
+  targetAgent:    string
+  score:          number
+  outcome:        number
+  isDispute:      boolean
+  role:           number
+}
+
+export interface NotarizeBidPayload {
+  bidType:        number
+  conversationId: string
+  opaqueB64:      string
+}
+
+export interface InboundEnvelope {
+  msgType:        MsgType
+  sender:         string
+  recipient:      string
+  conversationId: string
+  slot:           number
+  nonce:          number
+  payloadB64:     string
+  feedback?:      FeedbackPayload
+  notarizeBid?:   NotarizeBidPayload
+}
+
+export interface SendFeedbackParams {
+  conversationId: string
+  targetAgent:    string
+  /** -100 to +100 */
+  score:          number
+  outcome:        'negative' | 'neutral' | 'positive'
+  role:           'participant' | 'notary'
+}
+
+// ============================================================================
+// CBOR encoding for FEEDBACK payload
+//
+// FEEDBACK payloads must be CBOR-encoded. Receiving nodes run
+// FeedbackPayload::decode() which is a strict CBOR parser — any other
+// encoding fails validation rule 9 and the message is silently dropped.
+//
+// Structure: CBOR array of 6 items:
+//   [0] bstr(16)  conversation_id
+//   [1] bstr(32)  target_agent
+//   [2] int       score  (-100..100)
+//   [3] uint      outcome (0..2)
+//   [4] bool      is_dispute
+//   [5] uint      role   (0..1)
+// ============================================================================
+
+function cborInt(n: number): Buffer {
+  if (n >= 0   && n <= 23)  return Buffer.from([n])
+  if (n >= 24  && n <= 255) return Buffer.from([0x18, n])
+  if (n >= -24 && n <   0)  return Buffer.from([0x20 + (-n - 1)])
+  if (n >= -256 && n < -24) return Buffer.from([0x38, -n - 1])
+  throw new RangeError(`CBOR int out of range: ${n}`)
+}
+
+function encodeFeedbackCbor(
+  conversationIdHex: string,
+  targetAgentHex:    string,
+  score:             number,
+  outcome:           number,
+  isDispute:         boolean,
+  role:              number,
+): Buffer {
+  const convId      = Buffer.from(conversationIdHex, 'hex') // 16 bytes
+  const targetAgent = Buffer.from(targetAgentHex,    'hex') // 32 bytes
+  return Buffer.concat([
+    Buffer.from([0x86]),                    // array(6)
+    Buffer.from([0x50]), convId,            // bytes(16)
+    Buffer.from([0x58, 0x20]), targetAgent, // bytes(32)
+    cborInt(score),
+    cborInt(outcome),
+    Buffer.from([isDispute ? 0xF5 : 0xF4]),
+    cborInt(role),
+  ])
+}
+
+// ============================================================================
+// Binary resolution
+// ============================================================================
+
+function getBinaryPath(): string {
+  const platform = process.platform // 'win32' | 'darwin' | 'linux'
+  const arch     = process.arch     // 'x64' | 'arm64'
+  const binName  = platform === 'win32' ? 'zerox1-node.exe' : 'zerox1-node'
+  const pkgName  = `@zerox1/sdk-${platform}-${arch}`
+
+  try {
+    const pkgJson = require.resolve(`${pkgName}/package.json`)
+    return path.join(path.dirname(pkgJson), 'bin', binName)
+  } catch {
+    // Optional platform package not installed — fall back to PATH.
+    // This allows developers to use a locally built binary during development.
+    return binName
+  }
+}
+
+// ============================================================================
+// Port + process utilities
+// ============================================================================
+
+function getFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer()
+    srv.listen(0, '127.0.0.1', () => {
+      const port = (srv.address() as net.AddressInfo).port
+      srv.close(() => resolve(port))
+    })
+    srv.on('error', reject)
+  })
+}
+
+function resolveKeypairPath(keypair: Uint8Array | string): string {
+  if (typeof keypair === 'string') {
+    // Caller passed a file path — use it directly.
+    return keypair
+  }
+  // Caller passed raw bytes — write to a temp file with restrictive permissions.
+  // mode 0o600: owner read/write only — prevents other users from reading the key.
+  const tmpPath = path.join(os.tmpdir(), `zerox1-identity-${Date.now()}.key`)
+  fs.writeFileSync(tmpPath, Buffer.from(keypair), { mode: 0o600 })
+  return tmpPath
+}
+
+async function waitForReady(port: number, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/peers`)
+      if (res.ok) return
+    } catch {
+      // not ready yet
+    }
+    await new Promise(r => setTimeout(r, 200))
+  }
+  throw new Error(`zerox1-node did not become ready within ${timeoutMs}ms`)
+}
+
+// ============================================================================
+// Zerox1Agent
+// ============================================================================
+
+type Handler = (env: InboundEnvelope) => void | Promise<void>
+
+export class Zerox1Agent {
+  private proc:    ChildProcess | null = null
+  private ws:      WebSocket | null    = null
+  private handlers: Map<string, Handler[]> = new Map()
+  private port:    number = 0
+  private nodeUrl: string = ''
+
+  private constructor() {}
+
+  // ── Factory ───────────────────────────────────────────────────────────────
+
+  /**
+   * Create an Zerox1Agent instance.
+   * Call `agent.on(...)` to register handlers, then `agent.start()` to join
+   * the mesh. The node binary is bundled — no separate install required.
+   */
+  static create(config: Zerox1AgentConfig): Zerox1Agent {
+    const agent = new Zerox1Agent()
+    agent._config = config
+    return agent
+  }
+
+  private _config!: Zerox1AgentConfig
+
+  // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+  /**
+   * Start the node, wait for it to be ready, connect the inbox stream.
+   * Safe to await — resolves once the agent is live on the mesh.
+   */
+  async start(): Promise<void> {
+    this.port    = await getFreePort()
+    this.nodeUrl = `http://127.0.0.1:${this.port}`
+
+    const keypairPath = resolveKeypairPath(this._config.keypair)
+    const binaryPath  = getBinaryPath()
+
+    const args: string[] = [
+      '--keypair-path', keypairPath,
+      '--api-addr',     `127.0.0.1:${this.port}`,
+      '--agent-name',   this._config.name ?? 'zerox1-agent',
+    ]
+
+    if (this._config.satiMint) args.push('--sati-mint', this._config.satiMint)
+    if (this._config.rpcUrl)   args.push('--rpc-url',   this._config.rpcUrl)
+    if (this._config.logDir)   args.push('--log-dir',   this._config.logDir)
+    for (const b of this._config.bootstrap ?? []) {
+      args.push('--bootstrap', b)
+    }
+
+    this.proc = spawn(binaryPath, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+
+    this.proc.on('error', (err) => {
+      throw new Error(
+        `Failed to start zerox1-node (${binaryPath}): ${err.message}\n` +
+        `Make sure the binary is installed or in your PATH.`
+      )
+    })
+
+    // Surface node logs prefixed so they're distinguishable in agent output.
+    this.proc.stderr?.on('data', (d: Buffer) => {
+      process.stderr.write(`[zerox1-node] ${d}`)
+    })
+
+    // Wait until the HTTP server is accepting connections.
+    await waitForReady(this.port)
+
+    // Open the inbox WebSocket.
+    this._connectInbox()
+  }
+
+  /**
+   * Disconnect from the mesh and stop the node process.
+   */
+  disconnect(): void {
+    this.ws?.close()
+    this.ws = null
+    this.proc?.kill()
+    this.proc = null
+  }
+
+  // ── Handlers ──────────────────────────────────────────────────────────────
+
+  /**
+   * Register a handler for a message type.
+   * Use `'*'` to catch all inbound message types.
+   * Chain multiple `.on()` calls — all handlers for a type are called in order.
+   */
+  on(msgType: MsgType | '*', handler: Handler): this {
+    const key  = msgType === '*' ? '__all__' : msgType
+    const list = this.handlers.get(key) ?? []
+    list.push(handler)
+    this.handlers.set(key, list)
+    return this
+  }
+
+  private _dispatch(env: InboundEnvelope): void {
+    const specific = this.handlers.get(env.msgType) ?? []
+    const wildcard = this.handlers.get('__all__') ?? []
+    for (const h of [...specific, ...wildcard]) {
+      try { void h(env) } catch { /* handler errors are isolated */ }
+    }
+  }
+
+  // ── Sending ───────────────────────────────────────────────────────────────
+
+  /**
+   * Send an envelope. The node signs it and routes via libp2p.
+   * Returns the assigned nonce and payload hash for tracking.
+   */
+  async send(params: SendParams): Promise<SentConfirmation> {
+    const body = {
+      msg_type:        params.msgType,
+      recipient:       params.recipient ?? null,
+      conversation_id: params.conversationId,
+      payload_b64:     Buffer.from(params.payload).toString('base64'),
+    }
+
+    const res  = await fetch(`${this.nodeUrl}/envelopes/send`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
+    })
+    const json = await res.json() as Record<string, unknown>
+
+    if (!res.ok) {
+      throw new Error((json['error'] as string) ?? `HTTP ${res.status}`)
+    }
+
+    return {
+      nonce:       json['nonce'] as number,
+      payloadHash: json['payload_hash'] as string,
+    }
+  }
+
+  /**
+   * Send a FEEDBACK envelope with CBOR-encoded payload.
+   * Protocol rule 9 requires CBOR — this method handles the encoding.
+   */
+  async sendFeedback(params: SendFeedbackParams): Promise<SentConfirmation> {
+    const outcomeMap = { negative: 0, neutral: 1, positive: 2 } as const
+    const roleMap    = { participant: 0, notary: 1 } as const
+
+    const payload = encodeFeedbackCbor(
+      params.conversationId,
+      params.targetAgent,
+      params.score,
+      outcomeMap[params.outcome],
+      false,
+      roleMap[params.role],
+    )
+
+    return this.send({
+      msgType:        'FEEDBACK',
+      conversationId: params.conversationId,
+      payload,
+    })
+  }
+
+  // ── Utilities ─────────────────────────────────────────────────────────────
+
+  /** Generate a random 16-byte conversation ID as hex. */
+  newConversationId(): string {
+    const bytes = new Uint8Array(16)
+    crypto.getRandomValues(bytes)
+    return Buffer.from(bytes).toString('hex')
+  }
+
+  /**
+   * Encode a bid value (i128 LE) into the first 16 bytes of a payload,
+   * followed by optional extra bytes (your terms).
+   */
+  encodeBidValue(value: bigint, rest: Buffer = Buffer.alloc(0)): Buffer {
+    const buf = Buffer.alloc(16)
+    buf.writeBigInt64LE(value & 0xFFFFFFFFFFFFFFFFn, 0)
+    buf.writeBigInt64LE(value >> 64n, 8)
+    return Buffer.concat([buf, rest])
+  }
+
+  // ── Internal ──────────────────────────────────────────────────────────────
+
+  private _connectInbox(): void {
+    const wsUrl = `ws://127.0.0.1:${this.port}/ws/inbox`
+    const ws    = new WebSocket(wsUrl)
+    this.ws     = ws
+
+    ws.on('message', (data) => {
+      try {
+        const raw = JSON.parse(data.toString())
+        const env: InboundEnvelope = {
+          msgType:        raw.msg_type,
+          sender:         raw.sender,
+          recipient:      raw.recipient,
+          conversationId: raw.conversation_id,
+          slot:           raw.slot,
+          nonce:          raw.nonce,
+          payloadB64:     raw.payload_b64,
+          feedback: raw.feedback ? {
+            conversationId: raw.feedback.conversation_id,
+            targetAgent:    raw.feedback.target_agent,
+            score:          raw.feedback.score,
+            outcome:        raw.feedback.outcome,
+            isDispute:      raw.feedback.is_dispute,
+            role:           raw.feedback.role,
+          } : undefined,
+          notarizeBid: raw.notarize_bid ? {
+            bidType:        raw.notarize_bid.bid_type,
+            conversationId: raw.notarize_bid.conversation_id,
+            opaqueB64:      raw.notarize_bid.opaque_b64,
+          } : undefined,
+        }
+        this._dispatch(env)
+      } catch { /* malformed — ignore */ }
+    })
+
+    ws.on('close', () => {
+      // Reconnect only if the process is still running.
+      if (this.proc) setTimeout(() => this._connectInbox(), 1000)
+    })
+
+    ws.on('error', () => { /* close event handles reconnect */ })
+  }
+}

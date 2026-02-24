@@ -1,0 +1,196 @@
+use std::collections::HashMap;
+use ed25519_dalek::VerifyingKey;
+use libp2p::PeerId;
+
+/// Maximum number of distinct 0x01 agents tracked in memory.
+/// Prevents unbounded growth from BEACON floods with rotating sender IDs.
+const MAX_PEERS: usize = 10_000;
+
+/// Maximum number of identify keys buffered before a BEACON arrives.
+const MAX_PENDING_KEYS: usize = 200;
+
+/// Per-peer cached state for envelope validation.
+pub struct PeerEntry {
+    /// Last validated nonce from this sender (replay protection).
+    pub last_nonce: u64,
+    /// Ed25519 verifying key (populated from BEACON payload or identify).
+    pub verifying_key: Option<VerifyingKey>,
+    /// libp2p PeerId for this agent (populated on connect + BEACON).
+    pub peer_id: Option<PeerId>,
+    /// SATI registration status:
+    ///   None        = not yet checked
+    ///   Some(true)  = confirmed registered in SATI
+    ///   Some(false) = confirmed NOT registered
+    pub sati_status: Option<bool>,
+    /// Lease status:
+    ///   None        = not yet checked
+    ///   Some(true)  = active lease (paid_through_epoch >= current_epoch or in grace)
+    ///   Some(false) = deactivated (lease expired beyond grace period)
+    pub lease_status: Option<bool>,
+    /// Last active epoch (for decay tracking).
+    pub last_active_epoch: u64,
+}
+
+impl Default for PeerEntry {
+    fn default() -> Self {
+        Self {
+            last_nonce: 0,
+            verifying_key: None,
+            peer_id: None,
+            sati_status: None,
+            lease_status: None,
+            last_active_epoch: 0,
+        }
+    }
+}
+
+/// Thread-local in-memory peer state map.
+pub struct PeerStateMap {
+    by_agent_id: HashMap<[u8; 32], PeerEntry>,
+    /// Reverse lookup: libp2p PeerId → 0x01 agent_id (SATI mint).
+    peer_to_agent: HashMap<PeerId, [u8; 32]>,
+    /// Keys received from the `identify` protocol before the peer has sent a
+    /// BEACON.  Stored here temporarily and applied once register_peer() is
+    /// called for that PeerId.
+    pending_keys: HashMap<PeerId, VerifyingKey>,
+}
+
+impl PeerStateMap {
+    pub fn new() -> Self {
+        Self {
+            by_agent_id: HashMap::new(),
+            peer_to_agent: HashMap::new(),
+            pending_keys: HashMap::new(),
+        }
+    }
+
+    fn entry(&mut self, agent_id: [u8; 32]) -> &mut PeerEntry {
+        // Evict one entry if at capacity before inserting a new key.
+        if !self.by_agent_id.contains_key(&agent_id)
+            && self.by_agent_id.len() >= MAX_PEERS
+        {
+            if let Some(&evict_key) = self.by_agent_id.keys().next() {
+                // Also clean up the reverse-lookup map.
+                if let Some(pid) = self.by_agent_id[&evict_key].peer_id {
+                    self.peer_to_agent.remove(&pid);
+                }
+                self.by_agent_id.remove(&evict_key);
+            }
+        }
+        self.by_agent_id.entry(agent_id).or_default()
+    }
+
+    pub fn last_nonce(&self, agent_id: &[u8; 32]) -> u64 {
+        self.by_agent_id.get(agent_id).map_or(0, |e| e.last_nonce)
+    }
+
+    pub fn update_nonce(&mut self, agent_id: [u8; 32], nonce: u64) {
+        self.entry(agent_id).last_nonce = nonce;
+    }
+
+    pub fn verifying_key(&self, agent_id: &[u8; 32]) -> Option<&VerifyingKey> {
+        self.by_agent_id.get(agent_id)?.verifying_key.as_ref()
+    }
+
+    pub fn set_verifying_key(&mut self, agent_id: [u8; 32], vk: VerifyingKey) {
+        self.entry(agent_id).verifying_key = Some(vk);
+    }
+
+    /// Register the agent_id ↔ PeerId mapping.
+    ///
+    /// If a key was received from `identify` before this peer had sent a
+    /// BEACON (stored in `pending_keys`), it is applied immediately.
+    pub fn register_peer(&mut self, agent_id: [u8; 32], peer_id: PeerId) {
+        let entry = self.entry(agent_id);
+        entry.peer_id = Some(peer_id);
+        self.peer_to_agent.insert(peer_id, agent_id);
+
+        // Apply any pending key that arrived before the BEACON.
+        if let Some(vk) = self.pending_keys.remove(&peer_id) {
+            self.by_agent_id
+                .get_mut(&agent_id)
+                .unwrap()
+                .verifying_key
+                .get_or_insert(vk);
+        }
+    }
+
+    pub fn peer_id_for_agent(&self, agent_id: &[u8; 32]) -> Option<PeerId> {
+        self.by_agent_id.get(agent_id)?.peer_id
+    }
+
+    pub fn agent_id_for_peer(&self, peer_id: &PeerId) -> Option<[u8; 32]> {
+        self.peer_to_agent.get(peer_id).copied()
+    }
+
+    pub fn last_active_epoch(&self, agent_id: &[u8; 32]) -> u64 {
+        self.by_agent_id.get(agent_id).map_or(0, |e| e.last_active_epoch)
+    }
+
+    pub fn touch_epoch(&mut self, agent_id: [u8; 32], epoch: u64) {
+        let e = self.entry(agent_id);
+        if epoch > e.last_active_epoch {
+            e.last_active_epoch = epoch;
+        }
+    }
+
+    // ========================================================================
+    // SATI registration status
+    // ========================================================================
+
+    /// Record the result of a SATI registration check.
+    pub fn set_sati_status(&mut self, agent_id: [u8; 32], registered: bool) {
+        self.entry(agent_id).sati_status = Some(registered);
+    }
+
+    /// Returns the cached SATI status:
+    ///   `None`        — never checked
+    ///   `Some(true)`  — confirmed registered
+    ///   `Some(false)` — confirmed unregistered
+    pub fn sati_status(&self, agent_id: &[u8; 32]) -> Option<bool> {
+        self.by_agent_id.get(agent_id)?.sati_status
+    }
+
+    // ========================================================================
+    // Lease status
+    // ========================================================================
+
+    /// Record the result of a lease status check.
+    pub fn set_lease_status(&mut self, agent_id: [u8; 32], active: bool) {
+        self.entry(agent_id).lease_status = Some(active);
+    }
+
+    /// Returns the cached lease status:
+    ///   `None`        — never checked
+    ///   `Some(true)`  — active lease
+    ///   `Some(false)` — deactivated
+    pub fn lease_status(&self, agent_id: &[u8; 32]) -> Option<bool> {
+        self.by_agent_id.get(agent_id)?.lease_status
+    }
+
+    /// Associate a libp2p verifying key (from identify) with a peer.
+    ///
+    /// If the peer_id → agent_id mapping is already known (the peer has sent a
+    /// Return all known agent IDs (used for inactivity scanning).
+    pub fn all_agent_ids(&self) -> Vec<[u8; 32]> {
+        self.by_agent_id.keys().copied().collect()
+    }
+
+    /// BEACON), stores the key immediately.  Otherwise, stashes it in
+    /// `pending_keys`; it will be applied when `register_peer` is called.
+    pub fn set_key_for_peer(&mut self, peer_id: &PeerId, vk: VerifyingKey) {
+        if let Some(&agent_id) = self.peer_to_agent.get(peer_id) {
+            let entry = self.entry(agent_id);
+            // Only set if not already populated — BEACON payload takes priority.
+            entry.verifying_key.get_or_insert(vk);
+        } else {
+            // Cap pending_keys to avoid unbounded growth from identify storms.
+            if self.pending_keys.len() >= MAX_PENDING_KEYS {
+                if let Some(&old_peer) = self.pending_keys.keys().next() {
+                    self.pending_keys.remove(&old_peer);
+                }
+            }
+            self.pending_keys.insert(*peer_id, vk);
+        }
+    }
+}

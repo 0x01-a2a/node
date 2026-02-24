@@ -1,0 +1,68 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/zerox1-protocol",
+    "crates/zerox1-node",
+    "crates/zerox1-sati-client",
+    "crates/zerox1-aggregator",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["zerox1"]
+license = "MIT"
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_cbor = "0.11"
+ciborium = "0.2"
+sha2 = "0.10"
+keccak = "0.1"
+tiny-keccak = { version = "2", features = ["keccak"] }
+
+# Crypto / keys
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+
+# Solana
+solana-sdk = "2.1"
+solana-client = "2.1"
+solana-rpc-client = "2.1"
+solana-rpc-client-api = "2.1"
+
+# libp2p
+libp2p = { version = "0.54", features = [
+    "tokio",
+    "gossipsub",
+    "kad",
+    "mdns",
+    "noise",
+    "tcp",
+    "yamux",
+    "identify",
+    "autonat",
+    "relay",
+    "dcutr",
+    "request-response",
+    "macros",
+] }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Utilities
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytes = "1"
+hex = "0.4"
+base64 = "0.22"
+bincode = "1"
+reqwest = { version = "0.12", features = ["json"] }
+axum = { version = "0.8", features = ["ws"] }
+serde_json = "1"

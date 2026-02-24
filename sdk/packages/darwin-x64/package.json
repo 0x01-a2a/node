@@ -1,0 +1,8 @@
+{
+  "name": "@zerox1/sdk-darwin-x64",
+  "version": "0.1.0",
+  "description": "zerox1-node binary for macOS x64 (Intel)",
+  "os": ["darwin"],
+  "cpu": ["x64"],
+  "files": ["bin/"]
+}

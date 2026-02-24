@@ -1,0 +1,18 @@
+[package]
+name = "zerox1-protocol"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+ciborium = { workspace = true }
+sha2 = { workspace = true }
+tiny-keccak = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+bytes = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }

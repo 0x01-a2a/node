@@ -1,0 +1,318 @@
+//! Lease mechanism client (doc 5, §7 / §10.3).
+//!
+//! Handles:
+//!   - Reading the LeaseAccount PDA from Solana
+//!   - Building and submitting `pay_lease` instructions (USDC, via Kora or direct)
+//!   - Checking peer lease status for the message gate
+
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use sha2::{Digest, Sha256};
+use solana_rpc_client::nonblocking::rpc_client::RpcClient;
+use solana_sdk::{
+    instruction::{AccountMeta, Instruction},
+    message::Message,
+    pubkey::Pubkey,
+    signature::{Keypair, Signature, Signer},
+    transaction::Transaction,
+};
+
+use crate::{identity::AgentIdentity, kora::KoraClient};
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+/// Lease program ID (doc 5, §10.3).
+const LEASE_PROGRAM_ID_STR: &str = "9g4RMQvBBVCppUc9C3Vjk2Yn3vhHzDFb8RkVm8a1WmUk";
+/// USDC mainnet mint (also devnet via Circle's cross-chain USDC).
+pub const USDC_MINT_STR: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+/// SPL Token program.
+const SPL_TOKEN_PROGRAM_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+/// Associated Token Program.
+const ASSOCIATED_TOKEN_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+
+/// Pay 7 epochs when renewing (one week).
+pub const RENEWAL_EPOCHS: u64 = 7;
+/// Trigger renewal when fewer than this many paid epochs remain.
+pub const RENEWAL_THRESHOLD: u64 = 2;
+
+fn lease_program_id() -> Pubkey {
+    LEASE_PROGRAM_ID_STR.parse().expect("valid lease program ID")
+}
+
+fn usdc_mint() -> Pubkey {
+    USDC_MINT_STR.parse().expect("valid USDC mint")
+}
+
+fn spl_token_program() -> Pubkey {
+    SPL_TOKEN_PROGRAM_STR.parse().expect("valid SPL token program ID")
+}
+
+fn associated_token_program() -> Pubkey {
+    ASSOCIATED_TOKEN_PROGRAM_STR.parse().expect("valid ATA program ID")
+}
+
+/// Derive the Associated Token Address for (wallet, mint).
+///
+/// ATA derivation: find_program_address(
+///   &[wallet, token_program, mint],
+///   &associated_token_program
+/// )
+pub fn get_ata(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[wallet.as_ref(), spl_token_program().as_ref(), mint.as_ref()],
+        &associated_token_program(),
+    )
+    .0
+}
+
+// ============================================================================
+// LeaseAccount deserialization (raw byte offsets — no on-chain dep needed)
+//
+// LeaseAccount layout (Anchor, all little-endian):
+//   [0..8]   8-byte discriminator
+//   [8..40]  agent_id [u8; 32]
+//   [40..72] owner Pubkey [u8; 32]
+//   [72..80] paid_through_epoch u64
+//   [80..88] last_paid_slot u64
+//   [88..96] current_epoch u64
+//   [96]     in_grace_period bool (1 byte)
+//   [97]     deactivated bool (1 byte)
+//   [98]     bump u8
+// ============================================================================
+
+/// Parsed view of an on-chain LeaseAccount.
+#[derive(Debug, Clone)]
+pub struct LeaseStatus {
+    pub paid_through_epoch: u64,
+    pub current_epoch:      u64,
+    pub in_grace_period:    bool,
+    pub deactivated:        bool,
+}
+
+impl LeaseStatus {
+    /// True if the lease is still valid (not deactivated, not in grace period).
+    pub fn is_active(&self) -> bool {
+        !self.deactivated
+    }
+
+    /// True if renewal is needed soon (within RENEWAL_THRESHOLD epochs).
+    pub fn needs_renewal(&self) -> bool {
+        !self.deactivated
+            && self.paid_through_epoch < self.current_epoch + RENEWAL_THRESHOLD
+    }
+}
+
+/// Fetch and parse the LeaseAccount for `agent_id`.
+///
+/// Returns:
+///   `Ok(Some(status))` — account found and parsed
+///   `Ok(None)`         — account does not exist (agent has not called init_lease)
+///   `Err(_)`           — RPC failure
+pub async fn get_lease_status(
+    rpc:      &RpcClient,
+    agent_id: &[u8; 32],
+) -> anyhow::Result<Option<LeaseStatus>> {
+    let (pda, _) = Pubkey::find_program_address(
+        &[b"lease", agent_id.as_ref()],
+        &lease_program_id(),
+    );
+
+    // Use get_multiple_accounts so missing accounts return Option::None
+    // instead of an error, avoiding fragile string matching on error messages.
+    let mut accounts = rpc
+        .get_multiple_accounts(&[pda])
+        .await
+        .map_err(|e| anyhow::anyhow!("RPC error reading lease PDA: {e}"))?;
+
+    match accounts.pop().flatten() {
+        None => Ok(None),
+        Some(account) => {
+            let d = &account.data;
+            if d.len() < 99 {
+                anyhow::bail!("LeaseAccount data too short: {} bytes", d.len());
+            }
+            Ok(Some(LeaseStatus {
+                paid_through_epoch: u64::from_le_bytes(d[72..80].try_into().unwrap()),
+                current_epoch:      u64::from_le_bytes(d[88..96].try_into().unwrap()),
+                in_grace_period:    d[96] != 0,
+                deactivated:        d[97] != 0,
+            }))
+        }
+    }
+}
+
+// ============================================================================
+// pay_lease instruction
+// ============================================================================
+
+/// Build and submit a `pay_lease` transaction for RENEWAL_EPOCHS.
+///
+/// Gas path:
+///   Kora present  → payer = Kora, owner = agent (partial sign), Kora broadcasts
+///   Kora absent   → payer = owner = agent, direct RPC submission (requires SOL)
+pub async fn pay_lease_onchain(
+    rpc:      &RpcClient,
+    identity: &AgentIdentity,
+    kora:     Option<&KoraClient>,
+) -> anyhow::Result<()> {
+    let program_id  = lease_program_id();
+    let usdc        = usdc_mint();
+    let agent_pubkey = Pubkey::new_from_array(identity.verifying_key.to_bytes());
+
+    let (lease_pda, _) = Pubkey::find_program_address(
+        &[b"lease", &identity.agent_id],
+        &program_id,
+    );
+    let (vault_auth, _) = Pubkey::find_program_address(
+        &[b"lease_vault", &identity.agent_id],
+        &program_id,
+    );
+    let vault_ata   = get_ata(&vault_auth, &usdc);
+    let owner_ata   = get_ata(&agent_pubkey, &usdc);
+
+    let recent_blockhash = rpc.get_latest_blockhash().await?;
+
+    // Convert ed25519-dalek signing key to a Solana Keypair for partial signing.
+    let solana_kp = {
+        let mut b = [0u8; 64];
+        b[..32].copy_from_slice(&identity.signing_key.to_bytes());
+        b[32..].copy_from_slice(&identity.verifying_key.to_bytes());
+        Keypair::try_from(b.as_slice())
+            .map_err(|e| anyhow::anyhow!("keypair conversion: {e}"))?
+    };
+
+    if let Some(kora) = kora {
+        // ── Kora path ────────────────────────────────────────────────────────
+        // payer = Kora (fee payer + rent payer)
+        // owner = agent (USDC source signer)
+        // Transaction has 2 required signers: [kora, agent].
+        // Agent partially signs; Kora fills the fee payer slot.
+        let fee_payer = kora.get_fee_payer().await?;
+
+        let ix = build_pay_lease_ix(
+            &fee_payer,
+            &agent_pubkey,
+            &owner_ata,
+            &lease_pda,
+            &vault_auth,
+            &vault_ata,
+            &usdc,
+            &program_id,
+            RENEWAL_EPOCHS,
+        );
+
+        let message = Message::new_with_blockhash(&[ix], Some(&fee_payer), &recent_blockhash);
+        let mut tx = Transaction {
+            signatures: vec![Signature::default(); message.header.num_required_signatures as usize],
+            message,
+        };
+        tx.partial_sign(&[&solana_kp], recent_blockhash);
+
+        let tx_bytes = bincode::serialize(&tx)
+            .map_err(|e| anyhow::anyhow!("bincode serialize: {e}"))?;
+        let tx_b64 = BASE64.encode(&tx_bytes);
+
+        kora.sign_and_send(&tx_b64).await?;
+
+        tracing::info!(
+            epochs = RENEWAL_EPOCHS,
+            agent  = %hex::encode(identity.agent_id),
+            "Lease renewed via Kora (gasless)",
+        );
+    } else {
+        // ── Direct path ──────────────────────────────────────────────────────
+        // payer = owner = agent
+        let ix = build_pay_lease_ix(
+            &agent_pubkey,
+            &agent_pubkey,
+            &owner_ata,
+            &lease_pda,
+            &vault_auth,
+            &vault_ata,
+            &usdc,
+            &program_id,
+            RENEWAL_EPOCHS,
+        );
+
+        let tx = Transaction::new_signed_with_payer(
+            &[ix],
+            Some(&agent_pubkey),
+            &[&solana_kp],
+            recent_blockhash,
+        );
+
+        let sig = rpc
+            .send_and_confirm_transaction(&tx)
+            .await
+            .map_err(|e| anyhow::anyhow!("pay_lease: {e}"))?;
+
+        tracing::info!(
+            tx     = %sig,
+            epochs = RENEWAL_EPOCHS,
+            agent  = %hex::encode(identity.agent_id),
+            "Lease renewed directly (agent pays gas)",
+        );
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Instruction builder
+// ============================================================================
+
+/// Compute an Anchor instruction discriminator: sha256("global:<name>")[..8].
+fn anchor_discriminator(name: &str) -> [u8; 8] {
+    let hash = Sha256::digest(format!("global:{name}").as_bytes());
+    hash[..8].try_into().unwrap()
+}
+
+/// Build the `pay_lease` instruction.
+///
+/// Accounts (matching PayLease struct):
+///   0. payer                    (signer, writable) — Kora or agent
+///   1. owner                    (signer, writable) — agent (USDC authority)
+///   2. owner_usdc               (writable) — owner's USDC ATA
+///   3. lease_account            (PDA, writable)
+///   4. lease_vault_authority    (PDA, readonly)
+///   5. lease_vault              (writable) — vault ATA
+///   6. usdc_mint                (readonly)
+///   7. token_program            (readonly)
+///   8. associated_token_program (readonly)
+///   9. system_program           (readonly)
+///
+/// Args: discriminator(8) + Borsh(PayLeaseArgs) = 8 + 8 = 16 bytes.
+#[allow(clippy::too_many_arguments)]
+fn build_pay_lease_ix(
+    payer:       &Pubkey,
+    owner:       &Pubkey,
+    owner_ata:   &Pubkey,
+    lease_pda:   &Pubkey,
+    vault_auth:  &Pubkey,
+    vault_ata:   &Pubkey,
+    usdc_mint:   &Pubkey,
+    program_id:  &Pubkey,
+    n_epochs:    u64,
+) -> Instruction {
+    let mut data = Vec::with_capacity(16);
+    data.extend_from_slice(&anchor_discriminator("pay_lease"));
+    data.extend_from_slice(&n_epochs.to_le_bytes()); // PayLeaseArgs { n_epochs }
+
+    Instruction {
+        program_id: *program_id,
+        accounts: vec![
+            AccountMeta::new(*payer, true),
+            AccountMeta::new(*owner, true),
+            AccountMeta::new(*owner_ata, false),
+            AccountMeta::new(*lease_pda, false),
+            AccountMeta::new_readonly(*vault_auth, false),
+            AccountMeta::new(*vault_ata, false),
+            AccountMeta::new_readonly(*usdc_mint, false),
+            AccountMeta::new_readonly(spl_token_program(), false),
+            AccountMeta::new_readonly(associated_token_program(), false),
+            AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+        ],
+        data,
+    }
+}

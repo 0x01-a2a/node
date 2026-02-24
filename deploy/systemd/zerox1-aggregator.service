@@ -1,0 +1,37 @@
+[Unit]
+Description=0x01 reputation aggregator
+Documentation=https://0x01.world/agent-context
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zerox1
+Group=zerox1
+
+ExecStart=/opt/zerox1/bin/zerox1-aggregator \
+  --listen 0.0.0.0:8081 \
+  --db-path /var/lib/zerox1/reputation.db \
+  --ingest-secret ${AGGREGATOR_INGEST_SECRET}
+
+# Environment file holds secrets (not checked into git).
+# Create /etc/zerox1/env with:
+#   AGGREGATOR_INGEST_SECRET=<random-secret>
+EnvironmentFile=-/etc/zerox1/env
+
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=30s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=zerox1-aggregator
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/zerox1
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

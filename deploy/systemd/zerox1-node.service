@@ -1,0 +1,44 @@
+[Unit]
+Description=0x01 mesh node (bootstrap peer)
+Documentation=https://0x01.world/agent-context
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zerox1
+Group=zerox1
+
+ExecStart=/opt/zerox1/bin/zerox1-node \
+  --keypair-path /var/lib/zerox1/identity.key \
+  --listen-addr /ip4/0.0.0.0/tcp/9000 \
+  --agent-name zerox1-bootstrap \
+  --log-dir /var/log/zerox1 \
+  --aggregator-url http://127.0.0.1:8081 \
+  --aggregator-secret ${ZX01_AGGREGATOR_SECRET} \
+  --no-default-bootstrap
+
+# Environment file holds secrets (not checked into git).
+# Create /etc/zerox1/env with:
+#   ZX01_AGGREGATOR_SECRET=<random-secret>
+#   ZX01_KORA_URL=https://kora.0x01.world   (or "none" to disable)
+EnvironmentFile=-/etc/zerox1/env
+
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=30s
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=zerox1-node
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/zerox1 /var/log/zerox1
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,38 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Anchor / SBF build artifacts
+node/programs/workspace/target/
+programs/workspace/target/
+.anchor/
+
+# SDK — platform binaries are populated by CI, not committed
+sdk/packages/*/bin/
+
+# TypeScript / Node
+sdk/node_modules/
+sdk/dist/
+sdk/package-lock.json
+sdk/*.tsbuildinfo
+
+# Secrets & keys — NEVER commit these
+.env
+.env.*
+*.key
+*.pem
+/etc/zerox1/
+deploy/gcp/.secrets
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/

@@ -52,12 +52,11 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            node/target
-          key: cargo-${{ matrix.platform }}-${{ hashFiles('node/Cargo.lock') }}
+            target
+          key: cargo-${{ matrix.platform }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ matrix.platform }}-
 
       - name: Build zerox1-node
-        working-directory: node
         run: cargo build --release -p zerox1-node --target ${{ matrix.target }}
         env:
           CARGO_TERM_COLOR: always
@@ -66,7 +65,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: zerox1-node-${{ matrix.platform }}
-          path: node/target/${{ matrix.target }}/release/${{ matrix.binary }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
           if-no-files-found: error
 
   # ── Build zerox1-aggregator (Linux only — server-side service) ─────────────
@@ -86,12 +85,11 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            node/target
-          key: cargo-linux-x64-aggregator-${{ hashFiles('node/Cargo.lock') }}
+            target
+          key: cargo-linux-x64-aggregator-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-linux-x64-aggregator-
 
       - name: Build zerox1-aggregator
-        working-directory: node
         run: cargo build --release -p zerox1-aggregator
         env:
           CARGO_TERM_COLOR: always

@@ -75,6 +75,7 @@ impl Envelope {
     }
 
     /// Build, sign, and return a new envelope.
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         msg_type: MsgType,
         sender: [u8; 32],

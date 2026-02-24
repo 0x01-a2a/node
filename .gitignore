@@ -14,7 +14,6 @@ sdk/packages/*/bin/
 # TypeScript / Node
 sdk/node_modules/
 sdk/dist/
-sdk/package-lock.json
 sdk/*.tsbuildinfo
 
 # Secrets & keys — NEVER commit these

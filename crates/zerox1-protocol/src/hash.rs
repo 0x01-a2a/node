@@ -58,7 +58,7 @@ pub fn verify_merkle_proof(
 
     for sibling in proof {
         let mut combined = [0u8; 64];
-        if idx % 2 == 0 {
+        if idx.is_multiple_of(2) {
             combined[..32].copy_from_slice(&current);
             combined[32..].copy_from_slice(sibling);
         } else {

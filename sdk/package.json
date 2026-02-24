@@ -14,8 +14,7 @@
   "optionalDependencies": {
     "@zerox1/sdk-darwin-arm64": "0.1.0",
     "@zerox1/sdk-darwin-x64":   "0.1.0",
-    "@zerox1/sdk-linux-x64":    "0.1.0",
-    "@zerox1/sdk-win32-x64":    "0.1.0"
+    "@zerox1/sdk-linux-x64":    "0.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

@@ -25,15 +25,11 @@ jobs:
             platform: darwin-arm64
             binary: zerox1-node
 
-          - os: macos-13             # Intel runner
+          - os: macos-latest         # cross-compile x64 from arm64 runner
             target: x86_64-apple-darwin
             platform: darwin-x64
             binary: zerox1-node
 
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            platform: win32-x64
-            binary: zerox1-node.exe
 
     runs-on: ${{ matrix.os }}
 
@@ -134,12 +130,10 @@ jobs:
           mkdir -p sdk/packages/darwin-arm64/bin
           mkdir -p sdk/packages/darwin-x64/bin
           mkdir -p sdk/packages/linux-x64/bin
-          mkdir -p sdk/packages/win32-x64/bin
 
           cp artifacts/zerox1-node-darwin-arm64/zerox1-node  sdk/packages/darwin-arm64/bin/
           cp artifacts/zerox1-node-darwin-x64/zerox1-node    sdk/packages/darwin-x64/bin/
           cp artifacts/zerox1-node-linux-x64/zerox1-node     sdk/packages/linux-x64/bin/
-          cp artifacts/zerox1-node-win32-x64/zerox1-node.exe sdk/packages/win32-x64/bin/
 
           chmod +x sdk/packages/darwin-arm64/bin/zerox1-node
           chmod +x sdk/packages/darwin-x64/bin/zerox1-node
@@ -183,12 +177,6 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish platform packages (win32-x64)
-        working-directory: sdk/packages/win32-x64
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
       - name: Publish main @zerox1/sdk package
         working-directory: sdk
         run: npm publish --access public
@@ -214,7 +202,6 @@ jobs:
           cp artifacts/zerox1-node-darwin-arm64/zerox1-node    zerox1-node-darwin-arm64
           cp artifacts/zerox1-node-darwin-x64/zerox1-node      zerox1-node-darwin-x64
           cp artifacts/zerox1-node-linux-x64/zerox1-node       zerox1-node-linux-x64
-          cp artifacts/zerox1-node-win32-x64/zerox1-node.exe   zerox1-node-win32-x64.exe
           cp artifacts/zerox1-aggregator/zerox1-aggregator      zerox1-aggregator-linux-x64
 
       - name: Create GitHub Release
@@ -224,6 +211,5 @@ jobs:
             zerox1-node-darwin-arm64
             zerox1-node-darwin-x64
             zerox1-node-linux-x64
-            zerox1-node-win32-x64.exe
             zerox1-aggregator-linux-x64
           generate_release_notes: true

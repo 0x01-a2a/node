@@ -27,24 +27,21 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            node/target
-          key: cargo-ci-${{ hashFiles('node/Cargo.lock') }}
+            target
+          key: cargo-ci-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-ci-
 
       - name: cargo check (all workspace crates)
-        working-directory: node
         run: cargo check --workspace
         env:
           CARGO_TERM_COLOR: always
 
       - name: cargo test (zerox1-protocol)
-        working-directory: node
         run: cargo test -p zerox1-protocol
         env:
           CARGO_TERM_COLOR: always
 
       - name: cargo clippy
-        working-directory: node
         run: cargo clippy --workspace -- -D warnings
         env:
           CARGO_TERM_COLOR: always

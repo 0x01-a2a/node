@@ -10,6 +10,7 @@ use zerox1_protocol::constants::{
 /// Used for local decisions and UI display only — not authoritative.
 #[derive(Debug, Clone, Default)]
 pub struct ReputationVector {
+    #[allow(dead_code)]
     pub agent_id:          [u8; 32],
     /// Reliability / task completion quality.
     pub reliability_score: i64,
@@ -38,6 +39,7 @@ impl ReputationTracker {
         self.scores.get(agent_id)
     }
 
+    #[allow(dead_code)]
     pub fn all(&self) -> impl Iterator<Item = &ReputationVector> {
         self.scores.values()
     }
@@ -113,6 +115,7 @@ impl ReputationTracker {
         }
     }
 
+    #[allow(dead_code)]
     pub fn current_epoch(&self) -> u64 {
         self.current_epoch
     }

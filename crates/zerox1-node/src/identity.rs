@@ -18,6 +18,7 @@ pub struct AgentIdentity {
 }
 
 impl AgentIdentity {
+    #[allow(dead_code)]
     pub fn generate() -> Self {
         let signing_key = SigningKey::generate(&mut OsRng);
         Self::from_signing_key(signing_key, None)
@@ -68,6 +69,7 @@ impl AgentIdentity {
         }
     }
 
+    #[allow(dead_code)]
     pub fn peer_id(&self) -> libp2p::PeerId {
         self.libp2p_keypair.public().to_peer_id()
     }

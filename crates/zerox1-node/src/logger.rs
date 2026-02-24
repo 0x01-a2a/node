@@ -69,15 +69,16 @@ impl EnvelopeLogger {
         Ok(leaves)
     }
 
-    pub fn leaf_hashes(&self) -> &[[u8; 32]] { &self.leaf_hashes }
-    pub fn message_count(&self) -> u32       { self.msg_count }
-    pub fn epoch(&self) -> u64               { self.epoch }
+    #[allow(dead_code)] pub fn leaf_hashes(&self) -> &[[u8; 32]] { &self.leaf_hashes }
+    #[allow(dead_code)] pub fn message_count(&self) -> u32       { self.msg_count }
+    #[allow(dead_code)] pub fn epoch(&self) -> u64               { self.epoch }
 
     fn epoch_path(&self, epoch: u64) -> PathBuf {
         self.log_dir.join(format!("zerox1-epoch-{epoch:06}.cbor"))
     }
 
     /// Read the log file for a past epoch and return all CBOR buffers.
+    #[allow(dead_code)]
     pub fn read_epoch_log(log_dir: &Path, epoch: u64) -> Result<Vec<Vec<u8>>> {
         let path = log_dir.join(format!("zerox1-epoch-{epoch:06}.cbor"));
         let data = std::fs::read(&path)?;

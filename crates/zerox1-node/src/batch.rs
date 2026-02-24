@@ -100,6 +100,7 @@ impl BatchAccumulator {
         self.tasks_completed += 1;
     }
 
+    #[allow(dead_code)]
     pub fn record_verdict_sent(&mut self) {
         self.notarizations += 1;
     }

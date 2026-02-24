@@ -10,6 +10,7 @@ const MAX_PEERS: usize = 10_000;
 const MAX_PENDING_KEYS: usize = 200;
 
 /// Per-peer cached state for envelope validation.
+#[derive(Default)]
 pub struct PeerEntry {
     /// Last validated nonce from this sender (replay protection).
     pub last_nonce: u64,
@@ -31,18 +32,6 @@ pub struct PeerEntry {
     pub last_active_epoch: u64,
 }
 
-impl Default for PeerEntry {
-    fn default() -> Self {
-        Self {
-            last_nonce: 0,
-            verifying_key: None,
-            peer_id: None,
-            sati_status: None,
-            lease_status: None,
-            last_active_epoch: 0,
-        }
-    }
-}
 
 /// Thread-local in-memory peer state map.
 pub struct PeerStateMap {
@@ -119,6 +108,7 @@ impl PeerStateMap {
         self.by_agent_id.get(agent_id)?.peer_id
     }
 
+    #[allow(dead_code)]
     pub fn agent_id_for_peer(&self, peer_id: &PeerId) -> Option<[u8; 32]> {
         self.peer_to_agent.get(peer_id).copied()
     }

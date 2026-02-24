@@ -4,6 +4,7 @@
 //!   - Deriving batch PDA and challenge PDA addresses
 //!   - Building and submitting `submit_challenge` instructions (USDC, via Kora or direct)
 //!   - Merkle proof construction from the local envelope log
+#![allow(dead_code)]
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use sha2::{Digest, Sha256};
@@ -12,7 +13,7 @@ use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     message::Message,
     pubkey::Pubkey,
-    signature::{Keypair, Signature, Signer},
+    signature::{Keypair, Signature},
     transaction::Transaction,
 };
 
@@ -316,7 +317,7 @@ pub fn build_merkle_proof(leaves: &[[u8; 32]], leaf_index: usize) -> Vec<[u8; 32
     let mut idx = leaf_index;
 
     while layer.len() > 1 {
-        let sibling_idx = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
+        let sibling_idx = if idx.is_multiple_of(2) { idx + 1 } else { idx - 1 };
         proof.push(layer[sibling_idx]);
 
         let mut next = Vec::with_capacity(layer.len() / 2);

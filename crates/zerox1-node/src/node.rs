@@ -352,10 +352,7 @@ impl Zx01Node {
         if self.dev_mode {
             return true;
         }
-        match self.peer_states.lease_status(agent_id) {
-            Some(false) => false,
-            _ => true,
-        }
+        !matches!(self.peer_states.lease_status(agent_id), Some(false))
     }
 
     // ========================================================================
@@ -425,10 +422,7 @@ impl Zx01Node {
     /// In prod mode: true only if SATI status is confirmed `Some(true)` or
     ///               still `None` (not yet checked — optimistic until BEACON fires check).
     fn sati_gate_allows(&self, agent_id: &[u8; 32]) -> bool {
-        match self.peer_states.sati_status(agent_id) {
-            Some(false) if !self.dev_mode => false,
-            _ => true,
-        }
+        !matches!(self.peer_states.sati_status(agent_id), Some(false) if !self.dev_mode)
     }
 
     // ========================================================================

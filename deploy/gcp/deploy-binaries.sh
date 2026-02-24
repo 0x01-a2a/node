@@ -1,77 +1,119 @@
 #!/usr/bin/env bash
-# Copy compiled binaries to all GCP instances and start/restart services.
-#
-# Run from the repo root after building:
-#   cargo build --release -p zerox1-node -p zerox1-aggregator
+# Deploy zerox1-node, zerox1-aggregator, and Kora to the genesis node.
+# Downloads node + aggregator binaries from GitHub releases.
+# Builds Kora from source on the VM.
 #
 # Usage:
-#   ./deploy/gcp/deploy-binaries.sh
+#   RELEASE=v0.1.3 ./deploy/gcp/deploy-binaries.sh
+#   (defaults to latest release if RELEASE is unset)
 
 set -euo pipefail
 
-NODE_BIN="target/release/zerox1-node"
-AGG_BIN="target/release/zerox1-aggregator"
+INSTANCE="zerox1-genesis"
+ZONE="us-central1-a"
+GITHUB_REPO="zerox1/node"
+RELEASE="${RELEASE:-latest}"
 
-if [ ! -f "$NODE_BIN" ]; then
-  echo "ERROR: $NODE_BIN not found. Run: cd node && cargo build --release -p zerox1-node"
-  exit 1
+if [ "$RELEASE" = "latest" ]; then
+  RELEASE=$(curl -s "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" \
+    | grep '"tag_name"' | cut -d'"' -f4)
 fi
 
-declare -A INSTANCES=(
-  ["zerox1-bootstrap-1"]="us-east1-b"
-  ["zerox1-bootstrap-2"]="europe-west3-a"
-  ["zerox1-bootstrap-3"]="asia-southeast1-b"
-)
+echo "Deploying $RELEASE to $INSTANCE..."
+echo ""
 
-# ── Deploy zerox1-node to all bootstrap instances ──────────────────────────────
-for NAME in "${!INSTANCES[@]}"; do
-  ZONE="${INSTANCES[$NAME]}"
-  echo "Deploying zerox1-node to $NAME ($ZONE)..."
+# ── Upload systemd units ─────────────────────────────────────────────────────
+echo "Uploading systemd units..."
+gcloud compute scp deploy/systemd/zerox1-node.service \
+  "${INSTANCE}:/tmp/zerox1-node.service" --zone="$ZONE"
+gcloud compute scp deploy/systemd/zerox1-aggregator.service \
+  "${INSTANCE}:/tmp/zerox1-aggregator.service" --zone="$ZONE"
+gcloud compute scp deploy/systemd/kora.service \
+  "${INSTANCE}:/tmp/kora.service" --zone="$ZONE"
 
-  gcloud compute scp "$NODE_BIN" "${NAME}:/opt/zerox1/bin/zerox1-node" \
-    --zone="$ZONE"
+# ── Download + install binaries, build Kora, start services ─────────────────
+gcloud compute ssh "$INSTANCE" --zone="$ZONE" -- sudo bash -s <<REMOTE
+  set -euo pipefail
 
-  gcloud compute scp "deploy/systemd/zerox1-node.service" \
-    "${NAME}:/etc/systemd/system/zerox1-node.service" \
-    --zone="$ZONE"
+  RELEASE="${RELEASE}"
+  REPO="${GITHUB_REPO}"
 
-  gcloud compute ssh "$NAME" --zone="$ZONE" -- bash -s <<'REMOTE'
-    chmod +x /opt/zerox1/bin/zerox1-node
-    systemctl daemon-reload
-    systemctl enable zerox1-node
-    systemctl restart zerox1-node
-    echo "zerox1-node status:"
-    systemctl is-active zerox1-node
+  echo "==> Downloading zerox1-node \$RELEASE..."
+  curl -fsSL "https://github.com/\${REPO}/releases/download/\${RELEASE}/zerox1-node-linux-x64" \
+    -o /opt/zerox1/bin/zerox1-node
+  chmod +x /opt/zerox1/bin/zerox1-node
+
+  echo "==> Downloading zerox1-aggregator \$RELEASE..."
+  curl -fsSL "https://github.com/\${REPO}/releases/download/\${RELEASE}/zerox1-aggregator-linux-x64" \
+    -o /opt/zerox1/bin/zerox1-aggregator
+  chmod +x /opt/zerox1/bin/zerox1-aggregator
+
+  # ── Build Kora from source ─────────────────────────────────────────────────
+  if [ ! -f /opt/zerox1/bin/kora ]; then
+    echo "==> Building Kora from source (this takes a few minutes)..."
+    export PATH="\$HOME/.cargo/bin:\$PATH"
+    git clone --depth=1 https://github.com/helius-labs/kora.git /tmp/kora-src
+    cd /tmp/kora-src
+    cargo build --release
+    cp target/release/kora /opt/zerox1/bin/kora
+    chmod +x /opt/zerox1/bin/kora
+    rm -rf /tmp/kora-src
+    echo "==> Kora built and installed."
+  else
+    echo "==> Kora already installed, skipping build."
+  fi
+
+  # ── Write Kora config ──────────────────────────────────────────────────────
+  cat > /etc/zerox1/kora.toml <<KORACFG
+[server]
+port = 8080
+
+[solana]
+rpc_url = "https://api.devnet.solana.com"
+fee_payer_keypair = "/var/lib/zerox1/kora-wallet.json"
+
+[policy]
+# Program IDs allowed to be sponsored by Kora
+allowed_programs = [
+  "3gXhgBLsVYVQkntuVcPdiDe2gRxbSt2CGFJKriA8q9bA",  # behavior-log
+  "9g4RMQvBBVCppUc9C3Vjk2Yn3vhHzDFb8RkVm8a1WmUk",  # lease
+  "KncUkaiDtvaLJRDfXDmPXKmBYnVe6m3MKBawZsf6xsj",   # challenge
+  "CmtDveNpCXNJePa7pCLi7vCPeuNmWnfqq2L2YGiG7YD4",  # stake-lock
+]
+# Token mints allowed (USDC only)
+allowed_tokens = [
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+]
+# Max SOL fee per transaction
+max_fee_lamports = 100000
+KORACFG
+  chmod 600 /etc/zerox1/kora.toml
+
+  # ── Install systemd units ──────────────────────────────────────────────────
+  cp /tmp/zerox1-node.service        /etc/systemd/system/
+  cp /tmp/zerox1-aggregator.service  /etc/systemd/system/
+  cp /tmp/kora.service               /etc/systemd/system/
+
+  systemctl daemon-reload
+
+  # ── Start/restart services (order: kora first, then node) ─────────────────
+  echo "==> Starting services..."
+  systemctl enable kora zerox1-aggregator zerox1-node
+  systemctl restart kora
+  sleep 2
+  systemctl restart zerox1-aggregator
+  sleep 1
+  systemctl restart zerox1-node
+
+  echo ""
+  echo "Service status:"
+  systemctl is-active kora              && echo "  kora:               active" || echo "  kora:               FAILED"
+  systemctl is-active zerox1-aggregator && echo "  zerox1-aggregator:  active" || echo "  zerox1-aggregator:  FAILED"
+  systemctl is-active zerox1-node       && echo "  zerox1-node:        active" || echo "  zerox1-node:        FAILED"
 REMOTE
-
-  echo "  Done: $NAME"
-done
-
-# ── Deploy zerox1-aggregator to bootstrap-1 ───────────────────────────────────
-if [ -f "$AGG_BIN" ]; then
-  echo "Deploying zerox1-aggregator to zerox1-bootstrap-1..."
-
-  gcloud compute scp "$AGG_BIN" \
-    "zerox1-bootstrap-1:/opt/zerox1/bin/zerox1-aggregator" \
-    --zone="us-east1-b"
-
-  gcloud compute scp "deploy/systemd/zerox1-aggregator.service" \
-    "zerox1-bootstrap-1:/etc/systemd/system/zerox1-aggregator.service" \
-    --zone="us-east1-b"
-
-  gcloud compute ssh "zerox1-bootstrap-1" --zone="us-east1-b" -- bash -s <<'REMOTE'
-    chmod +x /opt/zerox1/bin/zerox1-aggregator
-    mkdir -p /var/lib/zerox1
-    systemctl daemon-reload
-    systemctl enable zerox1-aggregator
-    systemctl restart zerox1-aggregator
-    echo "zerox1-aggregator status:"
-    systemctl is-active zerox1-aggregator
-REMOTE
-
-  echo "  Done: zerox1-aggregator"
-fi
 
 echo ""
-echo "All done. Get bootstrap multiaddrs with:"
+echo "Deployed $RELEASE to $INSTANCE."
+echo ""
+echo "Wait ~10s for the node to start, then get the bootstrap multiaddr:"
 echo "  ./deploy/gcp/get-bootstrap-addrs.sh"

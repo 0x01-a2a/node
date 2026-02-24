@@ -40,7 +40,7 @@ pub struct Config {
     pub no_default_bootstrap: bool,
 
     /// Solana RPC endpoint for slot queries and batch submission.
-    #[arg(long, default_value = "https://api.mainnet-beta.solana.com")]
+    #[arg(long, default_value = "https://api.devnet.solana.com")]
     pub rpc_url: String,
 
     /// SATI mint address (hex, 32 bytes) = this agent's ID.

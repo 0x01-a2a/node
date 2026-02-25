@@ -566,7 +566,7 @@ impl Db {
         let hv_threshold = 1.0_f64;
         let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
             let mean_hv: f64 = row.get(2)?;
-            let score = (1.0 - (mean_hv / hv_threshold)).max(0.0).min(1.0);
+            let score = (1.0 - (mean_hv / hv_threshold)).clamp(0.0, 1.0);
             Ok(VerifierConcentrationEntry {
                 agent_id:               row.get(0)?,
                 epochs_sampled:         row.get::<_, i64>(1)? as u32,
@@ -980,7 +980,8 @@ impl ReputationStore {
     /// Flagged = latest anomaly > 0.55.  Clean = latest anomaly < 0.10.
     pub fn calibrated_params(&self) -> CalibratedParams {
         let db = self.db.lock().unwrap();
-        let rows: Vec<(f64, Option<f64>, Option<f64>, Option<f64>, Option<f64>)> =
+        type EntropyRow = (f64, Option<f64>, Option<f64>, Option<f64>, Option<f64>);
+        let rows: Vec<EntropyRow> =
             if let Some(ref conn) = *db {
                 conn.0.prepare(
                     "SELECT anomaly, ht, hb, hs, hv FROM entropy_vectors

@@ -46,6 +46,18 @@ ENV
   echo "Kora wallet: \$PUBKEY"
   echo "Fund this address with devnet SOL at https://faucet.solana.com"
 
+  # Generate Solana keypair for Challenger Bot
+  CHALLENGER_KEY="/var/lib/zerox1/challenger-keypair.json"
+  if [ ! -f "\$CHALLENGER_KEY" ]; then
+    solana-keygen new --no-bip39-passphrase --outfile "\$CHALLENGER_KEY" --force
+    chmod 600 "\$CHALLENGER_KEY"
+    chown zerox1:zerox1 "\$CHALLENGER_KEY" 2>/dev/null || true
+  fi
+
+  CHALLENGER_PUBKEY=\$(solana-keygen pubkey "\$CHALLENGER_KEY" 2>/dev/null || echo "install solana CLI to get pubkey")
+  echo "Challenger wallet: \$CHALLENGER_PUBKEY"
+  echo "Fund this address with devnet SOL and USDC too!"
+
   echo "Secrets written to /etc/zerox1/env"
 REMOTE
 

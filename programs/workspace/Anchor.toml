@@ -7,8 +7,8 @@ skip-lint = false
 
 [programs.localnet]
 behavior_log = "3gXhgBLsVYVQkntuVcPdiDe2gRxbSt2CGFJKriA8q9bA"
-lease        = "9g4RMQvBBVCppUc9C3Vjk2Yn3vhHzDFb8RkVm8a1WmUk"
-challenge    = "KncUkaiDtvaLJRDfXDmPXKmBYnVe6m3MKBawZsf6xsj"
+lease        = "6uMjFPETQEvALjbWUorc5pBZ7FagNzmr8wxovH89bgEi"
+challenge    = "6tVCJmogJghQMEMRhvk4qrUoT6JXPPDebUwmRHXTtygj"
 stake_lock   = "CmtDveNpCXNJePa7pCLi7vCPeuNmWnfqq2L2YGiG7YD4"
 
 [registry]

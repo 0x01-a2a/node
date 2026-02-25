@@ -4,7 +4,7 @@ use anchor_spl::{
     token::{self, Mint, Token, TokenAccount, Transfer},
 };
 
-declare_id!("KncUkaiDtvaLJRDfXDmPXKmBYnVe6m3MKBawZsf6xsj");
+declare_id!("6tVCJmogJghQMEMRhvk4qrUoT6JXPPDebUwmRHXTtygj");
 
 /// Behavior-log program ID — batch accounts must be owned by this program.
 const BEHAVIOR_LOG_PROGRAM_ID: Pubkey =
@@ -13,6 +13,10 @@ const BEHAVIOR_LOG_PROGRAM_ID: Pubkey =
 /// Byte offset of `submitted_slot` in BatchAccount raw data.
 /// Layout: 8 disc + 32 agent_id + 8 epoch_number + 32 log_merkle_root + 32 batch_hash = 112
 const BATCH_SUBMITTED_SLOT_OFFSET: usize = 112;
+
+/// Byte offset of `log_merkle_root` in BatchAccount raw data.
+/// Layout: 8 disc + 32 agent_id + 8 epoch_number = 48
+const BATCH_MERKLE_ROOT_OFFSET: usize = 48;
 
 // ============================================================================
 // Challenge Program (doc 5, §10.4)
@@ -104,6 +108,7 @@ pub mod challenge {
         challenge.epoch_number            = args.epoch_number;
         challenge.challenger              = ctx.accounts.challenger.key();
         challenge.entry_hash              = entry_hash;
+        challenge.leaf_index              = args.leaf_index;
         challenge.merkle_proof_len        = args.merkle_proof.len() as u16;
         challenge.resolved                = false;
         challenge.succeeded               = false;
@@ -122,12 +127,17 @@ pub mod challenge {
         Ok(())
     }
 
-    /// Resolve a challenge. Permissionless — anyone can call.
+    /// Resolve a challenge.
     ///
-    /// v1: resolver submits proof_valid + contradicts_batch flags off-chain.
+    /// Verifies the Merkle inclusion proof on-chain against the batch's
+    /// log_merkle_root. Also verifies the contradicting_entry matches the
+    /// entry_hash stored at submission time (prevents entry substitution).
     ///
-    /// On success: challenger's stake refunded from vault; agent slash handled
-    ///             by StakeLock CPI in v2 (event emitted for now).
+    /// `contradicts_batch` is still caller-asserted (v1 — off-chain contradiction
+    /// detection). On-chain we prove the entry IS in the batch; contradiction
+    /// verification is the next step.
+    ///
+    /// On success: challenger's stake refunded from vault.
     /// On failure: challenger's stake transferred to protocol treasury.
     pub fn resolve_challenge(
         ctx: Context<ResolveChallenge>,
@@ -135,7 +145,6 @@ pub mod challenge {
     ) -> Result<()> {
         let clock = Clock::get()?;
 
-        // Capture all values before mutable borrow.
         require!(
             !ctx.accounts.challenge_account.resolved,
             ChallengeError::AlreadyResolved,
@@ -145,13 +154,46 @@ pub mod challenge {
             ChallengeError::TooEarlyToResolve,
         );
 
+        // Verify the contradicting entry matches the hash stored at submission.
+        let entry_hash =
+            anchor_lang::solana_program::keccak::hash(&args.contradicting_entry).to_bytes();
+        require!(
+            entry_hash == ctx.accounts.challenge_account.entry_hash,
+            ChallengeError::EntryHashMismatch,
+        );
+
+        // Read log_merkle_root from BatchAccount raw bytes at offset 48.
+        // Layout: 8 disc + 32 agent_id + 8 epoch_number = 48.
+        let log_merkle_root: [u8; 32] = {
+            let data = ctx.accounts.batch_account.try_borrow_data()?;
+            require!(
+                data.len() >= BATCH_MERKLE_ROOT_OFFSET + 32,
+                ChallengeError::InvalidBatchAccount,
+            );
+            data[BATCH_MERKLE_ROOT_OFFSET..BATCH_MERKLE_ROOT_OFFSET + 32]
+                .try_into()
+                .unwrap()
+        };
+
+        // Verify Merkle inclusion proof on-chain.
+        let proof_valid = verify_inclusion(
+            &args.contradicting_entry,
+            &args.merkle_proof,
+            ctx.accounts.challenge_account.leaf_index,
+            log_merkle_root,
+        );
+        require!(proof_valid, ChallengeError::InvalidMerkleProof);
+
+        // Capture values before mutable borrow.
         let challenge_key        = ctx.accounts.challenge_account.key();
         let vault_authority_bump = ctx.accounts.challenge_account.vault_authority_bump;
         let agent_id             = ctx.accounts.challenge_account.agent_id;
         let epoch_number         = ctx.accounts.challenge_account.epoch_number;
         let challenger           = ctx.accounts.challenge_account.challenger;
         let vault_balance        = ctx.accounts.challenge_vault.amount;
-        let succeeded            = args.proof_valid && args.contradicts_batch;
+
+        // Succeeded = Merkle proof valid (verified above) AND entry contradicts batch.
+        let succeeded = args.contradicts_batch;
 
         ctx.accounts.challenge_account.resolved  = true;
         ctx.accounts.challenge_account.succeeded = succeeded;
@@ -214,6 +256,38 @@ pub mod challenge {
 
 /// Minimum stake — used for slash amount reference in events.
 const MIN_STAKE_USDC: u64 = 10_000_000; // 10 USDC
+
+/// Verify Merkle inclusion of `entry` at `leaf_index` against `root`.
+///
+/// Leaf hash = keccak256(entry).
+/// Internal hashes = keccak256(left || right), left-child when index is even.
+/// Tree is padded to next power-of-two with zero hashes (same as protocol crate).
+fn verify_inclusion(
+    entry:      &[u8],
+    proof:      &[[u8; 32]],
+    leaf_index: u64,
+    root:       [u8; 32],
+) -> bool {
+    let leaf_hash =
+        anchor_lang::solana_program::keccak::hash(entry).to_bytes();
+    let mut current = leaf_hash;
+    let mut idx     = leaf_index as usize;
+
+    for sibling in proof {
+        let mut combined = [0u8; 64];
+        if idx % 2 == 0 {
+            combined[..32].copy_from_slice(&current);
+            combined[32..].copy_from_slice(sibling);
+        } else {
+            combined[..32].copy_from_slice(sibling);
+            combined[32..].copy_from_slice(&current);
+        }
+        current = anchor_lang::solana_program::keccak::hash(&combined).to_bytes();
+        idx /= 2;
+    }
+
+    current == root
+}
 
 // ============================================================================
 // Accounts
@@ -324,6 +398,7 @@ pub struct ResolveChallenge<'info> {
     #[account(mut)]
     pub treasury_usdc: Account<'info, TokenAccount>,
 
+    /// Batch account — log_merkle_root read from raw bytes for proof verification.
     /// CHECK: Batch account used as key for challenge PDA seed derivation.
     pub batch_account: UncheckedAccount<'info>,
 
@@ -342,6 +417,7 @@ pub struct ChallengeAccount {
     pub epoch_number:          u64,
     pub challenger:            Pubkey,
     pub entry_hash:            [u8; 32],
+    pub leaf_index:            u64,
     pub merkle_proof_len:      u16,
     pub resolved:              bool,
     pub succeeded:             bool,
@@ -351,8 +427,8 @@ pub struct ChallengeAccount {
 }
 
 impl ChallengeAccount {
-    /// 8 + 32 + 8 + 32 + 32 + 2 + 1 + 1 + 8 + 1 + 1 = 126 bytes
-    pub const SIZE: usize = 8 + 32 + 8 + 32 + 32 + 2 + 1 + 1 + 8 + 1 + 1;
+    /// 8 + 32 + 8 + 32 + 32 + 8 + 2 + 1 + 1 + 8 + 1 + 1 = 134 bytes
+    pub const SIZE: usize = 8 + 32 + 8 + 32 + 32 + 8 + 2 + 1 + 1 + 8 + 1 + 1;
 }
 
 // ============================================================================
@@ -363,18 +439,22 @@ impl ChallengeAccount {
 pub struct SubmitChallengeArgs {
     pub agent_id:            [u8; 32],
     pub epoch_number:        u64,
-    /// Full canonical log entry bytes (signed envelope) contradicting the batch.
+    /// Full canonical log entry bytes (signed CBOR envelope) contradicting the batch.
     pub contradicting_entry: Vec<u8>,
     /// Merkle sibling hashes from entry leaf to log_merkle_root.
     pub merkle_proof:        Vec<[u8; 32]>,
+    /// 0-based leaf index of the entry in the batch's Merkle tree.
+    pub leaf_index:          u64,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct ResolveChallengeArgs {
-    /// True if merkle proof is valid (entry is in the log).
-    pub proof_valid:       bool,
-    /// True if entry contradicts the self-reported batch arrays.
-    pub contradicts_batch: bool,
+    /// Full canonical log entry bytes — must match entry_hash stored at submission.
+    pub contradicting_entry: Vec<u8>,
+    /// Merkle sibling hashes from entry leaf to log_merkle_root.
+    pub merkle_proof:        Vec<[u8; 32]>,
+    /// True if the entry contradicts the self-reported batch arrays (v1: caller-asserted).
+    pub contradicts_batch:   bool,
 }
 
 // ============================================================================
@@ -419,4 +499,8 @@ pub enum ChallengeError {
     TooEarlyToResolve,
     #[msg("Batch account data is invalid or too short")]
     InvalidBatchAccount,
+    #[msg("Merkle inclusion proof is invalid — entry not found in batch log")]
+    InvalidMerkleProof,
+    #[msg("Contradicting entry does not match the hash recorded at submission")]
+    EntryHashMismatch,
 }

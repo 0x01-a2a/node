@@ -81,6 +81,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/params/calibrated",                  get(api::get_calibrated_params))
         .route("/system/sri",                         get(api::get_sri_status))
         .route("/stake/required/{agent_id}",          get(api::get_required_stake))
+        .route("/graph/flow",                         get(api::get_flow_graph))
+        .route("/graph/clusters",                     get(api::get_flow_clusters))
+        .route("/graph/agent/{agent_id}",             get(api::get_agent_flow))
+        .route("/epochs/{agent_id}/{epoch}/envelopes", get(api::get_epoch_envelopes))
         .with_state(state);
 
     tracing::info!("zerox1-aggregator listening on {}", config.listen);

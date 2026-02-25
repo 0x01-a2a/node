@@ -10,8 +10,11 @@
 //! operator (or future automated signer) can use to submit challenge TXs.
 
 mod monitor;
+mod submit;
 
 use clap::Parser;
+use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_sdk::signature::{read_keypair_file, Keypair};
 
 // ============================================================================
 // CLI
@@ -57,6 +60,18 @@ pub struct Cli {
     /// Maximum agents to pull from the anomaly leaderboard per cycle.
     #[arg(long, default_value_t = 100)]
     pub leaderboard_limit: usize,
+
+    /// RPC URL for submitting challenge transactions.
+    #[arg(long, default_value = "https://api.devnet.solana.com", env = "ZX01_RPC_URL")]
+    pub rpc_url: String,
+
+    /// Path to the challenger's Solana keypair file for paying gas and staking USDC.
+    #[arg(long, env = "ZX01_CHALLENGER_KEYPAIR")]
+    pub keypair: Option<std::path::PathBuf>,
+
+    /// Auto-submit on-chain challenges for highly anomalous agents. (Requires --keypair)
+    #[arg(long)]
+    pub auto_submit: bool,
 }
 
 // ============================================================================
@@ -89,8 +104,23 @@ async fn main() -> anyhow::Result<()> {
     let client  = reqwest::Client::new();
     let mut mon = monitor::AgentMonitor::new(cli.anomaly_threshold, cli.consecutive_epochs);
 
+    let mut keypair_signer: Option<Keypair> = None;
+    if cli.auto_submit {
+        if let Some(ref path) = cli.keypair {
+            tracing::info!("Auto-submit enabled. Loading keypair from {}", path.display());
+            keypair_signer = Some(
+                read_keypair_file(path).map_err(|e| anyhow::anyhow!("Failed to read keypair: {}", e))?
+            );
+        } else {
+            tracing::error!("--auto-submit requires --keypair path");
+            std::process::exit(1);
+        }
+    }
+
+    let rpc_client = RpcClient::new(cli.rpc_url.clone());
+    
     loop {
-        if let Err(e) = monitor::run_cycle(&cli, &client, &mut mon).await {
+        if let Err(e) = monitor::run_cycle(&cli, &client, &mut mon, &rpc_client, keypair_signer.as_ref()).await {
             tracing::warn!("Poll cycle failed: {e}");
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(cli.poll_interval_secs)).await;

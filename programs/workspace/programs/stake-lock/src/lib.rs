@@ -26,7 +26,7 @@ pub const MIN_STAKE_USDC: u64 = 10_000_000;
 pub const UNLOCK_DELAY_SLOTS: u64 = 432_000;
 /// Challenge program ID — only this program can call slash().
 const CHALLENGE_PROGRAM_ID: Pubkey =
-    pubkey!("KncUkaiDtvaLJRDfXDmPXKmBYnVe6m3MKBawZsf6xsj");
+    pubkey!("6tVCJmogJghQMEMRhvk4qrUoT6JXPPDebUwmRHXTtygj");
 /// BehaviorLog program ID — AgentBatchRegistry accounts must be owned by this.
 const BEHAVIOR_LOG_PROGRAM_ID: Pubkey =
     pubkey!("3gXhgBLsVYVQkntuVcPdiDe2gRxbSt2CGFJKriA8q9bA");

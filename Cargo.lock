@@ -1962,9 +1962,9 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.15.5"
+version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
+checksum = "bf151400ff0baff5465007dd2f3e717f3fe502074ca563069ce3a6629d07b289"
 dependencies = [
  "allocator-api2",
  "equivalent",
@@ -3224,7 +3224,7 @@ version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
 dependencies = [
- "hashbrown 0.15.5",
+ "hashbrown 0.15.2",
 ]
 
 [[package]]
@@ -8383,11 +8383,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "clap",
  "hex",
  "rusqlite",
  "serde",
  "serde_json",
+ "tiny-keccak",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -8399,12 +8401,18 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "hex",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "solana-client",
+ "solana-rpc-client",
+ "solana-sdk",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zerox1-protocol",
 ]
 
 [[package]]

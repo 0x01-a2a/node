@@ -24,7 +24,7 @@ use crate::{identity::AgentIdentity, kora::KoraClient, lease::get_ata};
 // ============================================================================
 
 /// Challenge program ID (doc 5, §10.4).
-const CHALLENGE_PROGRAM_ID_STR: &str = "KncUkaiDtvaLJRDfXDmPXKmBYnVe6m3MKBawZsf6xsj";
+const CHALLENGE_PROGRAM_ID_STR: &str = "6tVCJmogJghQMEMRhvk4qrUoT6JXPPDebUwmRHXTtygj";
 /// Behavior-log program ID — needed to derive batch PDAs.
 const BEHAVIOR_LOG_PROGRAM_ID_STR: &str = "3gXhgBLsVYVQkntuVcPdiDe2gRxbSt2CGFJKriA8q9bA";
 /// USDC mainnet mint.

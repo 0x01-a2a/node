@@ -16,5 +16,7 @@ anyhow     = { workspace = true }
 tracing    = { workspace = true }
 tracing-subscriber = { workspace = true }
 hex        = { workspace = true }
+base64     = { workspace = true }
+tiny-keccak = { workspace = true }
 clap       = { version = "4", features = ["derive", "env"] }
 rusqlite   = { version = "0.32", features = ["bundled"] }

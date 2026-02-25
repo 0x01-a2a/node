@@ -322,3 +322,79 @@ pub async fn get_required_stake(
 ) -> impl IntoResponse {
     Json(state.store.required_stake(&agent_id))
 }
+
+// ============================================================================
+// GAP-02: Capital flow graph
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct FlowParams {
+    /// Look-back window — same values as timeseries: "1h", "24h", "7d", "30d".
+    #[serde(default = "default_flow_window")]
+    window: String,
+    #[serde(default = "default_flow_limit")]
+    limit: usize,
+}
+
+fn default_flow_window() -> String { "30d".to_string() }
+fn default_flow_limit()  -> usize  { 500 }
+
+/// GET /graph/flow[?window=30d&limit=500]
+///
+/// Directed capital flow edges: (from, to, positive_flow, interaction_count).
+/// Pairs with high mutual flow are the primary Sybil signal.
+pub async fn get_flow_graph(
+    State(state):  State<AppState>,
+    Query(params): Query<FlowParams>,
+) -> impl IntoResponse {
+    let window_secs = parse_window(&params.window);
+    let limit       = params.limit.min(2_000);
+    Json(state.store.capital_flow_edges(window_secs, limit))
+}
+
+/// GET /graph/clusters[?window=30d]
+///
+/// Ownership clusters detected via mutual positive-feedback analysis.
+/// Each cluster's `c_coefficient` feeds β₃ in the stake multiplier.
+pub async fn get_flow_clusters(
+    State(state):  State<AppState>,
+    Query(params): Query<FlowParams>,
+) -> impl IntoResponse {
+    let window_secs = parse_window(&params.window);
+    Json(state.store.flow_clusters(window_secs))
+}
+
+/// GET /graph/agent/{agent_id}[?window=30d]
+///
+/// Graph position for one agent: cluster membership, C coefficient,
+/// concentration ratio, and top counterparties.
+pub async fn get_agent_flow(
+    State(state):   State<AppState>,
+    Path(agent_id): Path<String>,
+    Query(params):  Query<FlowParams>,
+) -> impl IntoResponse {
+    let window_secs = parse_window(&params.window);
+    Json(state.store.agent_flow_info(&agent_id, window_secs))
+}
+
+// ============================================================================
+// GAP-07: Raw envelope retrieval for Merkle proof construction
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct EpochPath {
+    agent_id: String,
+    epoch:    u64,
+}
+
+/// GET /epochs/{agent_id}/{epoch}/envelopes
+///
+/// Returns ordered raw CBOR envelope bytes for a specific agent epoch.
+/// Used by the challenger bot to construct Merkle inclusion proofs.
+/// Up to 1000 entries, ordered by sequence (node's log order).
+pub async fn get_epoch_envelopes(
+    State(state):  State<AppState>,
+    Path(params):  Path<EpochPath>,
+) -> impl IntoResponse {
+    Json(state.store.epoch_envelopes(&params.agent_id, params.epoch))
+}

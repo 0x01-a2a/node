@@ -4,7 +4,11 @@ use anchor_spl::{
     token::{self, Mint, Token, TokenAccount, Transfer},
 };
 
-declare_id!("9g4RMQvBBVCppUc9C3Vjk2Yn3vhHzDFb8RkVm8a1WmUk");
+declare_id!("6uMjFPETQEvALjbWUorc5pBZ7FagNzmr8wxovH89bgEi");
+
+/// Protocol treasury wallet — receives all lease fees.
+/// Replace with the actual treasury pubkey before mainnet deploy.
+pub const TREASURY_PUBKEY: Pubkey = pubkey!("qw4hzfV7UUXTrNh3hiS9Q8KSPMXWUusNoyFKLvtcMMX");
 
 // ============================================================================
 // Lease Program (doc 5, §10.3)
@@ -46,12 +50,12 @@ pub mod lease {
         lease.deactivated        = false;
         lease.bump               = ctx.bumps.lease_account;
 
-        // Transfer 1 epoch of USDC from owner's ATA to lease vault.
+        // Transfer 1 epoch of USDC from owner's ATA to protocol treasury.
         let cpi_ctx = CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
                 from:      ctx.accounts.owner_usdc.to_account_info(),
-                to:        ctx.accounts.lease_vault.to_account_info(),
+                to:        ctx.accounts.treasury_usdc.to_account_info(),
                 authority: ctx.accounts.owner.to_account_info(),
             },
         );
@@ -81,12 +85,12 @@ pub mod lease {
             .checked_mul(args.n_epochs)
             .ok_or(LeaseError::Overflow)?;
 
-        // Transfer USDC from owner's ATA to lease vault.
+        // Transfer USDC from owner's ATA to protocol treasury.
         let cpi_ctx = CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
                 from:      ctx.accounts.owner_usdc.to_account_info(),
-                to:        ctx.accounts.lease_vault.to_account_info(),
+                to:        ctx.accounts.treasury_usdc.to_account_info(),
                 authority: ctx.accounts.owner.to_account_info(),
             },
         );
@@ -152,7 +156,7 @@ pub mod lease {
 #[derive(Accounts)]
 #[instruction(args: InitLeaseArgs)]
 pub struct InitLease<'info> {
-    /// Transaction fee payer — pays for PDA + vault ATA creation.
+    /// Transaction fee payer — pays for lease PDA creation.
     /// When using Kora: this is Kora's pubkey.
     /// When direct: same as owner.
     #[account(mut)]
@@ -181,37 +185,27 @@ pub struct InitLease<'info> {
     )]
     pub lease_account: Account<'info, LeaseAccount>,
 
-    /// Vault authority PDA — owns the vault token account.
-    /// seeds = ["lease_vault", agent_id]
-    /// CHECK: PDA used as token account authority only; holds no data.
+    /// Protocol treasury USDC ATA — receives lease fees directly.
+    /// Must be owned by TREASURY_PUBKEY.
     #[account(
-        seeds = [b"lease_vault", args.agent_id.as_ref()],
-        bump
+        mut,
+        associated_token::mint      = usdc_mint,
+        associated_token::authority = treasury,
     )]
-    pub lease_vault_authority: UncheckedAccount<'info>,
+    pub treasury_usdc: Account<'info, TokenAccount>,
 
-    /// Vault ATA — holds USDC lease payments.
-    /// Owned by lease_vault_authority.
-    #[account(
-        init,
-        payer = payer,
-        associated_token::mint = usdc_mint,
-        associated_token::authority = lease_vault_authority,
-    )]
-    pub lease_vault: Account<'info, TokenAccount>,
+    /// CHECK: verified via associated_token constraint on treasury_usdc.
+    #[account(address = TREASURY_PUBKEY)]
+    pub treasury: UncheckedAccount<'info>,
 
-    pub usdc_mint: Account<'info, Mint>,
-    pub token_program: Program<'info, Token>,
+    pub usdc_mint:                Account<'info, Mint>,
+    pub token_program:            Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
-    pub system_program: Program<'info, System>,
+    pub system_program:           Program<'info, System>,
 }
 
 #[derive(Accounts)]
 pub struct PayLease<'info> {
-    /// Transaction fee payer — could be Kora for gasless path.
-    #[account(mut)]
-    pub payer: Signer<'info>,
-
     /// Agent wallet — authorises the USDC transfer.
     #[account(mut)]
     pub owner: Signer<'info>,
@@ -219,7 +213,7 @@ pub struct PayLease<'info> {
     /// Owner's USDC ATA (source).
     #[account(
         mut,
-        associated_token::mint = usdc_mint,
+        associated_token::mint      = usdc_mint,
         associated_token::authority = owner,
     )]
     pub owner_usdc: Account<'info, TokenAccount>,
@@ -232,25 +226,22 @@ pub struct PayLease<'info> {
     )]
     pub lease_account: Account<'info, LeaseAccount>,
 
-    /// CHECK: PDA authority for vault ATA.
-    #[account(
-        seeds = [b"lease_vault", lease_account.agent_id.as_ref()],
-        bump,
-    )]
-    pub lease_vault_authority: UncheckedAccount<'info>,
-
-    /// Vault ATA (destination).
+    /// Protocol treasury USDC ATA — receives lease fees directly.
+    /// Must be owned by TREASURY_PUBKEY.
     #[account(
         mut,
-        associated_token::mint = usdc_mint,
-        associated_token::authority = lease_vault_authority,
+        associated_token::mint      = usdc_mint,
+        associated_token::authority = treasury,
     )]
-    pub lease_vault: Account<'info, TokenAccount>,
+    pub treasury_usdc: Account<'info, TokenAccount>,
 
-    pub usdc_mint: Account<'info, Mint>,
-    pub token_program: Program<'info, Token>,
+    /// CHECK: verified via associated_token constraint on treasury_usdc.
+    #[account(address = TREASURY_PUBKEY)]
+    pub treasury: UncheckedAccount<'info>,
+
+    pub usdc_mint:                Account<'info, Mint>,
+    pub token_program:            Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
-    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]

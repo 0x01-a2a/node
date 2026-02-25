@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use base64::Engine as _;
+
 use zerox1_sati_client::client::SatiClient;
 use ed25519_dalek::VerifyingKey;
 use futures::StreamExt;
@@ -837,6 +839,11 @@ impl Zx01Node {
                     self.current_epoch,
                 );
 
+                // Encode envelope to CBOR for Merkle proof support (GAP-07).
+                let raw_b64 = env.to_cbor()
+                    .ok()
+                    .map(|b| base64::engine::general_purpose::STANDARD.encode(&b));
+
                 // Push to aggregator.
                 self.push_to_aggregator(serde_json::json!({
                     "msg_type": "FEEDBACK",
@@ -848,6 +855,7 @@ impl Zx01Node {
                     "role":            fb.role,
                     "conversation_id": hex::encode(fb.conversation_id),
                     "slot":            self.current_slot,
+                    "raw_b64":         raw_b64,
                 }));
 
                 // Update reputation snapshot.

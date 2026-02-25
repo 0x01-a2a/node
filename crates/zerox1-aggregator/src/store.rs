@@ -34,6 +34,9 @@ pub struct FeedbackEvent {
     pub role:            u8,
     pub conversation_id: String,
     pub slot:            u64,
+    /// Base64-encoded raw CBOR envelope bytes — used for Merkle proof construction.
+    /// None when pushed by older node versions.
+    pub raw_b64:         Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,9 +217,172 @@ pub struct RequiredStakeResult {
     pub agent_id:            String,
     pub base_stake_usdc:     f64,
     pub current_anomaly:     f64,
+    pub c_coefficient:       f64, // ownership clustering score (0-1)
     pub beta_1:              f64,
-    pub required_stake_usdc: f64, // base * (1 + beta_1 * anomaly)
+    pub beta_3:              f64,
+    pub required_stake_usdc: f64, // base * (1 + β₁·A + β₃·C)
     pub deficit_usdc:        f64, // max(0, required - base)
+}
+
+// ============================================================================
+// Capital flow graph types (GAP-02)
+// ============================================================================
+
+/// One directed edge in the capital flow graph.
+///
+/// `positive_flow` = sum of positive scores flowing from → to over the window.
+/// High mutual positive_flow between two agents signals score inflation.
+#[derive(Debug, Clone, Serialize)]
+pub struct CapitalFlowEdge {
+    pub from_agent:        String,
+    pub to_agent:          String,
+    pub interaction_count: u32,
+    pub positive_flow:     i64,
+    pub total_abs_flow:    i64,
+    pub avg_score:         f64,
+}
+
+/// A cluster of suspected same-owner agents detected via mutual flow analysis.
+#[derive(Debug, Clone, Serialize)]
+pub struct FlowCluster {
+    pub cluster_id:        u32,
+    pub agents:            Vec<String>,
+    /// 0-1: (cluster_size - 1) / 10, capped at 1.0.
+    pub cluster_suspicion: f64,
+    /// C coefficient fed into the stake multiplier formula.
+    pub c_coefficient:     f64,
+    pub total_mutual_flow: i64,
+}
+
+/// Graph position and C coefficient for one agent.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentFlowInfo {
+    pub agent_id:             String,
+    pub cluster_id:           Option<u32>,
+    pub c_coefficient:        f64,
+    /// Fraction of total outgoing positive flow directed at the top-3 counterparties.
+    /// > 0.70 is suspicious for large networks.
+    pub concentration_ratio:  f64,
+    pub top_counterparties:   Vec<String>,
+    pub total_outgoing_flow:  i64,
+    pub unique_counterparties: u32,
+}
+
+/// One ordered CBOR envelope entry — used by GET /epochs/{agent_id}/{epoch}/envelopes.
+#[derive(Debug, Clone, Serialize)]
+pub struct EpochEnvelopeEntry {
+    pub seq:       i64,
+    pub leaf_hash: String,
+    pub bytes_b64: String,
+}
+
+// ============================================================================
+// Union-Find for clustering
+// ============================================================================
+
+struct UnionFind {
+    parent: HashMap<String, String>,
+}
+
+impl UnionFind {
+    fn new() -> Self { Self { parent: HashMap::new() } }
+
+    fn find(&mut self, x: &str) -> String {
+        if !self.parent.contains_key(x) {
+            self.parent.insert(x.to_string(), x.to_string());
+            return x.to_string();
+        }
+        // Iterative path compression.
+        let mut root = x.to_string();
+        while self.parent[&root] != root {
+            root = self.parent[&root].clone();
+        }
+        let mut cur = x.to_string();
+        while self.parent[&cur] != root {
+            let next = self.parent[&cur].clone();
+            self.parent.insert(cur, root.clone());
+            cur = next;
+        }
+        root
+    }
+
+    fn union(&mut self, a: &str, b: &str) {
+        let ra = self.find(a);
+        let rb = self.find(b);
+        if ra != rb { self.parent.insert(rb, ra); }
+    }
+}
+
+/// Build ownership clusters from capital flow edges.
+///
+/// Two agents are linked when they have mutual positive feedback with
+/// mutual_ratio > 0.5 (i.e. both sides are giving nearly equal scores,
+/// suggesting coordinated score inflation).
+fn compute_clusters_from_edges(edges: &[CapitalFlowEdge]) -> (HashMap<String, u32>, Vec<FlowCluster>) {
+    // Index edge weights for O(1) reverse lookup.
+    let mut flow_map: HashMap<(&str, &str), i64> = HashMap::new();
+    for e in edges {
+        flow_map.insert((&e.from_agent, &e.to_agent), e.positive_flow);
+    }
+
+    let mut uf = UnionFind::new();
+    // Canonically-keyed mutual flow totals to avoid double-counting.
+    let mut mutual_cache: HashMap<(String, String), i64> = HashMap::new();
+
+    for e in edges {
+        if e.positive_flow <= 0 { continue; }
+        let rev = flow_map.get(&(e.to_agent.as_str(), e.from_agent.as_str())).copied().unwrap_or(0);
+        if rev <= 0 { continue; }
+
+        let lo = e.positive_flow.min(rev);
+        let hi = e.positive_flow.max(rev);
+        if lo as f64 / hi as f64 > 0.5 {
+            uf.union(&e.from_agent, &e.to_agent);
+            // Store under canonical (alphabetically smaller) key.
+            let (ka, kb) = if e.from_agent <= e.to_agent {
+                (e.from_agent.clone(), e.to_agent.clone())
+            } else {
+                (e.to_agent.clone(), e.from_agent.clone())
+            };
+            mutual_cache.entry((ka, kb)).or_insert(lo + hi);
+        }
+    }
+
+    // Collect all nodes that appeared in any edge.
+    let all_nodes: std::collections::HashSet<&str> = edges.iter()
+        .flat_map(|e| [e.from_agent.as_str(), e.to_agent.as_str()])
+        .collect();
+
+    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+    for &node in &all_nodes {
+        let root = uf.find(node);
+        groups.entry(root).or_default().push(node.to_string());
+    }
+
+    let mut agent_cluster: HashMap<String, u32> = HashMap::new();
+    let mut clusters: Vec<FlowCluster> = vec![];
+
+    for (cid, mut members) in groups.into_values().filter(|v| v.len() >= 2).enumerate() {
+        let cid = cid as u32;
+        members.sort(); // deterministic ordering
+        let member_set: std::collections::HashSet<&str> =
+            members.iter().map(|s| s.as_str()).collect();
+        let total_flow: i64 = mutual_cache.iter()
+            .filter(|((a, b), _)| member_set.contains(a.as_str()) && member_set.contains(b.as_str()))
+            .map(|(_, &v)| v)
+            .sum();
+        let suspicion = ((members.len() - 1) as f64 / 10.0).min(1.0);
+        for m in &members { agent_cluster.insert(m.clone(), cid); }
+        clusters.push(FlowCluster {
+            cluster_id:        cid,
+            agents:            members,
+            cluster_suspicion: suspicion,
+            c_coefficient:     suspicion,
+            total_mutual_flow: total_flow,
+        });
+    }
+
+    (agent_cluster, clusters)
 }
 
 // ============================================================================
@@ -250,6 +416,17 @@ CREATE TABLE IF NOT EXISTS feedback_events (
 CREATE INDEX IF NOT EXISTS idx_fe_sender  ON feedback_events(sender);
 CREATE INDEX IF NOT EXISTS idx_fe_target  ON feedback_events(target_agent);
 CREATE INDEX IF NOT EXISTS idx_fe_ts      ON feedback_events(ts);
+
+CREATE TABLE IF NOT EXISTS raw_envelopes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id   TEXT    NOT NULL,
+    epoch      INTEGER NOT NULL,
+    seq_num    INTEGER NOT NULL,
+    ts         INTEGER NOT NULL,
+    leaf_hash  TEXT    NOT NULL,
+    bytes      BLOB    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_re_agent_epoch ON raw_envelopes(agent_id, epoch);
 
 CREATE TABLE IF NOT EXISTS entropy_vectors (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -619,6 +796,105 @@ impl Db {
         let mut rows = stmt.query_map(rusqlite::params![agent_id], |r| r.get::<_, f64>(0))?;
         rows.next().transpose()
     }
+
+    /// Capital flow edges: directed positive-feedback graph over a time window.
+    ///
+    /// Only pairs with ≥ 2 interactions are returned to reduce noise.
+    fn query_capital_flow_edges(&self, since: u64, limit: usize) -> rusqlite::Result<Vec<CapitalFlowEdge>> {
+        let mut stmt = self.0.prepare(
+            "SELECT sender,
+                    target_agent,
+                    COUNT(*)                                                  AS interaction_count,
+                    SUM(CASE WHEN score > 0 THEN score ELSE 0 END)            AS positive_flow,
+                    SUM(ABS(score))                                           AS total_abs_flow,
+                    CAST(AVG(score) AS REAL)                                  AS avg_score
+             FROM feedback_events
+             WHERE ts >= ?1
+             GROUP BY sender, target_agent
+             HAVING COUNT(*) >= 2
+             ORDER BY positive_flow DESC
+             LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(rusqlite::params![since as i64, limit as i64], |row| {
+            Ok(CapitalFlowEdge {
+                from_agent:        row.get(0)?,
+                to_agent:          row.get(1)?,
+                interaction_count: row.get::<_, i64>(2)? as u32,
+                positive_flow:     row.get::<_, i64>(3)?,
+                total_abs_flow:    row.get::<_, i64>(4)?,
+                avg_score:         row.get::<_, f64>(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Per-agent outgoing flow summary — top counterparties by positive flow.
+    fn query_agent_outgoing(&self, agent_id: &str, since: u64) -> rusqlite::Result<Vec<(String, u32, i64)>> {
+        let mut stmt = self.0.prepare(
+            "SELECT target_agent,
+                    COUNT(*)                                       AS cnt,
+                    SUM(CASE WHEN score > 0 THEN score ELSE 0 END) AS positive_flow
+             FROM feedback_events
+             WHERE sender = ?1 AND ts >= ?2
+             GROUP BY target_agent
+             ORDER BY positive_flow DESC
+             LIMIT 20"
+        )?;
+        let rows = stmt.query_map(rusqlite::params![agent_id, since as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)? as u32,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        rows.collect()
+    }
+
+    fn store_raw_envelope(
+        &self,
+        agent_id:  &str,
+        epoch:     u64,
+        seq_num:   i64,
+        ts:        u64,
+        leaf_hash: &str,
+        bytes:     &[u8],
+    ) -> rusqlite::Result<()> {
+        self.0.execute(
+            "INSERT INTO raw_envelopes (agent_id, epoch, seq_num, ts, leaf_hash, bytes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![agent_id, epoch as i64, seq_num, ts as i64, leaf_hash, bytes],
+        )?;
+        Ok(())
+    }
+
+    fn query_epoch_envelopes(
+        &self,
+        agent_id: &str,
+        epoch:    u64,
+        limit:    usize,
+    ) -> rusqlite::Result<Vec<(i64, String, Vec<u8>)>> {
+        let mut stmt = self.0.prepare(
+            "SELECT seq_num, leaf_hash, bytes FROM raw_envelopes
+             WHERE agent_id = ?1 AND epoch = ?2
+             ORDER BY seq_num ASC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![agent_id, epoch as i64, limit as i64],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?)),
+        )?
+        .filter_map(|r| r.ok())
+        .collect();
+        Ok(rows)
+    }
+
+    fn next_envelope_seq(&self, agent_id: &str, epoch: u64) -> rusqlite::Result<i64> {
+        let count: i64 = self.0.query_row(
+            "SELECT COUNT(*) FROM raw_envelopes WHERE agent_id = ?1 AND epoch = ?2",
+            rusqlite::params![agent_id, epoch as i64],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
 }
 
 fn row_to_entropy(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntropyEvent> {
@@ -726,6 +1002,10 @@ impl ReputationStore {
                 drop(inner);
                 self.persist(&rep);
                 self.persist_feedback(&fb, ts);
+                if let Some(ref raw) = fb.raw_b64 {
+                    let epoch = ts / 86_400u64;
+                    self.store_raw_envelope(&fb.sender, epoch, ts, raw);
+                }
             }
             IngestEvent::Verdict(v) => {
                 if !is_valid_agent_id(&v.recipient) {
@@ -1073,13 +1353,13 @@ impl ReputationStore {
         }
     }
 
-    /// Dynamic required stake for an agent (GAP-08).
+    /// Dynamic required stake for an agent (GAP-08, now includes C coefficient from GAP-02).
     ///
-    /// Formula: required = BASE × (1 + β₁ × anomaly)
-    /// Base stake: 10 USDC (10_000_000 micro-USDC).
+    /// Formula: required = BASE × (1 + β₁·A + β₃·C)
     pub fn required_stake(&self, agent_id: &str) -> RequiredStakeResult {
         const BASE_STAKE_USDC: f64 = 10.0;
         const BETA_1: f64 = 0.870;
+        const BETA_3: f64 = 0.300;
 
         let anomaly = {
             let db = self.db.lock().unwrap();
@@ -1087,18 +1367,97 @@ impl ReputationStore {
                 conn.query_latest_anomaly(agent_id).unwrap_or(None).unwrap_or(0.0)
             } else { 0.0 }
         };
+        let c = self.agent_c_coefficient(agent_id);
 
-        let required = BASE_STAKE_USDC * (1.0 + BETA_1 * anomaly);
+        let required = BASE_STAKE_USDC * (1.0 + BETA_1 * anomaly + BETA_3 * c);
         let deficit  = (required - BASE_STAKE_USDC).max(0.0);
 
         RequiredStakeResult {
             agent_id:            agent_id.to_string(),
             base_stake_usdc:     BASE_STAKE_USDC,
             current_anomaly:     anomaly,
+            c_coefficient:       c,
             beta_1:              BETA_1,
+            beta_3:              BETA_3,
             required_stake_usdc: required,
             deficit_usdc:        deficit,
         }
+    }
+
+    // =========================================================================
+    // Capital flow graph (GAP-02)
+    // =========================================================================
+
+    /// Capital flow edges over the last `window_secs` seconds.
+    pub fn capital_flow_edges(&self, window_secs: u64, limit: usize) -> Vec<CapitalFlowEdge> {
+        let since = now_secs().saturating_sub(window_secs);
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            match conn.query_capital_flow_edges(since, limit) {
+                Ok(rows) => return rows,
+                Err(e)   => tracing::warn!("query_capital_flow_edges failed: {e}"),
+            }
+        }
+        vec![]
+    }
+
+    /// All ownership clusters detected via mutual flow analysis.
+    pub fn flow_clusters(&self, window_secs: u64) -> Vec<FlowCluster> {
+        let edges = self.capital_flow_edges(window_secs, 5_000);
+        let (_, clusters) = compute_clusters_from_edges(&edges);
+        clusters
+    }
+
+    /// Graph position + C coefficient for one agent.
+    pub fn agent_flow_info(&self, agent_id: &str, window_secs: u64) -> AgentFlowInfo {
+        let since = now_secs().saturating_sub(window_secs);
+
+        // Outgoing flows for this agent.
+        let outgoing: Vec<(String, u32, i64)> = {
+            let db = self.db.lock().unwrap();
+            if let Some(ref conn) = *db {
+                conn.query_agent_outgoing(agent_id, since).unwrap_or_default()
+            } else { vec![] }
+        };
+
+        let total_flow: i64 = outgoing.iter().map(|(_, _, f)| f).sum();
+        let unique = outgoing.len() as u32;
+
+        // Concentration ratio: fraction of flow to top-3 counterparties.
+        let top3_flow: i64 = outgoing.iter().take(3).map(|(_, _, f)| f).sum();
+        let concentration = if total_flow > 0 { top3_flow as f64 / total_flow as f64 } else { 0.0 };
+        let top_counterparties: Vec<String> = outgoing.iter().take(5).map(|(id, _, _)| id.clone()).collect();
+
+        // Cluster membership.
+        let edges  = self.capital_flow_edges(window_secs, 5_000);
+        let (agent_cluster, clusters) = compute_clusters_from_edges(&edges);
+        let cluster_id  = agent_cluster.get(agent_id).copied();
+        let c_coeff     = cluster_id
+            .and_then(|cid| clusters.iter().find(|c| c.cluster_id == cid))
+            .map(|c| c.c_coefficient)
+            .unwrap_or(0.0);
+
+        AgentFlowInfo {
+            agent_id:              agent_id.to_string(),
+            cluster_id,
+            c_coefficient:         c_coeff,
+            concentration_ratio:   concentration,
+            top_counterparties,
+            total_outgoing_flow:   total_flow,
+            unique_counterparties: unique,
+        }
+    }
+
+    /// C coefficient for a single agent (0.0 when not in any cluster).
+    pub fn agent_c_coefficient(&self, agent_id: &str) -> f64 {
+        const WINDOW_30D: u64 = 30 * 24 * 3600;
+        let edges = self.capital_flow_edges(WINDOW_30D, 5_000);
+        if edges.is_empty() { return 0.0; }
+        let (agent_cluster, clusters) = compute_clusters_from_edges(&edges);
+        agent_cluster.get(agent_id)
+            .and_then(|&cid| clusters.iter().find(|c| c.cluster_id == cid))
+            .map(|c| c.c_coefficient)
+            .unwrap_or(0.0)
     }
 
     /// Write a single reputation record to SQLite (fire-and-forget; failures are logged).
@@ -1118,6 +1477,60 @@ impl ReputationStore {
             if let Err(e) = conn.insert_feedback(fb, ts) {
                 tracing::warn!("SQLite insert_feedback failed: {e}");
             }
+        }
+    }
+
+    /// Store a raw CBOR envelope byte slice for an agent's epoch.
+    /// Called during FEEDBACK ingest when the node provides raw bytes.
+    /// The seq_num is assigned by insertion order (count of existing rows for that agent+epoch).
+    pub fn store_raw_envelope(
+        &self,
+        agent_id: &str,
+        epoch:    u64,
+        ts:       u64,
+        raw_b64:  &str,
+    ) {
+        use base64::Engine as _;
+        let bytes = match base64::engine::general_purpose::STANDARD.decode(raw_b64) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("Failed to decode raw_b64 for {agent_id}: {e}");
+                return;
+            }
+        };
+        let leaf_hash = {
+            use tiny_keccak::{Hasher, Keccak};
+            let mut k = Keccak::v256();
+            let mut out = [0u8; 32];
+            k.update(&bytes);
+            k.finalize(&mut out);
+            hex::encode(out)
+        };
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            let seq = conn.next_envelope_seq(agent_id, epoch).unwrap_or(0);
+            if let Err(e) = conn.store_raw_envelope(agent_id, epoch, seq, ts, &leaf_hash, &bytes) {
+                tracing::warn!("SQLite store_raw_envelope failed: {e}");
+            }
+        }
+    }
+
+    /// Retrieve ordered CBOR envelope bytes for an agent's epoch (for Merkle proof construction).
+    /// Returns up to 1000 entries, ordered by sequence (insertion order).
+    pub fn epoch_envelopes(&self, agent_id: &str, epoch: u64) -> Vec<EpochEnvelopeEntry> {
+        use base64::Engine as _;
+        let db = self.db.lock().unwrap();
+        match *db {
+            Some(ref conn) => conn.query_epoch_envelopes(agent_id, epoch, 1_000)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(seq, leaf_hash, bytes)| EpochEnvelopeEntry {
+                    seq,
+                    leaf_hash,
+                    bytes_b64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                })
+                .collect(),
+            None => vec![],
         }
     }
 }

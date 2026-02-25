@@ -111,6 +111,9 @@ allowed_programs = [
 ]
 
 # Token mints allowed (USDC only)
+allowed_tokens = [
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+]
 allowed_spl_paid_tokens = [
   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
 ]

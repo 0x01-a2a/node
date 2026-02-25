@@ -44,6 +44,22 @@ pub struct VerdictEvent {
     pub slot:            u64,
 }
 
+/// Entropy vector pushed by a node at epoch boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntropyEvent {
+    pub agent_id: String,
+    pub epoch:    u64,
+    pub ht:       Option<f64>,
+    pub hb:       Option<f64>,
+    pub hs:       Option<f64>,
+    pub hv:       Option<f64>,
+    pub anomaly:  f64,
+    pub n_ht:     u32,
+    pub n_hb:     u32,
+    pub n_hs:     u32,
+    pub n_hv:     u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "msg_type")]
 pub enum IngestEvent {
@@ -51,6 +67,8 @@ pub enum IngestEvent {
     Feedback(FeedbackEvent),
     #[serde(rename = "VERDICT")]
     Verdict(VerdictEvent),
+    #[serde(rename = "ENTROPY")]
+    Entropy(EntropyEvent),
 }
 
 // ============================================================================
@@ -166,6 +184,25 @@ CREATE TABLE IF NOT EXISTS feedback_events (
 CREATE INDEX IF NOT EXISTS idx_fe_sender  ON feedback_events(sender);
 CREATE INDEX IF NOT EXISTS idx_fe_target  ON feedback_events(target_agent);
 CREATE INDEX IF NOT EXISTS idx_fe_ts      ON feedback_events(ts);
+
+CREATE TABLE IF NOT EXISTS entropy_vectors (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id  TEXT    NOT NULL,
+    epoch     INTEGER NOT NULL,
+    ht        REAL,
+    hb        REAL,
+    hs        REAL,
+    hv        REAL,
+    anomaly   REAL    NOT NULL DEFAULT 0,
+    n_ht      INTEGER NOT NULL DEFAULT 0,
+    n_hb      INTEGER NOT NULL DEFAULT 0,
+    n_hs      INTEGER NOT NULL DEFAULT 0,
+    n_hv      INTEGER NOT NULL DEFAULT 0,
+    ts        INTEGER NOT NULL,
+    UNIQUE(agent_id, epoch)
+);
+CREATE INDEX IF NOT EXISTS idx_ev_agent ON entropy_vectors(agent_id);
+CREATE INDEX IF NOT EXISTS idx_ev_ts    ON entropy_vectors(ts);
 
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous  = NORMAL;
@@ -307,6 +344,70 @@ impl Db {
         rows.collect()
     }
 
+    /// Upsert an entropy vector (agent_id + epoch is the unique key).
+    fn upsert_entropy(&self, ev: &EntropyEvent, ts: u64) -> rusqlite::Result<()> {
+        self.0.execute(
+            "INSERT INTO entropy_vectors
+                 (agent_id, epoch, ht, hb, hs, hv, anomaly,
+                  n_ht, n_hb, n_hs, n_hv, ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(agent_id, epoch) DO UPDATE SET
+                 ht      = excluded.ht,
+                 hb      = excluded.hb,
+                 hs      = excluded.hs,
+                 hv      = excluded.hv,
+                 anomaly = excluded.anomaly,
+                 n_ht    = excluded.n_ht,
+                 n_hb    = excluded.n_hb,
+                 n_hs    = excluded.n_hs,
+                 n_hv    = excluded.n_hv,
+                 ts      = excluded.ts",
+            rusqlite::params![
+                ev.agent_id,
+                ev.epoch as i64,
+                ev.ht,
+                ev.hb,
+                ev.hs,
+                ev.hv,
+                ev.anomaly,
+                ev.n_ht as i64,
+                ev.n_hb as i64,
+                ev.n_hs as i64,
+                ev.n_hv as i64,
+                ts as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Latest entropy vector for an agent.
+    fn query_entropy_latest(&self, agent_id: &str) -> rusqlite::Result<Option<EntropyEvent>> {
+        let mut stmt = self.0.prepare(
+            "SELECT agent_id, epoch, ht, hb, hs, hv, anomaly,
+                    n_ht, n_hb, n_hs, n_hv
+             FROM entropy_vectors
+             WHERE agent_id = ?1
+             ORDER BY epoch DESC
+             LIMIT 1"
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![agent_id], row_to_entropy)?;
+        rows.next().transpose()
+    }
+
+    /// All entropy vectors for an agent, oldest first.
+    fn query_entropy_history(&self, agent_id: &str, limit: usize) -> rusqlite::Result<Vec<EntropyEvent>> {
+        let mut stmt = self.0.prepare(
+            "SELECT agent_id, epoch, ht, hb, hs, hv, anomaly,
+                    n_ht, n_hb, n_hs, n_hv
+             FROM entropy_vectors
+             WHERE agent_id = ?1
+             ORDER BY epoch DESC
+             LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(rusqlite::params![agent_id, limit as i64], row_to_entropy)?;
+        rows.collect()
+    }
+
     /// Aggregate feedback events into 1-hour buckets since `since`.
     fn query_timeseries(&self, since: u64) -> rusqlite::Result<Vec<TimeseriesBucket>> {
         let mut stmt = self.0.prepare(
@@ -332,6 +433,22 @@ impl Db {
         })?;
         rows.collect()
     }
+}
+
+fn row_to_entropy(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntropyEvent> {
+    Ok(EntropyEvent {
+        agent_id: row.get(0)?,
+        epoch:    row.get::<_, i64>(1)? as u64,
+        ht:       row.get(2)?,
+        hb:       row.get(3)?,
+        hs:       row.get(4)?,
+        hv:       row.get(5)?,
+        anomaly:  row.get(6)?,
+        n_ht:     row.get::<_, i64>(7)? as u32,
+        n_hb:     row.get::<_, i64>(8)? as u32,
+        n_hs:     row.get::<_, i64>(9)? as u32,
+        n_hv:     row.get::<_, i64>(10)? as u32,
+    })
 }
 
 // ============================================================================
@@ -437,6 +554,24 @@ impl ReputationStore {
                 drop(inner);
                 self.persist(&rep);
             }
+            IngestEvent::Entropy(ev) => {
+                if !is_valid_agent_id(&ev.agent_id) {
+                    tracing::warn!("Ingest: invalid agent_id in ENTROPY '{}' — dropped", &ev.agent_id);
+                    return;
+                }
+                drop(inner);
+                let ts = now_secs();
+                tracing::debug!(
+                    "ENTROPY epoch={} agent={} anomaly={:.4}",
+                    ev.epoch, &ev.agent_id[..8], ev.anomaly,
+                );
+                let db = self.db.lock().unwrap();
+                if let Some(ref conn) = *db {
+                    if let Err(e) = conn.upsert_entropy(&ev, ts) {
+                        tracing::warn!("SQLite upsert_entropy failed: {e}");
+                    }
+                }
+            }
         }
     }
 
@@ -458,6 +593,30 @@ impl ReputationStore {
 
     pub fn all_agents(&self) -> Vec<AgentReputation> {
         self.inner.read().unwrap().agents.values().cloned().collect()
+    }
+
+    /// Latest entropy vector for an agent.
+    pub fn entropy_latest(&self, agent_id: &str) -> Option<EntropyEvent> {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            match conn.query_entropy_latest(agent_id) {
+                Ok(row) => return row,
+                Err(e)  => tracing::warn!("query_entropy_latest failed: {e}"),
+            }
+        }
+        None
+    }
+
+    /// All entropy vectors for an agent, newest first (up to `limit`).
+    pub fn entropy_history(&self, agent_id: &str, limit: usize) -> Vec<EntropyEvent> {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            match conn.query_entropy_history(agent_id, limit) {
+                Ok(rows) => return rows,
+                Err(e)   => tracing::warn!("query_entropy_history failed: {e}"),
+            }
+        }
+        vec![]
     }
 
     /// Return raw feedback events, optionally filtered by sender/target.

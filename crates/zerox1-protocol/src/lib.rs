@@ -3,6 +3,7 @@ pub mod envelope;
 pub mod message;
 pub mod payload;
 pub mod batch;
+pub mod entropy;
 pub mod error;
 pub mod hash;
 

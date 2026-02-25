@@ -629,7 +629,7 @@ impl Zx01Node {
         // Push to agent inbox.
         self.api.push_inbound(&env, self.current_slot);
 
-        self.batch.record_message(env.msg_type, env.sender);
+        self.batch.record_message(env.msg_type, env.sender, self.current_slot);
 
         // Route.
         if topic_str == TOPIC_REPUTATION && env.msg_type == MsgType::Feedback {
@@ -736,7 +736,7 @@ impl Zx01Node {
             tracing::warn!("Logger error: {e}");
         }
 
-        self.batch.record_message(env.msg_type, env.sender);
+        self.batch.record_message(env.msg_type, env.sender, self.current_slot);
         // Cap conversation map to prevent memory exhaustion from message floods.
         if self.conversations.len() >= MAX_ACTIVE_CONVERSATIONS {
             if let Some(&oldest_id) = self.conversations.keys().next() {
@@ -1043,7 +1043,7 @@ impl Zx01Node {
                 if let Err(e) = self.logger.log(&env) {
                     tracing::warn!("Logger error on outbound: {e}");
                 }
-                self.batch.record_message(req.msg_type, self.identity.agent_id);
+                self.batch.record_message(req.msg_type, self.identity.agent_id, self.current_slot);
                 tracing::debug!("Sent {} nonce={nonce}", req.msg_type);
             }
             Err(e) => tracing::warn!("Outbound send failed: {e}"),
@@ -1099,7 +1099,7 @@ impl Zx01Node {
             }
         };
 
-        let batch = self.batch.finalize(
+        let (batch, message_slots) = self.batch.finalize(
             self.identity.agent_id,
             self.current_slot,
             &leaves,
@@ -1135,6 +1135,31 @@ impl Zx01Node {
             message_count: batch.message_count,
             batch_hash:    batch_hash_hex,
         });
+
+        // Compute entropy vector and push to aggregator.
+        let ev = zerox1_protocol::entropy::compute(
+            &batch,
+            &message_slots,
+            &zerox1_protocol::entropy::EntropyParams::default(),
+        );
+        tracing::info!(
+            "Epoch {epoch} entropy: ht={:?} hb={:?} hs={:?} hv={:?} anomaly={:.4}",
+            ev.ht, ev.hb, ev.hs, ev.hv, ev.anomaly,
+        );
+        self.push_to_aggregator(serde_json::json!({
+            "msg_type":  "ENTROPY",
+            "agent_id":  hex::encode(ev.agent_id),
+            "epoch":     ev.epoch,
+            "ht":        ev.ht,
+            "hb":        ev.hb,
+            "hs":        ev.hs,
+            "hv":        ev.hv,
+            "anomaly":   ev.anomaly,
+            "n_ht":      ev.n_ht,
+            "n_hb":      ev.n_hb,
+            "n_hs":      ev.n_hs,
+            "n_hv":      ev.n_hv,
+        }));
 
         if let Err(e) = submit::submit_batch_onchain(
             &self.rpc,

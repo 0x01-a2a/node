@@ -48,10 +48,13 @@ pub struct BatchAccumulator {
     pub disputes:        u32,
 
     // Economic arrays (challengeable)
-    pub bids:                Vec<TypedBid>,
-    pub task_selections:     Vec<TaskSelection>,
+    pub bids:                 Vec<TypedBid>,
+    pub task_selections:      Vec<TaskSelection>,
     pub verifier_assignments: Vec<VerifierAssignment>,
-    pub feedback_events:     Vec<FeedbackEvent>,
+    pub feedback_events:      Vec<FeedbackEvent>,
+
+    /// Solana slot of every message sent/received — used for timing entropy (Ht).
+    pub message_slots: Vec<u64>,
 }
 
 impl BatchAccumulator {
@@ -69,15 +72,18 @@ impl BatchAccumulator {
             task_selections: Vec::new(),
             verifier_assignments: Vec::new(),
             feedback_events: Vec::new(),
+            message_slots: Vec::new(),
         }
     }
 
     /// Record that a message was sent or received with a given counterparty.
-    pub fn record_message(&mut self, msg_type: MsgType, counterparty: [u8; 32]) {
+    /// `slot` is the Solana slot of the envelope — stored for timing entropy.
+    pub fn record_message(&mut self, msg_type: MsgType, counterparty: [u8; 32], slot: u64) {
         self.message_count += 1;
         let idx = (msg_type.as_u16() as usize).min(15);
         self.msg_type_counts[idx] += 1;
         self.unique_counterparties.insert(counterparty);
+        self.message_slots.push(slot);
     }
 
     pub fn add_bid(&mut self, bid: TypedBid) {
@@ -112,13 +118,15 @@ impl BatchAccumulator {
     /// Finalise the epoch batch.
     ///
     /// `leaf_hashes` = keccak256 of each logged CBOR envelope (from EnvelopeLogger).
-    /// Computes log_merkle_root, applies overflow cap, signs, returns BehaviorBatch.
+    /// Computes log_merkle_root, applies overflow cap, returns (BehaviorBatch, message_slots).
+    /// `message_slots` is the ordered list of Solana slots for all messages this epoch —
+    /// pass it to `zerox1_protocol::entropy::compute` for timing entropy (Ht).
     pub fn finalize(
         &mut self,
-        agent_id:   [u8; 32],
-        slot_end:   u64,
+        agent_id:    [u8; 32],
+        slot_end:    u64,
         leaf_hashes: &[[u8; 32]],
-    ) -> BehaviorBatch {
+    ) -> (BehaviorBatch, Vec<u64>) {
         let log_merkle_root = if leaf_hashes.is_empty() {
             [0u8; 32]
         } else {
@@ -146,6 +154,7 @@ impl BatchAccumulator {
         };
 
         batch.apply_overflow_cap();
-        batch
+        let slots = std::mem::take(&mut self.message_slots);
+        (batch, slots)
     }
 }

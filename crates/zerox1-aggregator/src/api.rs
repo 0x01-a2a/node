@@ -180,6 +180,49 @@ fn parse_window(s: &str) -> u64 {
     }
 }
 
+// ============================================================================
+// Entropy
+// ============================================================================
+
+/// GET /entropy/:agent_id
+///
+/// Latest entropy vector for the agent (the most recent epoch).
+/// Returns 404 when the agent has no recorded entropy yet.
+pub async fn get_entropy(
+    State(state):       State<AppState>,
+    Path(agent_id):     Path<String>,
+) -> impl IntoResponse {
+    match state.store.entropy_latest(&agent_id) {
+        Some(ev) => Json(serde_json::to_value(ev).unwrap_or_default()).into_response(),
+        None     => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "no entropy data for agent" })),
+        ).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct EntropyHistoryParams {
+    #[serde(default = "default_entropy_limit")]
+    limit: usize,
+}
+
+fn default_entropy_limit() -> usize { 30 }
+
+/// GET /entropy/:agent_id/history[?limit=30]
+///
+/// All recorded entropy vectors for the agent (newest first, up to 100).
+/// Useful for plotting anomaly score over time.
+pub async fn get_entropy_history(
+    State(state):  State<AppState>,
+    Path(agent_id): Path<String>,
+    Query(params): Query<EntropyHistoryParams>,
+) -> impl IntoResponse {
+    let limit  = params.limit.min(100);
+    let rows   = state.store.entropy_history(&agent_id, limit);
+    Json(rows)
+}
+
 /// GET /stats/timeseries[?window=24h]
 ///
 /// Returns hourly feedback buckets (bucket = unix timestamp of window start).

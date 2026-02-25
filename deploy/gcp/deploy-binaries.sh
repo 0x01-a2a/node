@@ -71,9 +71,36 @@ gcloud compute ssh "$INSTANCE" --zone="$ZONE" -- sudo bash -s <<REMOTE
 [server]
 port = 8080
 
+[kora]
+rate_limit = 100
+
+[kora.auth]
+
+[kora.cache]
+enabled = false
+default_ttl = 300
+account_ttl = 60
+
+[kora.enabled_methods]
+liveness = true
+estimate_transaction_fee = true
+get_supported_tokens = true
+sign_transaction = true
+sign_and_send_transaction = true
+transfer_transaction = true
+get_blockhash = true
+get_config = true
+get_payer_signer = true
+
 [solana]
 rpc_url = "https://api.devnet.solana.com"
 fee_payer_keypair = "/var/lib/zerox1/kora-wallet.json"
+
+[validation]
+max_allowed_lamports = 1000000
+max_signatures = 10
+price_source = "Mock"
+allow_durable_transactions = false
 
 [policy]
 # Program IDs allowed to be sponsored by Kora

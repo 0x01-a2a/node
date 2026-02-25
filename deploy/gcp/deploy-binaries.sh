@@ -117,6 +117,7 @@ allowed_tokens = [
 allowed_spl_paid_tokens = [
   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
 ]
+disallowed_accounts = []
 KORACFG
   chown zerox1:zerox1 /etc/zerox1/kora.toml
   chmod 600 /etc/zerox1/kora.toml

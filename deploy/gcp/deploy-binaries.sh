@@ -152,7 +152,7 @@ if __name__ == '__main__':
         key_bytes = json.load(f)
     print(b58encode(key_bytes))
 EOF
-  KPA_BASE58=$(python3 /tmp/b58.py)
+  KPA_BASE58=\$(python3 /tmp/b58.py)
   # Remove old KORA_PRIVATE_KEY if it exists
   sed -i '/^KORA_PRIVATE_KEY=/d' /etc/zerox1/env || true
   # Append new KORA_PRIVATE_KEY map

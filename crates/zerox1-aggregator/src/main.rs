@@ -67,9 +67,11 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health",                 get(api::health))
         .route("/ingest/envelope",        post(api::ingest_envelope))
-        .route("/reputation/{agent_id}",   get(api::get_reputation))
+        .route("/reputation/{agent_id}",  get(api::get_reputation))
         .route("/leaderboard",            get(api::get_leaderboard))
         .route("/agents",                 get(api::get_agents))
+        .route("/interactions",           get(api::get_interactions))
+        .route("/stats/timeseries",       get(api::get_timeseries))
         .with_state(state);
 
     tracing::info!("zerox1-aggregator listening on {}", config.listen);

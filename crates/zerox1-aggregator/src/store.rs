@@ -4,7 +4,7 @@
 //! Every ingest event is also written to SQLite (when `--db-path` is set)
 //! so data survives restarts without replaying node pushes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -106,6 +106,36 @@ impl AgentReputation {
 }
 
 // ============================================================================
+// Interaction + timeseries output types
+// ============================================================================
+
+/// A single raw feedback event — used by GET /interactions.
+#[derive(Debug, Clone, Serialize)]
+pub struct RawInteraction {
+    pub sender:          String,
+    pub target_agent:    String,
+    pub score:           i32,
+    pub outcome:         u8,
+    pub is_dispute:      bool,
+    pub role:            u8,
+    pub conversation_id: String,
+    pub slot:            u64,
+    /// Unix timestamp (seconds) when the aggregator received this event.
+    pub ts:              u64,
+}
+
+/// One hourly bucket — used by GET /stats/timeseries.
+#[derive(Debug, Clone, Serialize)]
+pub struct TimeseriesBucket {
+    /// Start of the 1-hour window (unix seconds).
+    pub bucket:         u64,
+    pub feedback_count: u64,
+    pub positive_count: u64,
+    pub negative_count: u64,
+    pub dispute_count:  u64,
+}
+
+// ============================================================================
 // SQLite persistence layer
 // ============================================================================
 
@@ -120,6 +150,23 @@ CREATE TABLE IF NOT EXISTS agent_reputation (
     verdict_count  INTEGER NOT NULL DEFAULT 0,
     last_updated   INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS feedback_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender          TEXT    NOT NULL,
+    target_agent    TEXT    NOT NULL,
+    score           INTEGER NOT NULL,
+    outcome         INTEGER NOT NULL,
+    is_dispute      INTEGER NOT NULL DEFAULT 0,
+    role            INTEGER NOT NULL DEFAULT 0,
+    conversation_id TEXT    NOT NULL,
+    slot            INTEGER NOT NULL DEFAULT 0,
+    ts              INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fe_sender  ON feedback_events(sender);
+CREATE INDEX IF NOT EXISTS idx_fe_target  ON feedback_events(target_agent);
+CREATE INDEX IF NOT EXISTS idx_fe_ts      ON feedback_events(ts);
+
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous  = NORMAL;
 ";
@@ -133,7 +180,7 @@ impl Db {
         Ok(Db(conn))
     }
 
-    /// Load all rows into a HashMap.
+    /// Load all reputation rows into a HashMap.
     fn load_all(&self) -> rusqlite::Result<HashMap<String, AgentReputation>> {
         let mut stmt = self.0.prepare(
             "SELECT agent_id, feedback_count, total_score,
@@ -204,15 +251,109 @@ impl Db {
         )?;
         Ok(())
     }
+
+    /// Insert a raw feedback event.
+    fn insert_feedback(&self, fb: &FeedbackEvent, ts: u64) -> rusqlite::Result<()> {
+        self.0.execute(
+            "INSERT INTO feedback_events
+                 (sender, target_agent, score, outcome, is_dispute, role,
+                  conversation_id, slot, ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                fb.sender,
+                fb.target_agent,
+                fb.score,
+                fb.outcome as i64,
+                fb.is_dispute as i64,
+                fb.role as i64,
+                fb.conversation_id,
+                fb.slot as i64,
+                ts as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Query raw interactions with optional sender/target filters.
+    fn query_interactions(
+        &self,
+        from:  Option<&str>,
+        to:    Option<&str>,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<RawInteraction>> {
+        let mut stmt = self.0.prepare(
+            "SELECT sender, target_agent, score, outcome, is_dispute, role,
+                    conversation_id, slot, ts
+             FROM feedback_events
+             WHERE (?1 IS NULL OR sender       = ?1)
+               AND (?2 IS NULL OR target_agent = ?2)
+             ORDER BY ts DESC
+             LIMIT ?3"
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![from, to, limit as i64],
+            |row| Ok(RawInteraction {
+                sender:          row.get(0)?,
+                target_agent:    row.get(1)?,
+                score:           row.get(2)?,
+                outcome:         row.get::<_, i64>(3)? as u8,
+                is_dispute:      row.get::<_, i64>(4)? != 0,
+                role:            row.get::<_, i64>(5)? as u8,
+                conversation_id: row.get(6)?,
+                slot:            row.get::<_, i64>(7)? as u64,
+                ts:              row.get::<_, i64>(8)? as u64,
+            }),
+        )?;
+        rows.collect()
+    }
+
+    /// Aggregate feedback events into 1-hour buckets since `since`.
+    fn query_timeseries(&self, since: u64) -> rusqlite::Result<Vec<TimeseriesBucket>> {
+        let mut stmt = self.0.prepare(
+            "SELECT
+                 (ts / 3600) * 3600                              AS bucket,
+                 COUNT(*)                                        AS feedback_count,
+                 SUM(CASE WHEN outcome    = 2 THEN 1 ELSE 0 END) AS positive_count,
+                 SUM(CASE WHEN outcome    = 0 THEN 1 ELSE 0 END) AS negative_count,
+                 SUM(CASE WHEN is_dispute = 1 THEN 1 ELSE 0 END) AS dispute_count
+             FROM feedback_events
+             WHERE ts >= ?1
+             GROUP BY bucket
+             ORDER BY bucket ASC"
+        )?;
+        let rows = stmt.query_map(rusqlite::params![since as i64], |row| {
+            Ok(TimeseriesBucket {
+                bucket:         row.get::<_, i64>(0)? as u64,
+                feedback_count: row.get::<_, i64>(1)? as u64,
+                positive_count: row.get::<_, i64>(2)? as u64,
+                negative_count: row.get::<_, i64>(3)? as u64,
+                dispute_count:  row.get::<_, i64>(4)? as u64,
+            })
+        })?;
+        rows.collect()
+    }
 }
 
 // ============================================================================
 // ReputationStore
 // ============================================================================
 
-#[derive(Default)]
+/// In-memory cap for raw interactions when running without SQLite.
+const MAX_IN_MEMORY_INTERACTIONS: usize = 10_000;
+
 struct Inner {
-    agents: HashMap<String, AgentReputation>,
+    agents:       HashMap<String, AgentReputation>,
+    /// Bounded ring buffer of recent interactions (used as fallback when no SQLite).
+    interactions: VecDeque<RawInteraction>,
+}
+
+impl Default for Inner {
+    fn default() -> Self {
+        Self {
+            agents:       HashMap::new(),
+            interactions: VecDeque::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -250,7 +391,7 @@ impl ReputationStore {
         );
 
         Ok(Self {
-            inner: Arc::new(RwLock::new(Inner { agents })),
+            inner: Arc::new(RwLock::new(Inner { agents, interactions: VecDeque::new() })),
             db:    Arc::new(Mutex::new(Some(db))),
         })
     }
@@ -265,11 +406,31 @@ impl ReputationStore {
                 }
                 let rep = inner.agents
                     .entry(fb.target_agent.clone())
-                    .or_insert_with(|| AgentReputation::new(fb.target_agent));
+                    .or_insert_with(|| AgentReputation::new(fb.target_agent.clone()));
                 rep.apply_feedback(fb.score, fb.outcome);
                 let rep = rep.clone();
+
+                // Store raw interaction for /interactions and /stats/timeseries.
+                let ts = now_secs();
+                let interaction = RawInteraction {
+                    sender:          fb.sender.clone(),
+                    target_agent:    fb.target_agent.clone(),
+                    score:           fb.score.clamp(-100, 100),
+                    outcome:         fb.outcome,
+                    is_dispute:      fb.is_dispute,
+                    role:            fb.role,
+                    conversation_id: fb.conversation_id.clone(),
+                    slot:            fb.slot,
+                    ts,
+                };
+                if inner.interactions.len() >= MAX_IN_MEMORY_INTERACTIONS {
+                    inner.interactions.pop_front();
+                }
+                inner.interactions.push_back(interaction);
+
                 drop(inner);
                 self.persist(&rep);
+                self.persist_feedback(&fb, ts);
             }
             IngestEvent::Verdict(v) => {
                 if !is_valid_agent_id(&v.recipient) {
@@ -307,12 +468,80 @@ impl ReputationStore {
         self.inner.read().unwrap().agents.values().cloned().collect()
     }
 
-    /// Write a single record to SQLite (fire-and-forget; failures are logged).
+    /// Return raw feedback events, optionally filtered by sender/target.
+    /// When SQLite is available queries the full history; otherwise returns
+    /// from the in-memory ring buffer (last 10 000 events).
+    pub fn interactions(
+        &self,
+        from:  Option<&str>,
+        to:    Option<&str>,
+        limit: usize,
+    ) -> Vec<RawInteraction> {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            match conn.query_interactions(from, to, limit) {
+                Ok(rows) => return rows,
+                Err(e)   => tracing::warn!("query_interactions failed: {e}"),
+            }
+        }
+        // In-memory fallback.
+        let inner = self.inner.read().unwrap();
+        inner.interactions.iter().rev()
+            .filter(|i| from.map_or(true, |f| i.sender      == f))
+            .filter(|i| to.map_or(true,   |t| i.target_agent == t))
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    /// Return hourly feedback buckets covering the last `window_secs` seconds.
+    pub fn timeseries(&self, window_secs: u64) -> Vec<TimeseriesBucket> {
+        let since = now_secs().saturating_sub(window_secs);
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            match conn.query_timeseries(since) {
+                Ok(rows) => return rows,
+                Err(e)   => tracing::warn!("query_timeseries failed: {e}"),
+            }
+        }
+        // In-memory fallback: bucket the ring buffer.
+        let inner = self.inner.read().unwrap();
+        let mut map: HashMap<u64, TimeseriesBucket> = HashMap::new();
+        for i in inner.interactions.iter().filter(|i| i.ts >= since) {
+            let bucket = (i.ts / 3600) * 3600;
+            let entry = map.entry(bucket).or_insert(TimeseriesBucket {
+                bucket,
+                feedback_count: 0,
+                positive_count: 0,
+                negative_count: 0,
+                dispute_count:  0,
+            });
+            entry.feedback_count += 1;
+            if i.outcome   == 2 { entry.positive_count += 1; }
+            if i.outcome   == 0 { entry.negative_count += 1; }
+            if i.is_dispute     { entry.dispute_count  += 1; }
+        }
+        let mut buckets: Vec<_> = map.into_values().collect();
+        buckets.sort_by_key(|b| b.bucket);
+        buckets
+    }
+
+    /// Write a single reputation record to SQLite (fire-and-forget; failures are logged).
     fn persist(&self, rep: &AgentReputation) {
         let db = self.db.lock().unwrap();
         if let Some(ref conn) = *db {
             if let Err(e) = conn.upsert(rep) {
                 tracing::warn!("SQLite upsert failed for {}: {e}", rep.agent_id);
+            }
+        }
+    }
+
+    /// Write a raw feedback event to SQLite (fire-and-forget; failures are logged).
+    fn persist_feedback(&self, fb: &FeedbackEvent, ts: u64) {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            if let Err(e) = conn.insert_feedback(fb, ts) {
+                tracing::warn!("SQLite insert_feedback failed: {e}");
             }
         }
     }

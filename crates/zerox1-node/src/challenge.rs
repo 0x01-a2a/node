@@ -224,6 +224,7 @@ pub async fn submit_challenge_onchain(
 // ============================================================================
 
 /// Build and submit a `resolve_challenge` transaction.
+#[allow(clippy::too_many_arguments)]
 pub async fn resolve_challenge_onchain(
     rpc:                 &RpcClient,
     identity:            &AgentIdentity,

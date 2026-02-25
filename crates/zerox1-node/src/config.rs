@@ -13,11 +13,7 @@ use std::{path::PathBuf, str::FromStr};
 
 const DEFAULT_BOOTSTRAP_PEERS: &[&str] = &[
     // bootstrap-1.0x01.world
-    "/dns4/bootstrap-1.0x01.world/tcp/9000/p2p/12D3KooWBootstrap1PlaceholderPeerIdAAAAAAAAAAAAAAAAAAAAA",
-    // bootstrap-2.0x01.world
-    "/dns4/bootstrap-2.0x01.world/tcp/9000/p2p/12D3KooWBootstrap2PlaceholderPeerIdAAAAAAAAAAAAAAAAAAAAA",
-    // bootstrap-3.0x01.world (EU)
-    "/dns4/bootstrap-3.0x01.world/tcp/9000/p2p/12D3KooWBootstrap3PlaceholderPeerIdAAAAAAAAAAAAAAAAAAAAA",
+    "/dns4/bootstrap-1.0x01.world/tcp/9000/p2p/12D3KooWLudabD69eAYzfoZMVRqJb8XHBLDKsQvRn6Q9hTQqvMuY",
 ];
 
 #[derive(Parser, Debug)]

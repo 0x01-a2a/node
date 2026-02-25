@@ -1,14 +1,14 @@
 use anyhow::Context;
-use tracing::{debug, error, info, warn};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     message::Message,
     pubkey::Pubkey,
     signature::{Keypair, Signer},
-    system_program,
     transaction::Transaction,
 };
+#[allow(deprecated)]
+use solana_sdk::system_program;
 
 use sha2::Digest;
 use zerox1_protocol::hash::keccak256;
@@ -66,7 +66,7 @@ pub fn generate_merkle_proof(leaf_index: usize, leaves: &[[u8; 32]]) -> Vec<[u8;
     let mut idx = leaf_index;
 
     while layer.len() > 1 {
-        let sibling_idx = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
+        let sibling_idx = if idx.is_multiple_of(2) { idx + 1 } else { idx - 1 };
         proof.push(layer[sibling_idx]);
 
         let mut next = Vec::with_capacity(layer.len() / 2);

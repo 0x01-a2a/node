@@ -40,6 +40,7 @@ libp2p = { version = "0.54", features = [
     "mdns",
     "noise",
     "tcp",
+    "dns",
     "yamux",
     "identify",
     "autonat",

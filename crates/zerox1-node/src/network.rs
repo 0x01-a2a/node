@@ -96,6 +96,7 @@ pub fn build_swarm(
     let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
         .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
+        .with_dns()?
         .with_behaviour(|key| {
             let peer_id = key.public().to_peer_id();
 

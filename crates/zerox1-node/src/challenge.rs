@@ -33,6 +33,8 @@ const USDC_MINT_STR: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const SPL_TOKEN_PROGRAM_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 /// Associated Token Program.
 const ASSOCIATED_TOKEN_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+/// Treasury pubkey (receives forfeited stake).
+pub const TREASURY_PUBKEY_STR: &str = "qw4hzfV7UUXTrNh3hiS9Q8KSPMXWUusNoyFKLvtcMMX";
 
 /// 10 USDC challenge stake (6 decimal places).
 pub const CHALLENGE_STAKE_USDC: u64 = 10_000_000;
@@ -43,6 +45,10 @@ fn challenge_program_id() -> Pubkey {
 
 fn behavior_log_program_id() -> Pubkey {
     BEHAVIOR_LOG_PROGRAM_ID_STR.parse().expect("valid behavior-log program ID")
+}
+
+fn treasury_pubkey() -> Pubkey {
+    TREASURY_PUBKEY_STR.parse().expect("valid treasury pubkey")
 }
 
 fn usdc_mint() -> Pubkey {
@@ -214,6 +220,78 @@ pub async fn submit_challenge_onchain(
 }
 
 // ============================================================================
+// resolve_challenge
+// ============================================================================
+
+/// Build and submit a `resolve_challenge` transaction.
+pub async fn resolve_challenge_onchain(
+    rpc:                 &RpcClient,
+    identity:            &AgentIdentity,
+    target_agent_id:     [u8; 32],
+    epoch_number:        u64,
+    challenger:          &Pubkey,
+    contradicting_entry: Vec<u8>,
+    merkle_proof:        Vec<[u8; 32]>,
+    contradicts_batch:   bool,
+) -> anyhow::Result<()> {
+    let program_id = challenge_program_id();
+    let usdc = usdc_mint();
+    let resolver_pubkey = Pubkey::new_from_array(identity.verifying_key.to_bytes());
+
+    let batch_key = batch_pda(&target_agent_id, epoch_number);
+    let challenge_key = challenge_pda(&batch_key, challenger);
+    let (vault_auth, _) = vault_authority_pda(&challenge_key);
+    let vault_ata = get_ata(&vault_auth, &usdc);
+    let challenger_ata = get_ata(challenger, &usdc);
+    
+    let treasury = treasury_pubkey();
+    let treasury_ata = get_ata(&treasury, &usdc);
+
+    let recent_blockhash = rpc.get_latest_blockhash().await?;
+
+    let solana_kp = {
+        let mut b = [0u8; 64];
+        b[..32].copy_from_slice(&identity.signing_key.to_bytes());
+        b[32..].copy_from_slice(&identity.verifying_key.to_bytes());
+        Keypair::try_from(b.as_slice()).map_err(|e| anyhow::anyhow!("keypair conversion: {e}"))?
+    };
+
+    let ix = build_resolve_challenge_ix(
+        &resolver_pubkey,
+        &challenge_key,
+        &vault_auth,
+        &vault_ata,
+        &challenger_ata,
+        &treasury_ata,
+        &treasury,
+        &batch_key,
+        &usdc,
+        &program_id,
+        contradicting_entry,
+        merkle_proof,
+        contradicts_batch,
+    );
+
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&resolver_pubkey),
+        &[&solana_kp],
+        recent_blockhash,
+    );
+
+    let sig = rpc.send_and_confirm_transaction(&tx).await.map_err(|e| anyhow::anyhow!("resolve_challenge: {e}"))?;
+
+    tracing::info!(
+        tx           = %sig,
+        target_agent = %hex::encode(target_agent_id),
+        epoch        = epoch_number,
+        "Challenge resolved on-chain",
+    );
+
+    Ok(())
+}
+
+// ============================================================================
 // Instruction builder
 // ============================================================================
 
@@ -285,6 +363,57 @@ fn build_submit_challenge_ix(
             AccountMeta::new_readonly(spl_token_program(), false),
             AccountMeta::new_readonly(associated_token_program(), false),
             AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+        ],
+        data,
+    }
+}
+
+/// Build the `resolve_challenge` instruction.
+#[allow(clippy::too_many_arguments)]
+fn build_resolve_challenge_ix(
+    resolver:            &Pubkey,
+    challenge_account:   &Pubkey,
+    vault_auth:          &Pubkey,
+    vault_ata:           &Pubkey,
+    challenger_ata:      &Pubkey,
+    treasury_usdc:       &Pubkey,
+    treasury:            &Pubkey,
+    batch_account:       &Pubkey,
+    usdc:                &Pubkey,
+    program_id:          &Pubkey,
+    contradicting_entry: Vec<u8>,
+    merkle_proof:        Vec<[u8; 32]>,
+    contradicts_batch:   bool,
+) -> Instruction {
+    let mut data = Vec::new();
+    data.extend_from_slice(&anchor_discriminator("resolve_challenge"));
+    
+    // contradicting_entry: Vec<u8>
+    data.extend_from_slice(&(contradicting_entry.len() as u32).to_le_bytes());
+    data.extend_from_slice(&contradicting_entry);
+    
+    // merkle_proof: Vec<[u8; 32]>
+    data.extend_from_slice(&(merkle_proof.len() as u32).to_le_bytes());
+    for hash in &merkle_proof {
+        data.extend_from_slice(hash);
+    }
+    
+    // contradicts_batch: bool
+    data.push(contradicts_batch as u8);
+
+    Instruction {
+        program_id: *program_id,
+        accounts: vec![
+            AccountMeta::new(*resolver, true),
+            AccountMeta::new(*challenge_account, false),
+            AccountMeta::new_readonly(*vault_auth, false),
+            AccountMeta::new(*vault_ata, false),
+            AccountMeta::new(*challenger_ata, false),
+            AccountMeta::new(*treasury_usdc, false),
+            AccountMeta::new_readonly(*treasury, false),
+            AccountMeta::new_readonly(*batch_account, false),
+            AccountMeta::new_readonly(*usdc, false),
+            AccountMeta::new_readonly(spl_token_program(), false),
         ],
         data,
     }

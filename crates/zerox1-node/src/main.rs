@@ -12,6 +12,7 @@ mod node;
 mod peer_state;
 mod reputation;
 mod submit;
+mod stake_lock;
 
 use clap::Parser;
 

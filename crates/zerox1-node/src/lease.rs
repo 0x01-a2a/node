@@ -5,6 +5,8 @@
 //!   - Building and submitting `pay_lease` instructions (USDC, via Kora or direct)
 //!   - Checking peer lease status for the message gate
 
+#![allow(dead_code)]
+
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use sha2::{Digest, Sha256};
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
@@ -30,6 +32,8 @@ pub const USDC_MINT_STR: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const SPL_TOKEN_PROGRAM_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 /// Associated Token Program.
 const ASSOCIATED_TOKEN_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+/// Treasury.
+pub const TREASURY_PUBKEY_STR: &str = "qw4hzfV7UUXTrNh3hiS9Q8KSPMXWUusNoyFKLvtcMMX";
 
 /// Pay 7 epochs when renewing (one week).
 pub const RENEWAL_EPOCHS: u64 = 7;
@@ -38,6 +42,10 @@ pub const RENEWAL_THRESHOLD: u64 = 2;
 
 fn lease_program_id() -> Pubkey {
     LEASE_PROGRAM_ID_STR.parse().expect("valid lease program ID")
+}
+
+fn treasury_pubkey() -> Pubkey {
+    TREASURY_PUBKEY_STR.parse().expect("valid treasury pubkey")
 }
 
 fn usdc_mint() -> Pubkey {
@@ -140,6 +148,102 @@ pub async fn get_lease_status(
             }))
         }
     }
+}
+
+// ============================================================================
+// init_lease instruction
+// ============================================================================
+
+/// Build and submit an `init_lease` transaction.
+pub async fn init_lease_onchain(
+    rpc:      &RpcClient,
+    identity: &AgentIdentity,
+    kora:     Option<&KoraClient>,
+) -> anyhow::Result<()> {
+    let program_id  = lease_program_id();
+    let usdc        = usdc_mint();
+    let agent_pubkey = Pubkey::new_from_array(identity.verifying_key.to_bytes());
+    let agent_mint  = Pubkey::new_from_array(identity.agent_id);
+
+    let (lease_pda, _) = Pubkey::find_program_address(
+        &[b"lease", &identity.agent_id],
+        &program_id,
+    );
+    let owner_ata   = get_ata(&agent_pubkey, &usdc);
+    let owner_sati_ata = get_ata(&agent_pubkey, &agent_mint);
+    
+    let treasury = treasury_pubkey();
+    let treasury_ata = get_ata(&treasury, &usdc);
+
+    let recent_blockhash = rpc.get_latest_blockhash().await?;
+
+    // Convert ed25519-dalek signing key to a Solana Keypair for partial signing.
+    let solana_kp = {
+        let mut b = [0u8; 64];
+        b[..32].copy_from_slice(&identity.signing_key.to_bytes());
+        b[32..].copy_from_slice(&identity.verifying_key.to_bytes());
+        Keypair::try_from(b.as_slice())
+            .map_err(|e| anyhow::anyhow!("keypair conversion: {e}"))?
+    };
+
+    if let Some(kora) = kora {
+        let fee_payer = kora.get_fee_payer().await?;
+
+        let ix = build_init_lease_ix(
+            &fee_payer,
+            &agent_pubkey,
+            &owner_ata,
+            &agent_mint,
+            &owner_sati_ata,
+            &lease_pda,
+            &treasury_ata,
+            &treasury,
+            &usdc,
+            &program_id,
+            identity.agent_id,
+        );
+
+        let message = Message::new_with_blockhash(&[ix], Some(&fee_payer), &recent_blockhash);
+        let mut tx = Transaction {
+            signatures: vec![Signature::default(); message.header.num_required_signatures as usize],
+            message,
+        };
+        tx.partial_sign(&[&solana_kp], recent_blockhash);
+
+        let tx_bytes = bincode::serialize(&tx).map_err(|e| anyhow::anyhow!("bincode serialize: {e}"))?;
+        let tx_b64 = BASE64.encode(&tx_bytes);
+
+        kora.sign_and_send(&tx_b64).await?;
+
+        tracing::info!(agent = %hex::encode(identity.agent_id), "Lease initialized via Kora (gasless)");
+    } else {
+        let ix = build_init_lease_ix(
+            &agent_pubkey,
+            &agent_pubkey,
+            &owner_ata,
+            &agent_mint,
+            &owner_sati_ata,
+            &lease_pda,
+            &treasury_ata,
+            &treasury,
+            &usdc,
+            &program_id,
+            identity.agent_id,
+        );
+
+        let tx = Transaction::new_signed_with_payer(
+            &[ix],
+            Some(&agent_pubkey),
+            &[&solana_kp],
+            recent_blockhash,
+        );
+
+        let sig = rpc.send_and_confirm_transaction(&tx).await.map_err(|e| anyhow::anyhow!("init_lease: {e}"))?;
+
+        tracing::info!(tx = %sig, agent = %hex::encode(identity.agent_id), "Lease initialized directly (agent pays gas)");
+    }
+
+    Ok(())
 }
 
 // ============================================================================
@@ -266,6 +370,44 @@ pub async fn pay_lease_onchain(
 fn anchor_discriminator(name: &str) -> [u8; 8] {
     let hash = Sha256::digest(format!("global:{name}").as_bytes());
     hash[..8].try_into().unwrap()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_init_lease_ix(
+    payer:            &Pubkey,
+    owner:            &Pubkey,
+    owner_usdc:       &Pubkey,
+    agent_mint:       &Pubkey,
+    owner_sati_token: &Pubkey,
+    lease_account:    &Pubkey,
+    treasury_usdc:    &Pubkey,
+    treasury:         &Pubkey,
+    usdc_mint:        &Pubkey,
+    program_id:       &Pubkey,
+    agent_id:         [u8; 32],
+) -> Instruction {
+    let mut data = Vec::with_capacity(40);
+    data.extend_from_slice(&anchor_discriminator("init_lease"));
+    data.extend_from_slice(&agent_id); // InitLeaseArgs { agent_id }
+
+    Instruction {
+        program_id: *program_id,
+        accounts: vec![
+            AccountMeta::new(*payer, true),
+            AccountMeta::new(*owner, true),
+            AccountMeta::new(*owner_usdc, false),
+            AccountMeta::new_readonly(*agent_mint, false),
+            AccountMeta::new_readonly(*owner_sati_token, false),
+            AccountMeta::new(*lease_account, false),
+            AccountMeta::new(*treasury_usdc, false),
+            AccountMeta::new_readonly(*treasury, false),
+            AccountMeta::new_readonly(*usdc_mint, false),
+            AccountMeta::new_readonly(spl_token_program(), false),
+            AccountMeta::new_readonly(associated_token_program(), false),
+            AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+        ],
+        data,
+    }
 }
 
 /// Build the `pay_lease` instruction.

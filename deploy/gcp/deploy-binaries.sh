@@ -126,7 +126,7 @@ KORACFG
 
   cat > /etc/zerox1/signers.toml <<SIGNERSCFG
 [[signers]]
-id = "default"
+name = "default"
 type = "keypair"
 path = "/var/lib/zerox1/kora-wallet.json"
 SIGNERSCFG

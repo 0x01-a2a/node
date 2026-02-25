@@ -12,8 +12,10 @@ use std::{path::PathBuf, str::FromStr};
 // TODO: replace placeholders with real peer IDs once deployed.
 
 const DEFAULT_BOOTSTRAP_PEERS: &[&str] = &[
-    // bootstrap-1.0x01.world
+    // bootstrap-1.0x01.world (US Central)
     "/dns4/bootstrap-1.0x01.world/tcp/9000/p2p/12D3KooWLudabD69eAYzfoZMVRqJb8XHBLDKsQvRn6Q9hTQqvMuY",
+    // bootstrap-2.0x01.world (EU West)
+    "/dns4/bootstrap-2.0x01.world/tcp/9000/p2p/12D3KooWMXSCZEjjqBnLXhT2TVWde9w6VU2cZixR6D8CxvHeKts2",
 ];
 
 #[derive(Parser, Debug)]

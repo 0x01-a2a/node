@@ -28,6 +28,7 @@ deploy/gcp/*.secrets
 /etc/zerox1/
 kora.toml
 deploy/
+import_phantom.py
 
 # IDE
 .idea/

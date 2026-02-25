@@ -5,6 +5,8 @@ members = [
     "crates/zerox1-node",
     "crates/zerox1-sati-client",
     "crates/zerox1-aggregator",
+    "crates/zerox1-simulator",
+    "crates/zerox1-challenger",
 ]
 
 [workspace.package]

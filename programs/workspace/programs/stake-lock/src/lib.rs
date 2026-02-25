@@ -264,6 +264,36 @@ pub mod stake_lock {
         Ok(())
     }
 
+    /// Top up stake to meet a higher required amount (GAP-08: dynamic stake).
+    ///
+    /// Called by an agent when the aggregator indicates their required stake
+    /// has increased due to a rising anomaly score.  Transfers `amount` USDC
+    /// from owner_usdc to the stake vault and increments stake_usdc.
+    pub fn top_up_stake(ctx: Context<TopUpStake>, amount: u64) -> Result<()> {
+        require!(amount > 0, StakeLockError::InsufficientStake);
+
+        let cpi_ctx = CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from:      ctx.accounts.owner_usdc.to_account_info(),
+                to:        ctx.accounts.stake_vault.to_account_info(),
+                authority: ctx.accounts.owner.to_account_info(),
+            },
+        );
+        token::transfer(cpi_ctx, amount)?;
+
+        ctx.accounts.stake_account.stake_usdc += amount;
+
+        emit!(StakeToppedUp {
+            agent_mint: ctx.accounts.stake_account.agent_mint,
+            owner:      ctx.accounts.owner.key(),
+            amount,
+            new_total:  ctx.accounts.stake_account.stake_usdc,
+        });
+
+        Ok(())
+    }
+
     /// Slash stake. Only callable by the Challenge program (ID enforced on-chain).
     ///
     /// Transfers `args.amount` USDC from stake vault to `recipient_usdc`.
@@ -485,6 +515,49 @@ pub struct SlashInactive<'info> {
 }
 
 #[derive(Accounts)]
+pub struct TopUpStake<'info> {
+    /// Agent wallet — authorises USDC transfer from owner_usdc.
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    /// Owner's USDC ATA (source of additional stake).
+    #[account(
+        mut,
+        associated_token::mint      = usdc_mint,
+        associated_token::authority = owner,
+    )]
+    pub owner_usdc: Account<'info, TokenAccount>,
+
+    /// Existing stake account for this agent.
+    #[account(
+        mut,
+        seeds = [b"stake", stake_account.agent_mint.as_ref()],
+        bump  = stake_account.bump,
+        constraint = stake_account.owner == owner.key() @ StakeLockError::NotOwner,
+    )]
+    pub stake_account: Account<'info, StakeLockAccount>,
+
+    /// CHECK: PDA authority for vault ATA.
+    #[account(
+        seeds = [b"stake_vault", stake_account.agent_mint.as_ref()],
+        bump  = stake_account.vault_authority_bump,
+    )]
+    pub stake_vault_authority: UncheckedAccount<'info>,
+
+    /// Vault ATA — receives additional USDC.
+    #[account(
+        mut,
+        associated_token::mint      = usdc_mint,
+        associated_token::authority = stake_vault_authority,
+    )]
+    pub stake_vault: Account<'info, TokenAccount>,
+
+    pub usdc_mint:                Account<'info, Mint>,
+    pub token_program:            Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+}
+
+#[derive(Accounts)]
 pub struct Slash<'info> {
     /// Must be the Challenge program — program ID enforced in handler.
     /// CHECK: challenge_program.key() == CHALLENGE_PROGRAM_ID, checked in handler.
@@ -597,6 +670,14 @@ pub struct StakeSlashed {
     pub agent_mint: [u8; 32],
     pub amount:     u64,
     pub recipient:  Pubkey,
+}
+
+#[event]
+pub struct StakeToppedUp {
+    pub agent_mint: [u8; 32],
+    pub owner:      Pubkey,
+    pub amount:     u64,
+    pub new_total:  u64,
 }
 
 #[event]

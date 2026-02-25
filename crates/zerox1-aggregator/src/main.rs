@@ -70,10 +70,17 @@ async fn main() -> anyhow::Result<()> {
         .route("/reputation/{agent_id}",  get(api::get_reputation))
         .route("/leaderboard",            get(api::get_leaderboard))
         .route("/agents",                 get(api::get_agents))
+        .route("/leaderboard/anomaly",            get(api::get_anomaly_leaderboard))
         .route("/interactions",                   get(api::get_interactions))
         .route("/stats/timeseries",               get(api::get_timeseries))
         .route("/entropy/{agent_id}",             get(api::get_entropy))
         .route("/entropy/{agent_id}/history",     get(api::get_entropy_history))
+        .route("/entropy/{agent_id}/rolling",         get(api::get_rolling_entropy))
+        .route("/leaderboard/verifier-concentration", get(api::get_verifier_concentration))
+        .route("/leaderboard/ownership-clusters",     get(api::get_ownership_clusters))
+        .route("/params/calibrated",                  get(api::get_calibrated_params))
+        .route("/system/sri",                         get(api::get_sri_status))
+        .route("/stake/required/{agent_id}",          get(api::get_required_stake))
         .with_state(state);
 
     tracing::info!("zerox1-aggregator listening on {}", config.listen);

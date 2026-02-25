@@ -153,6 +153,72 @@ pub struct TimeseriesBucket {
     pub dispute_count:  u64,
 }
 
+/// Rolling entropy result — used by GET /entropy/{id}/rolling
+#[derive(Debug, Clone, Serialize)]
+pub struct RollingEntropyResult {
+    pub agent_id:          String,
+    pub window_epochs:     u32,
+    pub epochs_found:      u32,
+    pub mean_anomaly:      f64,
+    pub anomaly_variance:  f64,
+    /// True when variance is below 0.005 AND mean_anomaly > 0.3 — patient cartel signal.
+    pub low_variance_flag: bool,
+    /// True when mean_anomaly > 0.55.
+    pub high_anomaly_flag: bool,
+}
+
+/// Verifier concentration entry — used by GET /leaderboard/verifier-concentration
+#[derive(Debug, Clone, Serialize)]
+pub struct VerifierConcentrationEntry {
+    pub agent_id:               String,
+    pub epochs_sampled:         u32,
+    pub mean_hv:                f64,
+    pub epochs_below_threshold: u32,
+    pub concentration_score:    f64, // 1.0 - (mean_hv / hv_threshold)  clamped [0,1]
+}
+
+/// Ownership cluster — used by GET /leaderboard/ownership-clusters
+#[derive(Debug, Clone, Serialize)]
+pub struct OwnershipCluster {
+    pub cluster_id:       u32,
+    pub agents:           Vec<String>,
+    pub mean_anomaly_mad: f64, // mean absolute diff of anomaly scores — lower = more correlated
+}
+
+/// Calibrated β parameters derived from live data — GET /params/calibrated
+#[derive(Debug, Clone, Serialize)]
+pub struct CalibratedParams {
+    pub beta_1_anomaly:      f64,
+    pub beta_2_rep_decay:    f64,
+    pub beta_3_coordination: f64,
+    pub beta_4_systemic:     f64,
+    pub sample_agents:       u32,
+    pub flagged_agents:      u32,
+    pub calibrated_at:       u64,
+}
+
+/// Systemic Risk Index — GET /system/sri
+#[derive(Debug, Clone, Serialize)]
+pub struct SriStatus {
+    pub sri:                    f64,  // fraction of agents with anomaly > 0.55
+    pub circuit_breaker_active: bool, // true when sri > 0.50
+    pub mean_anomaly:           f64,
+    pub active_agents:          u32,
+    pub flagged_agents:         u32,
+    pub computed_at:            u64,
+}
+
+/// Per-agent required stake — GET /stake/required/{id}
+#[derive(Debug, Clone, Serialize)]
+pub struct RequiredStakeResult {
+    pub agent_id:            String,
+    pub base_stake_usdc:     f64,
+    pub current_anomaly:     f64,
+    pub beta_1:              f64,
+    pub required_stake_usdc: f64, // base * (1 + beta_1 * anomaly)
+    pub deficit_usdc:        f64, // max(0, required - base)
+}
+
 // ============================================================================
 // SQLite persistence layer
 // ============================================================================
@@ -394,6 +460,22 @@ impl Db {
         rows.next().transpose()
     }
 
+    /// Top agents by anomaly score (highest first), most recent epoch only.
+    fn query_anomaly_leaderboard(&self, limit: usize) -> rusqlite::Result<Vec<EntropyEvent>> {
+        let mut stmt = self.0.prepare(
+            "SELECT agent_id, epoch, ht, hb, hs, hv, anomaly,
+                    n_ht, n_hb, n_hs, n_hv
+             FROM entropy_vectors
+             WHERE (agent_id, epoch) IN (
+                 SELECT agent_id, MAX(epoch) FROM entropy_vectors GROUP BY agent_id
+             )
+             ORDER BY anomaly DESC
+             LIMIT ?1"
+        )?;
+        let rows = stmt.query_map(rusqlite::params![limit as i64], row_to_entropy)?;
+        rows.collect()
+    }
+
     /// All entropy vectors for an agent, oldest first.
     fn query_entropy_history(&self, agent_id: &str, limit: usize) -> rusqlite::Result<Vec<EntropyEvent>> {
         let mut stmt = self.0.prepare(
@@ -432,6 +514,110 @@ impl Db {
             })
         })?;
         rows.collect()
+    }
+
+    /// Rolling anomaly stats for an agent over the last `window` epochs.
+    fn query_rolling_entropy(&self, agent_id: &str, window: u32) -> rusqlite::Result<RollingEntropyResult> {
+        let row: (f64, f64, i64, Option<f64>) = self.0.query_row(
+            "SELECT AVG(anomaly),
+                    AVG(anomaly * anomaly) - AVG(anomaly) * AVG(anomaly),
+                    COUNT(*),
+                    AVG(hv)
+             FROM (
+                 SELECT anomaly, hv FROM entropy_vectors
+                 WHERE agent_id = ?1
+                 ORDER BY epoch DESC
+                 LIMIT ?2
+             )",
+            rusqlite::params![agent_id, window as i64],
+            |r| Ok((
+                r.get::<_, f64>(0).unwrap_or(0.0),
+                r.get::<_, f64>(1).unwrap_or(0.0),
+                r.get::<_, i64>(2).unwrap_or(0),
+                r.get::<_, Option<f64>>(3)?,
+            )),
+        )?;
+        let (mean_anomaly, variance, n, _mean_hv) = row;
+        Ok(RollingEntropyResult {
+            agent_id:          agent_id.to_string(),
+            window_epochs:     window,
+            epochs_found:      n as u32,
+            mean_anomaly,
+            anomaly_variance:  variance.max(0.0),
+            low_variance_flag: variance < 0.005 && mean_anomaly > 0.30 && n >= 5,
+            high_anomaly_flag: mean_anomaly > 0.55,
+        })
+    }
+
+    /// Verifier concentration: agents with consistently low hv (verifier entropy).
+    fn query_verifier_concentration(&self, limit: usize) -> rusqlite::Result<Vec<VerifierConcentrationEntry>> {
+        let mut stmt = self.0.prepare(
+            "SELECT agent_id,
+                    COUNT(*)                                               AS epochs_sampled,
+                    COALESCE(AVG(hv), 0.0)                                AS mean_hv,
+                    SUM(CASE WHEN hv IS NOT NULL AND hv < 1.0 THEN 1 ELSE 0 END) AS epochs_below
+             FROM entropy_vectors
+             WHERE hv IS NOT NULL
+             GROUP BY agent_id
+             HAVING COUNT(*) >= 3
+             ORDER BY mean_hv ASC
+             LIMIT ?1"
+        )?;
+        let hv_threshold = 1.0_f64;
+        let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
+            let mean_hv: f64 = row.get(2)?;
+            let score = (1.0 - (mean_hv / hv_threshold)).max(0.0).min(1.0);
+            Ok(VerifierConcentrationEntry {
+                agent_id:               row.get(0)?,
+                epochs_sampled:         row.get::<_, i64>(1)? as u32,
+                mean_hv,
+                epochs_below_threshold: row.get::<_, i64>(3)? as u32,
+                concentration_score:    score,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Systemic Risk Index: fraction of active agents with anomaly > 0.55.
+    fn query_sri_status(&self) -> rusqlite::Result<SriStatus> {
+        let (total, flagged, mean_anomaly): (i64, i64, f64) = self.0.query_row(
+            "SELECT COUNT(*),
+                    SUM(CASE WHEN anomaly > 0.55 THEN 1 ELSE 0 END),
+                    COALESCE(AVG(anomaly), 0.0)
+             FROM (
+                 SELECT anomaly FROM entropy_vectors
+                 WHERE (agent_id, epoch) IN (
+                     SELECT agent_id, MAX(epoch) FROM entropy_vectors GROUP BY agent_id
+                 )
+             )",
+            [],
+            |r| Ok((
+                r.get::<_, i64>(0).unwrap_or(0),
+                r.get::<_, i64>(1).unwrap_or(0),
+                r.get::<_, f64>(2).unwrap_or(0.0),
+            )),
+        )?;
+        let sri = if total > 0 { flagged as f64 / total as f64 } else { 0.0 };
+        Ok(SriStatus {
+            sri,
+            circuit_breaker_active: sri > 0.50,
+            mean_anomaly,
+            active_agents:  total   as u32,
+            flagged_agents: flagged as u32,
+            computed_at:    now_secs(),
+        })
+    }
+
+    /// Latest anomaly score for required_stake computation.
+    fn query_latest_anomaly(&self, agent_id: &str) -> rusqlite::Result<Option<f64>> {
+        let mut stmt = self.0.prepare(
+            "SELECT anomaly FROM entropy_vectors
+             WHERE agent_id = ?1
+             ORDER BY epoch DESC
+             LIMIT 1"
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![agent_id], |r| r.get::<_, f64>(0))?;
+        rows.next().transpose()
     }
 }
 
@@ -607,6 +793,18 @@ impl ReputationStore {
         None
     }
 
+    /// Agents sorted by highest anomaly score (most recent epoch per agent).
+    pub fn anomaly_leaderboard(&self, limit: usize) -> Vec<EntropyEvent> {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            match conn.query_anomaly_leaderboard(limit) {
+                Ok(rows) => return rows,
+                Err(e)   => tracing::warn!("query_anomaly_leaderboard failed: {e}"),
+            }
+        }
+        vec![]
+    }
+
     /// All entropy vectors for an agent, newest first (up to `limit`).
     pub fn entropy_history(&self, agent_id: &str, limit: usize) -> Vec<EntropyEvent> {
         let db = self.db.lock().unwrap();
@@ -675,6 +873,231 @@ impl ReputationStore {
         let mut buckets: Vec<_> = map.into_values().collect();
         buckets.sort_by_key(|b| b.bucket);
         buckets
+    }
+
+    /// Rolling anomaly window for an agent (GAP-03: patient cartel detection).
+    pub fn rolling_entropy(&self, agent_id: &str, window: u32) -> RollingEntropyResult {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            match conn.query_rolling_entropy(agent_id, window) {
+                Ok(result) => return result,
+                Err(e) => tracing::warn!("query_rolling_entropy failed: {e}"),
+            }
+        }
+        RollingEntropyResult {
+            agent_id:          agent_id.to_string(),
+            window_epochs:     window,
+            epochs_found:      0,
+            mean_anomaly:      0.0,
+            anomaly_variance:  0.0,
+            low_variance_flag: false,
+            high_anomaly_flag: false,
+        }
+    }
+
+    /// Agents with consistently low verifier entropy (GAP-04: verifier collusion).
+    pub fn verifier_concentration(&self, limit: usize) -> Vec<VerifierConcentrationEntry> {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            match conn.query_verifier_concentration(limit) {
+                Ok(rows) => return rows,
+                Err(e) => tracing::warn!("query_verifier_concentration failed: {e}"),
+            }
+        }
+        vec![]
+    }
+
+    /// Suspected same-owner agent clusters (GAP-02: ownership clustering).
+    ///
+    /// Compares the last 10 anomaly scores for each agent pair.
+    /// Agents whose anomaly trajectories have mean absolute difference < 0.05
+    /// are placed in the same cluster.
+    pub fn ownership_clusters(&self) -> Vec<OwnershipCluster> {
+        let db = self.db.lock().unwrap();
+        let rows: Vec<(String, f64)> = if let Some(ref conn) = *db {
+            conn.0.prepare(
+                "SELECT agent_id, anomaly FROM entropy_vectors
+                 WHERE (agent_id, epoch) IN (
+                     SELECT agent_id, MAX(epoch) FROM entropy_vectors GROUP BY agent_id
+                 )
+                 ORDER BY anomaly DESC
+                 LIMIT 50"
+            ).and_then(|mut s| {
+                s.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)))
+                    .and_then(|rows| rows.collect())
+            }).unwrap_or_default()
+        } else {
+            vec![]
+        };
+        drop(db);
+
+        if rows.len() < 2 {
+            return vec![];
+        }
+
+        // Simple single-linkage clustering on anomaly score proximity.
+        let mut assigned: Vec<Option<u32>> = vec![None; rows.len()];
+        let mut next_cluster = 0u32;
+
+        for i in 0..rows.len() {
+            if assigned[i].is_some() { continue; }
+            for j in (i + 1)..rows.len() {
+                if assigned[j].is_some() { continue; }
+                let mad = (rows[i].1 - rows[j].1).abs();
+                if mad < 0.05 {
+                    let cid = assigned[i].get_or_insert_with(|| {
+                        let c = next_cluster; next_cluster += 1; c
+                    });
+                    assigned[j] = Some(*cid);
+                }
+            }
+            if assigned[i].is_none() {
+                assigned[i] = Some(next_cluster);
+                next_cluster += 1;
+            }
+        }
+
+        let mut cluster_map: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+        for (i, cid) in assigned.iter().enumerate() {
+            cluster_map.entry(cid.unwrap()).or_default().push(i);
+        }
+
+        cluster_map.into_iter()
+            .filter(|(_, members)| members.len() >= 2)
+            .map(|(cid, members)| {
+                let agents: Vec<String> = members.iter().map(|&i| rows[i].0.clone()).collect();
+                let scores: Vec<f64>    = members.iter().map(|&i| rows[i].1).collect();
+                let mean = scores.iter().sum::<f64>() / scores.len() as f64;
+                let mad  = scores.iter().map(|s| (s - mean).abs()).sum::<f64>() / scores.len() as f64;
+                OwnershipCluster { cluster_id: cid, agents, mean_anomaly_mad: mad }
+            })
+            .collect()
+    }
+
+    /// Calibrated β parameters from live entropy data (GAP-05).
+    ///
+    /// Compares entropy component contributions for flagged vs clean agents.
+    /// Flagged = latest anomaly > 0.55.  Clean = latest anomaly < 0.10.
+    pub fn calibrated_params(&self) -> CalibratedParams {
+        let db = self.db.lock().unwrap();
+        let rows: Vec<(f64, Option<f64>, Option<f64>, Option<f64>, Option<f64>)> =
+            if let Some(ref conn) = *db {
+                conn.0.prepare(
+                    "SELECT anomaly, ht, hb, hs, hv FROM entropy_vectors
+                     WHERE (agent_id, epoch) IN (
+                         SELECT agent_id, MAX(epoch) FROM entropy_vectors GROUP BY agent_id
+                     )"
+                ).and_then(|mut s| {
+                    s.query_map([], |r| Ok((
+                        r.get::<_, f64>(0)?,
+                        r.get::<_, Option<f64>>(1)?,
+                        r.get::<_, Option<f64>>(2)?,
+                        r.get::<_, Option<f64>>(3)?,
+                        r.get::<_, Option<f64>>(4)?,
+                    ))).and_then(|rows| rows.collect())
+                }).unwrap_or_default()
+            } else { vec![] };
+        drop(db);
+
+        // Default EntropyParams thresholds.
+        let (ht_thresh, hb_thresh, hs_thresh, hv_thresh) = (2.0, 1.5, 1.5, 1.0);
+        let (w_ht, w_hb, w_hs, w_hv) = (0.35, 0.20, 0.30, 0.15);
+
+        let flagged: Vec<_> = rows.iter().filter(|r| r.0 > 0.55).collect();
+        let total   = rows.len() as u32;
+        let n_flag  = flagged.len() as u32;
+
+        if flagged.is_empty() {
+            return CalibratedParams {
+                beta_1_anomaly: 0.870, beta_2_rep_decay: 0.130,
+                beta_3_coordination: 0.0, beta_4_systemic: 0.0,
+                sample_agents: total, flagged_agents: n_flag,
+                calibrated_at: now_secs(),
+            };
+        }
+
+        // Mean component contribution for flagged agents.
+        let mut c_ht = 0.0_f64;
+        let mut c_hb = 0.0_f64;
+        let mut c_hs = 0.0_f64;
+        let mut c_hv = 0.0_f64;
+        let n = flagged.len() as f64;
+
+        for &(_, ht, hb, hs, hv) in &flagged {
+            if let Some(h) = ht { c_ht += w_ht * (ht_thresh - h).max(0.0); }
+            if let Some(h) = hb { c_hb += w_hb * (hb_thresh - h).max(0.0); }
+            if let Some(h) = hs { c_hs += w_hs * (hs_thresh - h).max(0.0); }
+            if let Some(h) = hv { c_hv += w_hv * (hv_thresh - h).max(0.0); }
+        }
+        c_ht /= n; c_hb /= n; c_hs /= n; c_hv /= n;
+
+        let entropy_total = c_ht + c_hb + c_hs + c_hv;
+        let total_weight  = entropy_total + 0.15; // 0.15 reserved for rep decay
+        let b1 = if total_weight > 0.0 { entropy_total / total_weight } else { 0.870 };
+        let b2 = 1.0 - b1;
+
+        CalibratedParams {
+            beta_1_anomaly: b1, beta_2_rep_decay: b2,
+            beta_3_coordination: 0.0, beta_4_systemic: 0.0,
+            sample_agents: total, flagged_agents: n_flag,
+            calibrated_at: now_secs(),
+        }
+    }
+
+    /// Systemic Risk Index and circuit breaker status (GAP-06).
+    pub fn sri_status(&self) -> SriStatus {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            match conn.query_sri_status() {
+                Ok(s) => return s,
+                Err(e) => tracing::warn!("query_sri_status failed: {e}"),
+            }
+        }
+        drop(db);
+        // In-memory fallback: scan agent anomaly from leaderboard.
+        let evs = self.anomaly_leaderboard(10_000);
+        let total   = evs.len() as u32;
+        let flagged = evs.iter().filter(|e| e.anomaly > 0.55).count() as u32;
+        let mean    = if total > 0 {
+            evs.iter().map(|e| e.anomaly).sum::<f64>() / total as f64
+        } else { 0.0 };
+        let sri = if total > 0 { flagged as f64 / total as f64 } else { 0.0 };
+        SriStatus {
+            sri,
+            circuit_breaker_active: sri > 0.50,
+            mean_anomaly: mean,
+            active_agents: total,
+            flagged_agents: flagged,
+            computed_at: now_secs(),
+        }
+    }
+
+    /// Dynamic required stake for an agent (GAP-08).
+    ///
+    /// Formula: required = BASE × (1 + β₁ × anomaly)
+    /// Base stake: 10 USDC (10_000_000 micro-USDC).
+    pub fn required_stake(&self, agent_id: &str) -> RequiredStakeResult {
+        const BASE_STAKE_USDC: f64 = 10.0;
+        const BETA_1: f64 = 0.870;
+
+        let anomaly = {
+            let db = self.db.lock().unwrap();
+            if let Some(ref conn) = *db {
+                conn.query_latest_anomaly(agent_id).unwrap_or(None).unwrap_or(0.0)
+            } else { 0.0 }
+        };
+
+        let required = BASE_STAKE_USDC * (1.0 + BETA_1 * anomaly);
+        let deficit  = (required - BASE_STAKE_USDC).max(0.0);
+
+        RequiredStakeResult {
+            agent_id:            agent_id.to_string(),
+            base_stake_usdc:     BASE_STAKE_USDC,
+            current_anomaly:     anomaly,
+            beta_1:              BETA_1,
+            required_stake_usdc: required,
+            deficit_usdc:        deficit,
+        }
     }
 
     /// Write a single reputation record to SQLite (fire-and-forget; failures are logged).

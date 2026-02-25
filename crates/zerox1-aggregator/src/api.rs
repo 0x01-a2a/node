@@ -184,6 +184,19 @@ fn parse_window(s: &str) -> u64 {
 // Entropy
 // ============================================================================
 
+/// GET /leaderboard/anomaly[?limit=50]
+///
+/// Agents ranked by highest anomaly score (most recent epoch per agent).
+/// Score > 0 means at least one entropy component fell below its threshold.
+/// Higher score = more suspicious.
+pub async fn get_anomaly_leaderboard(
+    State(state):  State<AppState>,
+    Query(params): Query<LeaderboardParams>,
+) -> impl IntoResponse {
+    let limit = params.limit.min(200);
+    Json(state.store.anomaly_leaderboard(limit))
+}
+
 /// GET /entropy/:agent_id
 ///
 /// Latest entropy vector for the agent (the most recent epoch).
@@ -234,4 +247,78 @@ pub async fn get_timeseries(
 ) -> impl IntoResponse {
     let window_secs = parse_window(&params.window);
     Json(state.store.timeseries(window_secs))
+}
+
+// ============================================================================
+// GAP-03: Rolling entropy — patient cartel detection
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct RollingEntropyParams {
+    #[serde(default = "default_rolling_window")]
+    window: u32,
+}
+
+fn default_rolling_window() -> u32 { 10 }
+
+/// GET /entropy/{agent_id}/rolling[?window=10]
+pub async fn get_rolling_entropy(
+    State(state):   State<AppState>,
+    Path(agent_id): Path<String>,
+    Query(params):  Query<RollingEntropyParams>,
+) -> impl IntoResponse {
+    let window = params.window.clamp(3, 100);
+    Json(state.store.rolling_entropy(&agent_id, window))
+}
+
+// ============================================================================
+// GAP-04: Verifier concentration
+// ============================================================================
+
+/// GET /leaderboard/verifier-concentration[?limit=50]
+pub async fn get_verifier_concentration(
+    State(state):  State<AppState>,
+    Query(params): Query<LeaderboardParams>,
+) -> impl IntoResponse {
+    let limit = params.limit.min(200);
+    Json(state.store.verifier_concentration(limit))
+}
+
+// ============================================================================
+// GAP-02: Ownership clustering
+// ============================================================================
+
+/// GET /leaderboard/ownership-clusters
+pub async fn get_ownership_clusters(State(state): State<AppState>) -> impl IntoResponse {
+    Json(state.store.ownership_clusters())
+}
+
+// ============================================================================
+// GAP-05: Calibrated β parameters
+// ============================================================================
+
+/// GET /params/calibrated
+pub async fn get_calibrated_params(State(state): State<AppState>) -> impl IntoResponse {
+    Json(state.store.calibrated_params())
+}
+
+// ============================================================================
+// GAP-06: SRI / circuit breaker
+// ============================================================================
+
+/// GET /system/sri
+pub async fn get_sri_status(State(state): State<AppState>) -> impl IntoResponse {
+    Json(state.store.sri_status())
+}
+
+// ============================================================================
+// GAP-08: Required stake
+// ============================================================================
+
+/// GET /stake/required/{agent_id}
+pub async fn get_required_stake(
+    State(state):   State<AppState>,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    Json(state.store.required_stake(&agent_id))
 }

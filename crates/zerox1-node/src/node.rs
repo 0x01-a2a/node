@@ -1161,7 +1161,17 @@ impl Zx01Node {
             "n_hv":      ev.n_hv,
         }));
 
-        if let Err(e) = submit::submit_batch_onchain(
+        // GAP-06: Check SRI circuit breaker before on-chain submission.
+        // If the network-wide Systemic Risk Index exceeds the threshold the
+        // aggregator sets circuit_breaker_active=true; we pause submission to
+        // avoid contributing to a compromised epoch record.
+        let circuit_breaker = self.check_sri_circuit_breaker().await;
+        if circuit_breaker {
+            tracing::warn!(
+                "SRI circuit breaker ACTIVE — skipping on-chain batch submission for epoch {epoch}. \
+                 Network anomaly level exceeds 50%. Submission will resume when SRI drops."
+            );
+        } else if let Err(e) = submit::submit_batch_onchain(
             &self.rpc,
             &self.identity,
             &batch,
@@ -1215,6 +1225,48 @@ impl Zx01Node {
     // ========================================================================
     // Aggregator push
     // ========================================================================
+
+    // ========================================================================
+    // SRI circuit breaker (GAP-06)
+    // ========================================================================
+
+    /// Query the aggregator's /system/sri endpoint.
+    /// Returns true if the circuit breaker is active (SRI > 0.50).
+    /// Fails open (returns false) if no aggregator is configured or the
+    /// request fails, so a network partition never blocks honest nodes.
+    async fn check_sri_circuit_breaker(&self) -> bool {
+        let url = match &self.aggregator_url {
+            Some(u) => format!("{}/system/sri", u.trim_end_matches('/')),
+            None    => return false,
+        };
+        let client = self.http_client.clone();
+        let secret = self.aggregator_secret.clone();
+        let result: Result<bool, _> = async move {
+            let mut req = client.get(&url);
+            if let Some(s) = secret {
+                req = req.header("Authorization", format!("Bearer {s}"));
+            }
+            let text = req.send().await?.text().await?;
+            let val: serde_json::Value = serde_json::from_str(&text)?;
+            Ok::<bool, anyhow::Error>(
+                val.get("circuit_breaker_active")
+                   .and_then(|v| v.as_bool())
+                   .unwrap_or(false)
+            )
+        }.await;
+        match result {
+            Ok(active) => {
+                if active {
+                    tracing::warn!("SRI circuit breaker is active (aggregator reports SRI > 0.50)");
+                }
+                active
+            }
+            Err(e) => {
+                tracing::debug!("SRI check failed (fail-open): {e}");
+                false
+            }
+        }
+    }
 
     fn push_to_aggregator(&self, payload: serde_json::Value) {
         let url = match &self.aggregator_url {

@@ -8394,6 +8394,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "zerox1-challenger"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "zerox1-node"
 version = "0.1.0"
 dependencies = [
@@ -8453,6 +8467,17 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "zerox1-protocol",
+]
+
+[[package]]
+name = "zerox1-simulator"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
  "zerox1-protocol",
 ]
 

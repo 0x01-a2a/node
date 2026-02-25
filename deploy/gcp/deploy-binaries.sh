@@ -104,6 +104,8 @@ allow_durable_transactions = false
 
 # Program IDs allowed to be sponsored by Kora
 allowed_programs = [
+  "11111111111111111111111111111111",              # System Program
+  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",   # Token Program
   "3gXhgBLsVYVQkntuVcPdiDe2gRxbSt2CGFJKriA8q9bA",  # behavior-log
   "9g4RMQvBBVCppUc9C3Vjk2Yn3vhHzDFb8RkVm8a1WmUk",  # lease
   "KncUkaiDtvaLJRDfXDmPXKmBYnVe6m3MKBawZsf6xsj",   # challenge
@@ -123,10 +125,10 @@ KORACFG
   chmod 600 /etc/zerox1/kora.toml
 
   cat > /etc/zerox1/signers.toml <<SIGNERSCFG
-[signers]
-  [signers.default]
-  type = "keypair"
-  path = "/var/lib/zerox1/kora-wallet.json"
+[[signers]]
+id = "default"
+type = "keypair"
+path = "/var/lib/zerox1/kora-wallet.json"
 SIGNERSCFG
   chown zerox1:zerox1 /etc/zerox1/signers.toml
   chmod 600 /etc/zerox1/signers.toml

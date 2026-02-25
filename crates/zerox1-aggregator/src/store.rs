@@ -341,19 +341,11 @@ impl Db {
 /// In-memory cap for raw interactions when running without SQLite.
 const MAX_IN_MEMORY_INTERACTIONS: usize = 10_000;
 
+#[derive(Default)]
 struct Inner {
     agents:       HashMap<String, AgentReputation>,
     /// Bounded ring buffer of recent interactions (used as fallback when no SQLite).
     interactions: VecDeque<RawInteraction>,
-}
-
-impl Default for Inner {
-    fn default() -> Self {
-        Self {
-            agents:       HashMap::new(),
-            interactions: VecDeque::new(),
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -487,8 +479,8 @@ impl ReputationStore {
         // In-memory fallback.
         let inner = self.inner.read().unwrap();
         inner.interactions.iter().rev()
-            .filter(|i| from.map_or(true, |f| i.sender      == f))
-            .filter(|i| to.map_or(true,   |t| i.target_agent == t))
+            .filter(|i| from.is_none_or(|f| i.sender      == f))
+            .filter(|i| to.is_none_or(  |t| i.target_agent == t))
             .take(limit)
             .cloned()
             .collect()

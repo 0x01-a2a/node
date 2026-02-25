@@ -11,7 +11,7 @@ set -euo pipefail
 
 INSTANCE="zerox1-genesis"
 ZONE="us-central1-a"
-GITHUB_REPO="zerox1/node"
+GITHUB_REPO="0x01-a2a/node"
 RELEASE="${RELEASE:-latest}"
 
 if [ "$RELEASE" = "latest" ]; then
@@ -35,6 +35,9 @@ gcloud compute scp deploy/systemd/kora.service \
 gcloud compute ssh "$INSTANCE" --zone="$ZONE" -- sudo bash -s <<REMOTE
   set -euo pipefail
 
+  echo "==> Stopping services to allow binary replacement..."
+  systemctl stop kora zerox1-aggregator zerox1-node || true
+
   RELEASE="${RELEASE}"
   REPO="${GITHUB_REPO}"
 
@@ -52,7 +55,7 @@ gcloud compute ssh "$INSTANCE" --zone="$ZONE" -- sudo bash -s <<REMOTE
   if [ ! -f /opt/zerox1/bin/kora ]; then
     echo "==> Building Kora from source (this takes a few minutes)..."
     export PATH="\$HOME/.cargo/bin:\$PATH"
-    git clone --depth=1 https://github.com/helius-labs/kora.git /tmp/kora-src
+    git clone --depth=1 https://github.com/solana-foundation/kora.git /tmp/kora-src
     cd /tmp/kora-src
     cargo build --release
     cp target/release/kora /opt/zerox1/bin/kora
@@ -87,6 +90,7 @@ allowed_tokens = [
 # Max SOL fee per transaction
 max_fee_lamports = 100000
 KORACFG
+  chown zerox1:zerox1 /etc/zerox1/kora.toml
   chmod 600 /etc/zerox1/kora.toml
 
   # ── Install systemd units ──────────────────────────────────────────────────

@@ -1,50 +1,34 @@
 #!/usr/bin/env bash
-# Extract the libp2p peer IDs from running bootstrap nodes and print the
-# multiaddrs to put into node/crates/zerox1-node/src/config.rs.
+# Extract the libp2p peer ID from the genesis node and print the multiaddr
+# to paste into crates/zerox1-node/src/config.rs DEFAULT_BOOTSTRAP_PEERS.
 #
 # Usage:
 #   ./deploy/gcp/get-bootstrap-addrs.sh
 
 set -euo pipefail
 
-declare -A INSTANCES=(
-  ["zerox1-bootstrap-1"]="us-east1-b"
-  ["zerox1-bootstrap-2"]="europe-west3-a"
-  ["zerox1-bootstrap-3"]="asia-southeast1-b"
-)
+INSTANCE="zerox1-genesis"
+ZONE="us-central1-a"
+DNS="bootstrap-1.0x01.world"
 
-declare -A DNS=(
-  ["zerox1-bootstrap-1"]="bootstrap-1.0x01.world"
-  ["zerox1-bootstrap-2"]="bootstrap-2.0x01.world"
-  ["zerox1-bootstrap-3"]="bootstrap-3.0x01.world"
-)
+echo "Fetching peer ID from $INSTANCE..."
 
-echo "Fetching peer IDs from running nodes..."
-echo ""
+PEER_ID=$(gcloud compute ssh "$INSTANCE" --zone="$ZONE" -- \
+  journalctl -u zerox1-node --no-pager -n 500 2>/dev/null \
+  | grep -oP 'peer_id=\K[A-Za-z0-9]+' \
+  | tail -1)
 
-for NAME in "${!INSTANCES[@]}"; do
-  ZONE="${INSTANCES[$NAME]}"
-  HOST="${DNS[$NAME]}"
+if [ -z "$PEER_ID" ]; then
+  echo "ERROR: peer ID not found. Check if zerox1-node is running:"
+  echo "  gcloud compute ssh $INSTANCE --zone=$ZONE -- journalctl -u zerox1-node -n 50"
+  exit 1
+fi
 
-  # Grep the systemd journal for the startup multiaddr log line.
-  PEER_ID=$(gcloud compute ssh "$NAME" --zone="$ZONE" -- \
-    journalctl -u zerox1-node --no-pager -n 200 2>/dev/null \
-    | grep "0x01 bootstrap multiaddr" \
-    | grep -oP 'p2p/\K[A-Za-z0-9]+' \
-    | tail -1)
-
-  if [ -z "$PEER_ID" ]; then
-    echo "  $NAME: peer ID not found yet (node may still be starting)"
-    continue
-  fi
-
-  MULTIADDR="/dns4/${HOST}/tcp/9000/p2p/${PEER_ID}"
-  echo "  // $NAME"
-  echo "  \"$MULTIADDR\","
-done
+MULTIADDR="/dns4/${DNS}/tcp/9000/p2p/${PEER_ID}"
 
 echo ""
-echo "Paste the lines above into:"
-echo "  node/crates/zerox1-node/src/config.rs  →  DEFAULT_BOOTSTRAP_PEERS"
+echo "Paste this into crates/zerox1-node/src/config.rs → DEFAULT_BOOTSTRAP_PEERS:"
 echo ""
-echo "Then rebuild and redeploy."
+echo "  \"$MULTIADDR\","
+echo ""
+echo "Then commit, tag a new release, and redeploy."

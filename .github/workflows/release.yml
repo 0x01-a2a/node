@@ -64,9 +64,9 @@ jobs:
           path: target/${{ matrix.target }}/release/${{ matrix.binary }}
           if-no-files-found: error
 
-  # ── Build zerox1-aggregator (Linux only — server-side service) ─────────────
-  build-aggregator:
-    name: Build aggregator
+  # ── Build zerox1-aggregator and challenger (Linux only — server-side services) ─────────────
+  build-server-services:
+    name: Build server services
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -85,8 +85,10 @@ jobs:
           key: cargo-linux-x64-aggregator-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-linux-x64-aggregator-
 
-      - name: Build zerox1-aggregator
-        run: cargo build --release -p zerox1-aggregator
+      - name: Build server services
+        run: |
+          cargo build --release -p zerox1-aggregator
+          cargo build --release -p zerox1-challenger
         env:
           CARGO_TERM_COLOR: always
 
@@ -95,6 +97,13 @@ jobs:
         with:
           name: zerox1-aggregator
           path: target/release/zerox1-aggregator
+          if-no-files-found: error
+
+      - name: Upload challenger artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zerox1-challenger
+          path: target/release/zerox1-challenger
           if-no-files-found: error
 
   # ── Assemble and publish npm packages ────────────────────────────────────
@@ -186,7 +195,7 @@ jobs:
   # ── Create GitHub Release with binary attachments ─────────────────────────
   github-release:
     name: GitHub Release
-    needs: [build, build-aggregator]
+    needs: [build, build-server-services]
     runs-on: ubuntu-latest
 
     steps:
@@ -202,7 +211,8 @@ jobs:
           cp artifacts/zerox1-node-darwin-arm64/zerox1-node    zerox1-node-darwin-arm64
           cp artifacts/zerox1-node-darwin-x64/zerox1-node      zerox1-node-darwin-x64
           cp artifacts/zerox1-node-linux-x64/zerox1-node       zerox1-node-linux-x64
-          cp artifacts/zerox1-aggregator/zerox1-aggregator      zerox1-aggregator-linux-x64
+          cp artifacts/zerox1-aggregator/zerox1-aggregator     zerox1-aggregator-linux-x64
+          cp artifacts/zerox1-challenger/zerox1-challenger     zerox1-challenger-linux-x64
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -212,4 +222,5 @@ jobs:
             zerox1-node-darwin-x64
             zerox1-node-linux-x64
             zerox1-aggregator-linux-x64
+            zerox1-challenger-linux-x64
           generate_release_notes: true

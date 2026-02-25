@@ -28,6 +28,8 @@ gcloud compute scp deploy/systemd/zerox1-node.service \
   "${INSTANCE}:/tmp/zerox1-node.service" --zone="$ZONE"
 gcloud compute scp deploy/systemd/zerox1-aggregator.service \
   "${INSTANCE}:/tmp/zerox1-aggregator.service" --zone="$ZONE"
+gcloud compute scp deploy/systemd/zerox1-challenger.service \
+  "${INSTANCE}:/tmp/zerox1-challenger.service" --zone="$ZONE"
 gcloud compute scp deploy/systemd/kora.service \
   "${INSTANCE}:/tmp/kora.service" --zone="$ZONE"
 
@@ -36,7 +38,7 @@ gcloud compute ssh "$INSTANCE" --zone="$ZONE" -- sudo bash -s <<REMOTE
   set -euo pipefail
 
   echo "==> Stopping services to allow binary replacement..."
-  systemctl stop kora zerox1-aggregator zerox1-node || true
+  systemctl stop kora zerox1-aggregator zerox1-challenger zerox1-node || true
 
   RELEASE="${RELEASE}"
   REPO="${GITHUB_REPO}"
@@ -50,6 +52,11 @@ gcloud compute ssh "$INSTANCE" --zone="$ZONE" -- sudo bash -s <<REMOTE
   curl -fsSL "https://github.com/\${REPO}/releases/download/\${RELEASE}/zerox1-aggregator-linux-x64" \
     -o /opt/zerox1/bin/zerox1-aggregator
   chmod +x /opt/zerox1/bin/zerox1-aggregator
+
+  echo "==> Downloading zerox1-challenger \$RELEASE..."
+  curl -fsSL "https://github.com/\${REPO}/releases/download/\${RELEASE}/zerox1-challenger-linux-x64" \
+    -o /opt/zerox1/bin/zerox1-challenger
+  chmod +x /opt/zerox1/bin/zerox1-challenger
 
   # ── Build Kora from source ─────────────────────────────────────────────────
   if [ ! -f /opt/zerox1/bin/kora ]; then
@@ -165,24 +172,28 @@ EOF
   # ── Install systemd units ──────────────────────────────────────────────────
   cp /tmp/zerox1-node.service        /etc/systemd/system/
   cp /tmp/zerox1-aggregator.service  /etc/systemd/system/
+  cp /tmp/zerox1-challenger.service  /etc/systemd/system/
   cp /tmp/kora.service               /etc/systemd/system/
 
   systemctl daemon-reload
 
   # ── Start/restart services (order: kora first, then node) ─────────────────
   echo "==> Starting services..."
-  systemctl enable kora zerox1-aggregator zerox1-node
+  systemctl enable kora zerox1-aggregator zerox1-challenger zerox1-node
   systemctl restart kora
   sleep 2
   systemctl restart zerox1-aggregator
+  sleep 1
+  systemctl restart zerox1-challenger
   sleep 1
   systemctl restart zerox1-node
 
   echo ""
   echo "Service status:"
-  systemctl is-active kora              && echo "  kora:               active" || echo "  kora:               FAILED"
-  systemctl is-active zerox1-aggregator && echo "  zerox1-aggregator:  active" || echo "  zerox1-aggregator:  FAILED"
-  systemctl is-active zerox1-node       && echo "  zerox1-node:        active" || echo "  zerox1-node:        FAILED"
+  systemctl is-active kora                && echo "  kora:                 active" || echo "  kora:                 FAILED"
+  systemctl is-active zerox1-aggregator   && echo "  zerox1-aggregator:    active" || echo "  zerox1-aggregator:    FAILED"
+  systemctl is-active zerox1-challenger   && echo "  zerox1-challenger:    active" || echo "  zerox1-challenger:    FAILED"
+  systemctl is-active zerox1-node         && echo "  zerox1-node:          active" || echo "  zerox1-node:          FAILED"
 REMOTE
 
 echo ""

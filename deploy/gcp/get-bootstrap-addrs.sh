@@ -14,9 +14,9 @@ DNS="bootstrap-1.0x01.world"
 echo "Fetching peer ID from $INSTANCE..."
 
 PEER_ID=$(gcloud compute ssh "$INSTANCE" --zone="$ZONE" -- \
-  journalctl -u zerox1-node --no-pager -n 500 2>/dev/null \
+  "journalctl -u zerox1-node --no-pager -n 500 2>/dev/null \
   | grep -oP 'peer_id=\K[A-Za-z0-9]+' \
-  | tail -1)
+  | tail -1")
 
 if [ -z "$PEER_ID" ]; then
   echo "ERROR: peer ID not found. Check if zerox1-node is running:"

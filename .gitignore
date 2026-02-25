@@ -4,11 +4,10 @@ target/
 Cargo.lock.bak
 
 # Anchor / SBF build artifacts
-node/programs/workspace/target/
 programs/workspace/target/
 .anchor/
 
-# SDK — platform binaries are populated by CI, not committed
+# SDK — platform binaries populated by CI, not committed
 sdk/packages/*/bin/
 
 # TypeScript / Node
@@ -21,8 +20,14 @@ sdk/*.tsbuildinfo
 .env.*
 *.key
 *.pem
-/etc/zerox1/
+*.json.bak
+
+# Deploy — generated secrets and runtime config
 deploy/gcp/.secrets
+deploy/gcp/*.secrets
+/etc/zerox1/
+kora.toml
+deploy/
 
 # IDE
 .idea/
@@ -35,3 +40,4 @@ Thumbs.db
 # Logs
 *.log
 logs/
+zerox1-epoch-*.cbor

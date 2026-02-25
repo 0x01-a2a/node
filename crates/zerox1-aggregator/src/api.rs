@@ -28,13 +28,18 @@ pub struct AppState {
 // ============================================================================
 
 fn ct_eq(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
+    // Compare in constant time — no early return on length mismatch to prevent
+    // timing side-channels that would reveal secret length.
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let len = a.len().max(b.len());
+    let mut diff: u8 = (a.len() ^ b.len()) as u8;
+    for i in 0..len {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        diff |= x ^ y;
     }
-    a.bytes()
-        .zip(b.bytes())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
+    diff == 0
 }
 
 // ============================================================================

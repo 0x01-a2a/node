@@ -2,6 +2,8 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use libp2p::identity;
 use rand::rngs::OsRng;
 use std::path::Path;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 /// Agent identity: Ed25519 signing key + SATI mint address.
 ///
@@ -33,7 +35,17 @@ impl AgentIdentity {
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
-        std::fs::write(path, self.signing_key.to_bytes())?;
+        use std::io::Write;
+        // mode 0o600: owner read/write only — private key must never be world-readable.
+        #[cfg(unix)]
+        let mut file = std::fs::OpenOptions::new()
+            .write(true).create(true).truncate(true).mode(0o600)
+            .open(path)?;
+        #[cfg(not(unix))]
+        let mut file = std::fs::OpenOptions::new()
+            .write(true).create(true).truncate(true)
+            .open(path)?;
+        file.write_all(&self.signing_key.to_bytes())?;
         Ok(())
     }
 

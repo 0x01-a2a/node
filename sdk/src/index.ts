@@ -107,6 +107,7 @@ export interface SendFeedbackParams {
 // ============================================================================
 
 function cborInt(n: number): Buffer {
+  n = Math.trunc(n)
   if (n >= 0   && n <= 23)  return Buffer.from([n])
   if (n >= 24  && n <= 255) return Buffer.from([0x18, n])
   if (n >= -24 && n <   0)  return Buffer.from([0x20 + (-n - 1)])
@@ -177,7 +178,11 @@ function resolveKeypairPath(keypair: Uint8Array | string): string {
   }
   // Caller passed raw bytes — write to a temp file with restrictive permissions.
   // mode 0o600: owner read/write only — prevents other users from reading the key.
-  const tmpPath = path.join(os.tmpdir(), `zerox1-identity-${Date.now()}.key`)
+  // Create a private temp directory first (mode 0o700) to prevent symlink
+  // race attacks on world-writable /tmp before writing the key file.
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zerox1-'))
+  fs.chmodSync(tmpDir, 0o700)
+  const tmpPath = path.join(tmpDir, 'identity.key')
   fs.writeFileSync(tmpPath, Buffer.from(keypair), { mode: 0o600 })
   return tmpPath
 }
@@ -203,11 +208,12 @@ async function waitForReady(port: number, timeoutMs = 15_000): Promise<void> {
 type Handler = (env: InboundEnvelope) => void | Promise<void>
 
 export class Zerox1Agent {
-  private proc:    ChildProcess | null = null
-  private ws:      WebSocket | null    = null
-  private handlers: Map<string, Handler[]> = new Map()
-  private port:    number = 0
-  private nodeUrl: string = ''
+  private proc:            ChildProcess | null = null
+  private ws:              WebSocket | null    = null
+  private handlers:        Map<string, Handler[]> = new Map()
+  private port:            number = 0
+  private nodeUrl:         string = ''
+  private _reconnectDelay: number = 1000
 
   private constructor() {}
 
@@ -342,6 +348,9 @@ export class Zerox1Agent {
    * Protocol rule 9 requires CBOR — this method handles the encoding.
    */
   async sendFeedback(params: SendFeedbackParams): Promise<SentConfirmation> {
+    if (params.score < -100 || params.score > 100)
+      throw new RangeError(`score must be in [-100, 100], got ${params.score}`)
+
     const outcomeMap = { negative: 0, neutral: 1, positive: 2 } as const
     const roleMap    = { participant: 0, notary: 1 } as const
 
@@ -388,6 +397,8 @@ export class Zerox1Agent {
     const ws    = new WebSocket(wsUrl)
     this.ws     = ws
 
+    ws.on('open', () => { this._reconnectDelay = 1000 })
+
     ws.on('message', (data) => {
       try {
         const raw = JSON.parse(data.toString())
@@ -418,8 +429,11 @@ export class Zerox1Agent {
     })
 
     ws.on('close', () => {
-      // Reconnect only if the process is still running.
-      if (this.proc) setTimeout(() => this._connectInbox(), 1000)
+      // Reconnect with exponential backoff (1s → 2s → 4s … capped at 30s).
+      if (this.proc) {
+        setTimeout(() => { this._reconnectDelay = 1000; this._connectInbox() }, this._reconnectDelay)
+        this._reconnectDelay = Math.min(this._reconnectDelay * 2, 30_000)
+      }
     })
 
     ws.on('error', () => { /* close event handles reconnect */ })

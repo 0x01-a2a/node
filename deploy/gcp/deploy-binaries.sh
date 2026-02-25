@@ -102,7 +102,6 @@ max_signatures = 10
 price_source = "Mock"
 allow_durable_transactions = false
 
-[policy]
 # Program IDs allowed to be sponsored by Kora
 allowed_programs = [
   "3gXhgBLsVYVQkntuVcPdiDe2gRxbSt2CGFJKriA8q9bA",  # behavior-log
@@ -110,12 +109,11 @@ allowed_programs = [
   "KncUkaiDtvaLJRDfXDmPXKmBYnVe6m3MKBawZsf6xsj",   # challenge
   "CmtDveNpCXNJePa7pCLi7vCPeuNmWnfqq2L2YGiG7YD4",  # stake-lock
 ]
+
 # Token mints allowed (USDC only)
 allowed_tokens = [
   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
 ]
-# Max SOL fee per transaction
-max_fee_lamports = 100000
 KORACFG
   chown zerox1:zerox1 /etc/zerox1/kora.toml
   chmod 600 /etc/zerox1/kora.toml

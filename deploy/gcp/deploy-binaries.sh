@@ -128,10 +128,36 @@ KORACFG
 [[signers]]
 name = "default"
 type = "memory"
-path = "/var/lib/zerox1/kora-wallet.json"
+private_key_env = "KORA_PRIVATE_KEY"
 SIGNERSCFG
   chown zerox1:zerox1 /etc/zerox1/signers.toml
   chmod 600 /etc/zerox1/signers.toml
+
+  cat > /tmp/b58.py <<'EOF'
+import sys, json
+b58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+def b58encode(v):
+    n, p = 0, 0
+    for x in v: n = (n << 8) + x
+    res = []
+    while n > 0:
+        n, r = divmod(n, 58)
+        res.append(b58[r])
+    for x in v:
+        if x == 0: p += 1
+        else: break
+    return '1' * p + ''.join(reversed(res))
+if __name__ == '__main__':
+    with open('/var/lib/zerox1/kora-wallet.json') as f:
+        key_bytes = json.load(f)
+    print(b58encode(key_bytes))
+EOF
+  KPA_BASE58=$(python3 /tmp/b58.py)
+  # Remove old KORA_PRIVATE_KEY if it exists
+  sed -i '/^KORA_PRIVATE_KEY=/d' /etc/zerox1/env || true
+  # Append new KORA_PRIVATE_KEY map
+  echo "KORA_PRIVATE_KEY=\$KPA_BASE58" >> /etc/zerox1/env
+
 
   # ── Install systemd units ──────────────────────────────────────────────────
   cp /tmp/zerox1-node.service        /etc/systemd/system/

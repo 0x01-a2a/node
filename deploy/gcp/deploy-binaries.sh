@@ -122,6 +122,15 @@ KORACFG
   chown zerox1:zerox1 /etc/zerox1/kora.toml
   chmod 600 /etc/zerox1/kora.toml
 
+  cat > /etc/zerox1/signers.toml <<SIGNERSCFG
+[signers]
+  [signers.default]
+  type = "keypair"
+  path = "/var/lib/zerox1/kora-wallet.json"
+SIGNERSCFG
+  chown zerox1:zerox1 /etc/zerox1/signers.toml
+  chmod 600 /etc/zerox1/signers.toml
+
   # ── Install systemd units ──────────────────────────────────────────────────
   cp /tmp/zerox1-node.service        /etc/systemd/system/
   cp /tmp/zerox1-aggregator.service  /etc/systemd/system/

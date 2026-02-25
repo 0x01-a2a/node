@@ -13,12 +13,13 @@
   },
   "optionalDependencies": {
     "@zerox1/sdk-darwin-arm64": "0.1.0",
-    "@zerox1/sdk-darwin-x64":   "0.1.0",
-    "@zerox1/sdk-linux-x64":    "0.1.0"
+    "@zerox1/sdk-darwin-x64": "0.1.0",
+    "@zerox1/sdk-linux-x64": "0.1.0",
+    "@zerox1/sdk-windows-x64": "0.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "@types/ws":   "^8.5.13",
-    "typescript":  "^5.7.0"
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.7.0"
   }
 }

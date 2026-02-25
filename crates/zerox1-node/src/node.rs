@@ -1144,6 +1144,22 @@ impl Zx01Node {
             batch_hash:    batch_hash_hex,
         });
 
+        // GAP-04: Compute verifier ID histogram and push to aggregator
+        let mut verifier_histogram: HashMap<String, u32> = HashMap::new();
+        for assignment in &batch.verifier_ids {
+            let vid = hex::encode(assignment.verifier_id);
+            *verifier_histogram.entry(vid).or_insert(0) += 1;
+        }
+        
+        if !verifier_histogram.is_empty() {
+            self.push_to_aggregator(serde_json::json!({
+                "msg_type":  "VERIFIER_HISTOGRAM",
+                "agent_id":  hex::encode(batch.agent_id),
+                "epoch":     batch.epoch_number,
+                "histogram": verifier_histogram,
+            }));
+        }
+
         // Compute entropy vector and push to aggregator.
         let ev = zerox1_protocol::entropy::compute(
             &batch,

@@ -6,6 +6,9 @@ use anchor_spl::{
 
 declare_id!("6tVCJmogJghQMEMRhvk4qrUoT6JXPPDebUwmRHXTtygj");
 
+/// Protocol treasury wallet — receives forfeited challenge stake.
+pub const TREASURY_PUBKEY: Pubkey = pubkey!("qw4hzfV7UUXTrNh3hiS9Q8KSPMXWUusNoyFKLvtcMMX");
+
 /// Behavior-log program ID — batch accounts must be owned by this program.
 const BEHAVIOR_LOG_PROGRAM_ID: Pubkey =
     pubkey!("3gXhgBLsVYVQkntuVcPdiDe2gRxbSt2CGFJKriA8q9bA");
@@ -395,8 +398,16 @@ pub struct ResolveChallenge<'info> {
     pub challenger_usdc: Account<'info, TokenAccount>,
 
     /// Protocol treasury USDC ATA — receives forfeited stake on failure.
-    #[account(mut)]
+    #[account(
+        mut,
+        associated_token::mint      = usdc_mint,
+        associated_token::authority = treasury,
+    )]
     pub treasury_usdc: Account<'info, TokenAccount>,
+
+    /// CHECK: Must match the protocol treasury pubkey.
+    #[account(address = TREASURY_PUBKEY)]
+    pub treasury: UncheckedAccount<'info>,
 
     /// Batch account — log_merkle_root read from raw bytes for proof verification.
     /// CHECK: Batch account used as key for challenge PDA seed derivation.

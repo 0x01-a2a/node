@@ -27,6 +27,9 @@ pub const UNLOCK_DELAY_SLOTS: u64 = 432_000;
 /// Challenge program ID — only this program can call slash().
 const CHALLENGE_PROGRAM_ID: Pubkey =
     pubkey!("6tVCJmogJghQMEMRhvk4qrUoT6JXPPDebUwmRHXTtygj");
+/// Lease program ID — used to verify lease PDA in queue_unlock.
+const LEASE_PROGRAM_ID: Pubkey =
+    pubkey!("6uMjFPETQEvALjbWUorc5pBZ7FagNzmr8wxovH89bgEi");
 /// BehaviorLog program ID — AgentBatchRegistry accounts must be owned by this.
 const BEHAVIOR_LOG_PROGRAM_ID: Pubkey =
     pubkey!("3gXhgBLsVYVQkntuVcPdiDe2gRxbSt2CGFJKriA8q9bA");
@@ -54,6 +57,10 @@ pub mod stake_lock {
         let clock  = Clock::get()?;
 
         require!(args.amount >= MIN_STAKE_USDC, StakeLockError::InsufficientStake);
+        require!(
+            args.agent_mint == ctx.accounts.agent_mint_account.key().to_bytes(),
+            StakeLockError::MintMismatch
+        );
 
         // Transfer USDC from owner's ATA to stake vault.
         let cpi_ctx = CpiContext::new(
@@ -100,6 +107,20 @@ pub mod stake_lock {
         {
             let data = ctx.accounts.lease_account.try_borrow_data()?;
             require!(data.len() > 97, StakeLockError::AgentNotDeactivated);
+            require!(
+                ctx.accounts.lease_account.owner == &LEASE_PROGRAM_ID,
+                StakeLockError::InvalidLeaseAccount
+            );
+            
+            let (expected_lease, _) = Pubkey::find_program_address(
+                &[b"lease", stake.agent_mint.as_ref()],
+                &LEASE_PROGRAM_ID,
+            );
+            require!(
+                ctx.accounts.lease_account.key() == expected_lease,
+                StakeLockError::InvalidLeaseAccount
+            );
+
             let deactivated = data[97] != 0;
             require!(deactivated, StakeLockError::AgentNotDeactivated);
         }
@@ -394,13 +415,16 @@ pub struct LockStake<'info> {
     )]
     pub stake_vault: Account<'info, TokenAccount>,
 
-    /// SATI AgentIndex PDA. Must be non-empty, proving SATI registration.
-    /// CHECK: We verify this is owned by the SATI program and is non-empty.
+    /// The agent's SATI NFT mint.
+    pub agent_mint_account: Account<'info, Mint>,
+
+    /// The owner's token account for the SATI NFT, proving they own the agent.
     #[account(
-        constraint = !sati_agent_index.data_is_empty() @ StakeLockError::SatiNotRegistered,
-        constraint = sati_agent_index.owner.to_string() == "satiRkxEiwZ51cv8PRu8UMzuaqeaNU9jABo6oAFMsLe" @ StakeLockError::SatiNotRegistered,
+        token::mint = agent_mint_account,
+        token::authority = owner,
+        constraint = owner_sati_token.amount == 1 @ StakeLockError::NotOwner,
     )]
-    pub sati_agent_index: UncheckedAccount<'info>,
+    pub owner_sati_token: Account<'info, TokenAccount>,
 
     pub usdc_mint:                Account<'info, Mint>,
     pub token_program:            Program<'info, Token>,
@@ -718,4 +742,8 @@ pub enum StakeLockError {
     AlreadySlashedInactive,
     #[msg("Agent registry account is invalid or owned by the wrong program")]
     InvalidRegistryAccount,
+    #[msg("Lease account is invalid, derived incorrectly, or owned by the wrong program")]
+    InvalidLeaseAccount,
+    #[msg("Agent mint argument does not match provided SATI mint account")]
+    MintMismatch,
 }

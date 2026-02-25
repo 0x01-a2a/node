@@ -40,6 +40,11 @@ pub mod lease {
         let lease = &mut ctx.accounts.lease_account;
         let clock = Clock::get()?;
 
+        require!(
+            args.agent_id == ctx.accounts.agent_mint.key().to_bytes(),
+            LeaseError::MintMismatch
+        );
+
         lease.agent_id           = args.agent_id;
         lease.owner              = ctx.accounts.owner.key();
         // Pre-paid for 1 epoch (covers the current day).
@@ -174,6 +179,17 @@ pub struct InitLease<'info> {
         associated_token::authority = owner,
     )]
     pub owner_usdc: Account<'info, TokenAccount>,
+
+    /// The agent's SATI NFT mint.
+    pub agent_mint: Account<'info, Mint>,
+
+    /// The owner's token account for the SATI NFT, proving they own the agent.
+    #[account(
+        token::mint = agent_mint,
+        token::authority = owner,
+        constraint = owner_sati_token.amount == 1 @ LeaseError::NotOwner,
+    )]
+    pub owner_sati_token: Account<'info, TokenAccount>,
 
     /// Lease state PDA. seeds = ["lease", agent_id]
     #[account(
@@ -337,4 +353,6 @@ pub enum LeaseError {
     Overflow,
     #[msg("Caller is not the agent owner")]
     NotOwner,
+    #[msg("Agent mint argument does not match provided SATI mint account")]
+    MintMismatch,
 }

@@ -125,6 +125,9 @@ KORACFG
   chmod 600 /etc/zerox1/kora.toml
 
   cat > /etc/zerox1/signers.toml <<SIGNERSCFG
+[signer_pool]
+strategy = "round_robin"
+
 [[signers]]
 name = "default"
 type = "memory"

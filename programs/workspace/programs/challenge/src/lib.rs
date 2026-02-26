@@ -106,7 +106,8 @@ pub mod challenge {
         let entry_hash =
             anchor_lang::solana_program::keccak::hash(&args.contradicting_entry).to_bytes();
 
-        let challenge                     = &mut ctx.accounts.challenge_account;
+        let challenge = &mut ctx.accounts.challenge_account;
+        challenge.version                 = 1;
         challenge.agent_id                = args.agent_id;
         challenge.epoch_number            = args.epoch_number;
         challenge.challenger              = ctx.accounts.challenger.key();
@@ -467,6 +468,7 @@ pub struct ResolveChallenge<'info> {
 /// PDA: seeds = ["challenge", batch_pda_key, challenger_pubkey]
 #[account]
 pub struct ChallengeAccount {
+    pub version:               u8,
     pub agent_id:              [u8; 32],
     pub epoch_number:          u64,
     pub challenger:            Pubkey,
@@ -481,8 +483,8 @@ pub struct ChallengeAccount {
 }
 
 impl ChallengeAccount {
-    /// 8 + 32 + 8 + 32 + 32 + 8 + 2 + 1 + 1 + 8 + 1 + 1 = 134 bytes
-    pub const SIZE: usize = 8 + 32 + 8 + 32 + 32 + 8 + 2 + 1 + 1 + 8 + 1 + 1;
+    /// 8 + 1 + 32 + 8 + 32 + 32 + 8 + 2 + 1 + 1 + 8 + 1 + 1 = 135 bytes
+    pub const SIZE: usize = 8 + 1 + 32 + 8 + 32 + 32 + 8 + 2 + 1 + 1 + 8 + 1 + 1;
 }
 
 // ============================================================================

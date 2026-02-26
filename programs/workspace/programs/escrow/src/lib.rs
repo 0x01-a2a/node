@@ -87,6 +87,7 @@ pub mod escrow {
         let total   = amount.checked_add(notary_fee).ok_or(EscrowError::AmountOverflow)?;
 
         let escrow              = &mut ctx.accounts.escrow_account;
+        escrow.version           = 1;
         escrow.requester         = ctx.accounts.requester.key();
         escrow.provider          = ctx.accounts.provider.key();
         escrow.notary            = notary;
@@ -545,6 +546,8 @@ pub struct CancelEscrow<'info> {
 
 #[account]
 pub struct EscrowAccount {
+    /// Struct version for migration safety.
+    pub version:         u8,             // 1
     /// The party who locked payment and can approve release.
     pub requester:       Pubkey,         // 32
     /// The party who will receive payment on approval or timeout.
@@ -568,8 +571,8 @@ pub struct EscrowAccount {
 }
 
 impl EscrowAccount {
-    /// 8 disc + 32 + 32 + 33 + 8 + 8 + 8 + 8 + 16 + 1 + 1
-    pub const SIZE: usize = 8 + 32 + 32 + 33 + 8 + 8 + 8 + 8 + 16 + 1 + 1;
+    /// 8 disc + 1 + 32 + 32 + 33 + 8 + 8 + 8 + 8 + 16 + 1 + 1
+    pub const SIZE: usize = 8 + 1 + 32 + 32 + 33 + 8 + 8 + 8 + 8 + 16 + 1 + 1;
 }
 
 // ============================================================================

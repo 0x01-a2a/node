@@ -454,7 +454,9 @@ fn compute_clusters_from_edges(edges: &[CapitalFlowEdge]) -> (HashMap<String, u3
 // SQLite persistence layer
 // ============================================================================
 
-const SCHEMA: &str = "
+const MIGRATIONS: &[&str] = &[
+    // v1: Initial schema
+    "
 CREATE TABLE IF NOT EXISTS agent_reputation (
     agent_id       TEXT    PRIMARY KEY,
     feedback_count INTEGER NOT NULL DEFAULT 0,
@@ -548,17 +550,38 @@ CREATE TABLE IF NOT EXISTS agent_registry (
     first_seen INTEGER NOT NULL,
     last_seen  INTEGER NOT NULL
 );
-
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous  = NORMAL;
-";
+",
+];
 
 struct Db(rusqlite::Connection);
 
 impl Db {
     fn open(path: &Path) -> rusqlite::Result<Self> {
-        let conn = rusqlite::Connection::open(path)?;
-        conn.execute_batch(SCHEMA)?;
+        let mut conn = rusqlite::Connection::open(path)?;
+        
+        conn.execute_batch("
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous  = NORMAL;
+            CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY);
+        ")?;
+
+        let current_version: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            [],
+            |row| row.get(0),
+        ).unwrap_or(0);
+
+        let tx = conn.transaction()?;
+        for (i, &migration_sql) in MIGRATIONS.iter().enumerate() {
+            let migration_version = (i + 1) as i64;
+            if migration_version > current_version {
+                tx.execute_batch(migration_sql)?;
+                tx.execute("INSERT INTO schema_migrations (version) VALUES (?)", [migration_version])?;
+                tracing::info!("Applied SQLite database migration v{}", migration_version);
+            }
+        }
+        tx.commit()?;
+
         Ok(Db(conn))
     }
 

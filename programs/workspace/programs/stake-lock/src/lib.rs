@@ -625,6 +625,8 @@ pub struct Slash<'info> {
 /// PDA: seeds = ["stake", agent_mint]
 #[account]
 pub struct StakeLockAccount {
+    /// Struct version for migration safety.
+    pub version:               u8,
     /// SATI mint address = agent ID.
     pub agent_mint:            [u8; 32],
     /// Wallet that owns the SATI NFT.
@@ -646,8 +648,8 @@ pub struct StakeLockAccount {
 }
 
 impl StakeLockAccount {
-    /// 8 + 32 + 32 + 8 + 8 + 1 + 8 + 1 + 1 + 1 = 100 bytes
-    pub const SIZE: usize = 8 + 32 + 32 + 8 + 8 + 1 + 8 + 1 + 1 + 1;
+    /// 8 + 1 + 32 + 32 + 8 + 8 + 1 + 8 + 1 + 1 + 1 = 101 bytes
+    pub const SIZE: usize = 8 + 1 + 32 + 32 + 8 + 8 + 1 + 8 + 1 + 1 + 1;
 }
 
 // ============================================================================

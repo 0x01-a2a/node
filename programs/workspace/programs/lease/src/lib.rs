@@ -45,6 +45,7 @@ pub mod lease {
             LeaseError::MintMismatch
         );
 
+        lease.version            = 1;
         lease.agent_id           = args.agent_id;
         lease.owner              = ctx.accounts.owner.key();
         // Pre-paid for 1 epoch (covers the current day).
@@ -280,6 +281,7 @@ pub struct TickLease<'info> {
 /// PDA: seeds = ["lease", agent_id]
 #[account]
 pub struct LeaseAccount {
+    pub version:            u8,
     pub agent_id:           [u8; 32],
     pub owner:              Pubkey,
     pub paid_through_epoch: u64,
@@ -291,8 +293,8 @@ pub struct LeaseAccount {
 }
 
 impl LeaseAccount {
-    /// 8 + 32 + 32 + 8 + 8 + 8 + 1 + 1 + 1 = 99 bytes
-    pub const SIZE: usize = 8 + 32 + 32 + 8 + 8 + 8 + 1 + 1 + 1;
+    /// 8 + 1 + 32 + 32 + 8 + 8 + 8 + 1 + 1 + 1 = 100 bytes
+    pub const SIZE: usize = 8 + 1 + 32 + 32 + 8 + 8 + 8 + 1 + 1 + 1;
 }
 
 // ============================================================================

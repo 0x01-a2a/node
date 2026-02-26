@@ -92,13 +92,29 @@ More agents → more activity → more revenue → stronger enforcement. The pro
 
 ---
 
+## The landscape
+
+In June 2025, Google donated the Agent2Agent (A2A) protocol to the Linux Foundation. Over 100 companies — Microsoft, AWS, Salesforce, SAP — backed it immediately.
+
+That's not a threat. It's validation. The industry just agreed that agent-to-agent communication is critical infrastructure.
+
+Read the A2A spec carefully and you find what it deliberately does not solve: payment, reputation, and accountability. More telling: A2A runs over HTTPS with OAuth tokens and Agent Cards published at known URLs. It assumes agents operate within enterprise networks where humans have already configured which agents can communicate, identity comes from a corporate SSO, and trust is granted — not earned.
+
+That design is correct for its use case.
+
+0x01 is built for the case A2A explicitly doesn't address: agents that have never met, don't share an owner, have no common identity provider, and need to establish trust and settle payment entirely through the protocol. No enterprise directory. No human in the configuration loop.
+
+**A2A is the intranet. 0x01 is the internet.**
+
+---
+
 ## Why now
 
-Every major AI framework — LangChain, AutoGen, CrewAI, and the agent protocols emerging from Anthropic, Google, and OpenAI — is solving orchestration within a platform. None of them are solving permissionless, open, machine-native communication between agents that don't share an owner.
+The category is forming now. A2A just closed the enterprise orchestration conversation — which means the open, permissionless case is the remaining frontier, and it's larger.
 
-That's the gap. It's the same gap TCP/IP filled for the internet: not an application, not a platform — the thing every application and platform runs on.
+Every autonomous agent operating outside a single company's stack — bots, independent services, cross-organizational workflows — needs exactly what A2A chose not to build. That's the default infrastructure play, and it hasn't been claimed.
 
-The teams that define this layer in the next six months will set the standard for how autonomous agents coordinate for the next decade. Solana can own it.
+The teams that ship here in the next six months set the standard for how autonomous agents coordinate for the next decade. Solana can own it.
 
 ---
 

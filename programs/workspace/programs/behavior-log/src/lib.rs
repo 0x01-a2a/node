@@ -65,6 +65,7 @@ pub mod behavior_log {
         require!(pubkey == args.agent_id, BehaviorLogError::SignerMismatch);
         require!(msg == args.batch_hash, BehaviorLogError::MessageMismatch);
 
+        batch.version         = 1;
         batch.agent_id        = args.agent_id;
         batch.epoch_number    = args.epoch_number;
         batch.log_merkle_root = args.log_merkle_root;
@@ -73,9 +74,11 @@ pub mod behavior_log {
         batch.bump            = ctx.bumps.batch_account;
 
         // Initialize registry agent_id if this is the first time (init_if_needed).
-        ctx.accounts.registry.agent_id = args.agent_id;
+        let registry = &mut ctx.accounts.registry;
+        registry.version = 1;
+        registry.agent_id = args.agent_id;
         // Advance registry epoch counter
-        ctx.accounts.registry.next_epoch += 1;
+        registry.next_epoch += 1;
 
         emit!(BatchSubmitted {
             agent_id:     args.agent_id,
@@ -142,6 +145,8 @@ pub struct SubmitBatch<'info> {
 /// PDA: seeds = ["batch", agent_id, epoch_number.to_le_bytes()]
 #[account]
 pub struct BatchAccount {
+    /// Struct version for migration safety.
+    pub version: u8,
     /// Agent ID = SATI mint address (32 bytes).
     pub agent_id: [u8; 32],
     /// Zero-based 0x01 epoch counter.
@@ -157,8 +162,8 @@ pub struct BatchAccount {
 }
 
 impl BatchAccount {
-    /// 8 (discriminator) + 32 + 8 + 32 + 32 + 8 + 1 = 121 bytes
-    pub const SIZE: usize = 8 + 32 + 8 + 32 + 32 + 8 + 1;
+    /// 8 (discriminator) + 1 + 32 + 8 + 32 + 32 + 8 + 1 = 122 bytes
+    pub const SIZE: usize = 8 + 1 + 32 + 8 + 32 + 32 + 8 + 1;
 }
 
 /// Tracks the next expected epoch number per agent.
@@ -166,14 +171,15 @@ impl BatchAccount {
 /// PDA: seeds = ["agent_registry", agent_id]
 #[account]
 pub struct AgentBatchRegistry {
+    pub version:    u8,
     pub agent_id:   [u8; 32],
     pub next_epoch: u64,
     pub bump:       u8,
 }
 
 impl AgentBatchRegistry {
-    /// 8 + 32 + 8 + 1 = 49 bytes
-    pub const SIZE: usize = 8 + 32 + 8 + 1;
+    /// 8 + 1 + 32 + 8 + 1 = 50 bytes
+    pub const SIZE: usize = 8 + 1 + 32 + 8 + 1;
 }
 
 // ============================================================================

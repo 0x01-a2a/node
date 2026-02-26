@@ -1428,6 +1428,16 @@ impl ReputationStore {
                 }
             }
             IngestEvent::Beacon(ev) => {
+                if !is_valid_agent_id(&ev.sender) {
+                    tracing::warn!("Ingest: invalid sender in BEACON '{}' — dropped", &ev.sender);
+                    return;
+                }
+                // Ensure sender has an entry so they appear in /stats/network agent_count.
+                inner.agents
+                    .entry(ev.sender.clone())
+                    .or_insert_with(|| AgentReputation::new(ev.sender.clone()));
+                drop(inner);
+
                 let ts = now_secs();
                 tracing::debug!("BEACON agent={} name={}", &ev.sender[..8.min(ev.sender.len())], &ev.name);
                 let db = self.db.lock().unwrap();

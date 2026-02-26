@@ -8,6 +8,8 @@ Wants=network-online.target
 Type=simple
 User=zerox1
 Group=zerox1
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 ExecStart=/opt/zerox1/bin/zerox1-aggregator \
   --listen 0.0.0.0:80 \

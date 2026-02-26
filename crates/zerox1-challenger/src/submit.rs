@@ -14,8 +14,8 @@ use sha2::Digest;
 use zerox1_protocol::hash::keccak256;
 
 // Program IDs
-const CHALLENGE_PROGRAM_ID: &str     = "6tVCJmogJghQMEMRhvk4qrUoT6JXPPDebUwmRHXTtygj";
-const BEHAVIOR_LOG_PROGRAM_ID: &str  = "3gXhgBLsVYVQkntuVcPdiDe2gRxbSt2CGFJKriA8q9bA";
+const CHALLENGE_PROGRAM_ID: &str     = "7FoisCiS1gyUx7osQkCLk4A1zNKGq37yHpVhL2BFgk1Y";
+const BEHAVIOR_LOG_PROGRAM_ID: &str  = "35DAMPQVu6wsmMEGv67URFAGgyauEYD73egd74uiX1sM";
 const USDC_MINT: &str                = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"; // Devnet USDC
 
 const SPL_TOKEN_PROGRAM_ID: &str     = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";

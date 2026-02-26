@@ -25,7 +25,7 @@ use crate::{identity::AgentIdentity, kora::KoraClient};
 // ============================================================================
 
 /// Lease program ID (doc 5, §10.3).
-const LEASE_PROGRAM_ID_STR: &str = "6uMjFPETQEvALjbWUorc5pBZ7FagNzmr8wxovH89bgEi";
+const LEASE_PROGRAM_ID_STR: &str = "5P8uXqavnQFGXbHKE3tQDezh41D7ZutHsT2jY6gZ3C3x";
 /// USDC mainnet mint (also devnet via Circle's cross-chain USDC).
 pub const USDC_MINT_STR: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 /// SPL Token program.

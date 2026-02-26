@@ -6,11 +6,11 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-behavior_log = "3gXhgBLsVYVQkntuVcPdiDe2gRxbSt2CGFJKriA8q9bA"
-lease        = "6uMjFPETQEvALjbWUorc5pBZ7FagNzmr8wxovH89bgEi"
-challenge    = "6tVCJmogJghQMEMRhvk4qrUoT6JXPPDebUwmRHXTtygj"
-stake_lock   = "CmtDveNpCXNJePa7pCLi7vCPeuNmWnfqq2L2YGiG7YD4"
-escrow       = "Cb7QtsWXEWZSNcdLMyd4xhiDX9XbQrjwh87g4T9WhqUR"
+behavior_log = "35DAMPQVu6wsmMEGv67URFAGgyauEYD73egd74uiX1sM"
+lease        = "5P8uXqavnQFGXbHKE3tQDezh41D7ZutHsT2jY6gZ3C3x"
+challenge    = "7FoisCiS1gyUx7osQkCLk4A1zNKGq37yHpVhL2BFgk1Y"
+stake_lock   = "Dvf1qPzzvW1BkSUogRMaAvxZpXrmeTqYutTCBKpzHB1A"
+escrow       = "Es69yGQ7XnwhHjoj3TRv5oigUsQzCvbRYGXJTFcJrT9F"
 
 [registry]
 url = "https://api.apr.dev"

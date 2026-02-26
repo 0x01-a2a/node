@@ -4,14 +4,14 @@ use anchor_spl::{
     token::{self, Mint, Token, TokenAccount, Transfer},
 };
 
-declare_id!("6tVCJmogJghQMEMRhvk4qrUoT6JXPPDebUwmRHXTtygj");
+declare_id!("7FoisCiS1gyUx7osQkCLk4A1zNKGq37yHpVhL2BFgk1Y");
 
 /// Protocol treasury wallet — receives forfeited challenge stake.
 pub const TREASURY_PUBKEY: Pubkey = pubkey!("qw4hzfV7UUXTrNh3hiS9Q8KSPMXWUusNoyFKLvtcMMX");
 
 /// Behavior-log program ID — batch accounts must be owned by this program.
 const BEHAVIOR_LOG_PROGRAM_ID: Pubkey =
-    pubkey!("3gXhgBLsVYVQkntuVcPdiDe2gRxbSt2CGFJKriA8q9bA");
+    pubkey!("35DAMPQVu6wsmMEGv67URFAGgyauEYD73egd74uiX1sM");
 
 /// Byte offset of `submitted_slot` in BatchAccount raw data.
 /// Layout: 8 disc + 32 agent_id + 8 epoch_number + 32 log_merkle_root + 32 batch_hash = 112

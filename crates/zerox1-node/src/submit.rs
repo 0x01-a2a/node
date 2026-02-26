@@ -30,7 +30,7 @@ use zerox1_protocol::batch::BehaviorBatch;
 use crate::{identity::AgentIdentity, kora::KoraClient};
 
 /// BehaviorLog program ID on devnet (doc 5, §10.2).
-const BEHAVIOR_LOG_PROGRAM_ID_STR: &str = "3gXhgBLsVYVQkntuVcPdiDe2gRxbSt2CGFJKriA8q9bA";
+const BEHAVIOR_LOG_PROGRAM_ID_STR: &str = "35DAMPQVu6wsmMEGv67URFAGgyauEYD73egd74uiX1sM";
 
 fn behavior_log_program_id() -> Pubkey {
     BEHAVIOR_LOG_PROGRAM_ID_STR

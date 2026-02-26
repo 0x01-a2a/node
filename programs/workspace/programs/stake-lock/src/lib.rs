@@ -4,7 +4,7 @@ use anchor_spl::{
     token::{self, CloseAccount, Mint, Token, TokenAccount, Transfer},
 };
 
-declare_id!("CmtDveNpCXNJePa7pCLi7vCPeuNmWnfqq2L2YGiG7YD4");
+declare_id!("Dvf1qPzzvW1BkSUogRMaAvxZpXrmeTqYutTCBKpzHB1A");
 
 // ============================================================================
 // StakeLock Program (doc 5, §10.5)
@@ -26,13 +26,13 @@ pub const MIN_STAKE_USDC: u64 = 10_000_000;
 pub const UNLOCK_DELAY_SLOTS: u64 = 432_000;
 /// Challenge program ID — only this program can call slash().
 const CHALLENGE_PROGRAM_ID: Pubkey =
-    pubkey!("6tVCJmogJghQMEMRhvk4qrUoT6JXPPDebUwmRHXTtygj");
+    pubkey!("7FoisCiS1gyUx7osQkCLk4A1zNKGq37yHpVhL2BFgk1Y");
 /// Lease program ID — used to verify lease PDA in queue_unlock.
 const LEASE_PROGRAM_ID: Pubkey =
-    pubkey!("6uMjFPETQEvALjbWUorc5pBZ7FagNzmr8wxovH89bgEi");
+    pubkey!("5P8uXqavnQFGXbHKE3tQDezh41D7ZutHsT2jY6gZ3C3x");
 /// BehaviorLog program ID — AgentBatchRegistry accounts must be owned by this.
 const BEHAVIOR_LOG_PROGRAM_ID: Pubkey =
-    pubkey!("3gXhgBLsVYVQkntuVcPdiDe2gRxbSt2CGFJKriA8q9bA");
+    pubkey!("35DAMPQVu6wsmMEGv67URFAGgyauEYD73egd74uiX1sM");
 /// 0x01 genesis Unix timestamp. Update to actual mainnet launch timestamp before deploy.
 pub const GENESIS_TIMESTAMP: i64 = 1_750_000_000;
 /// Epoch length in seconds (1 day).

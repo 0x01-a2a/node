@@ -24,9 +24,9 @@ use crate::{identity::AgentIdentity, kora::KoraClient, lease::get_ata};
 // ============================================================================
 
 /// StakeLock program ID (doc 5, §10.5).
-const STAKE_LOCK_PROGRAM_ID_STR: &str = "CmtDveNpCXNJePa7pCLi7vCPeuNmWnfqq2L2YGiG7YD4";
+const STAKE_LOCK_PROGRAM_ID_STR: &str = "Dvf1qPzzvW1BkSUogRMaAvxZpXrmeTqYutTCBKpzHB1A";
 /// Lease program ID.
-const LEASE_PROGRAM_ID_STR: &str = "6uMjFPETQEvALjbWUorc5pBZ7FagNzmr8wxovH89bgEi";
+const LEASE_PROGRAM_ID_STR: &str = "5P8uXqavnQFGXbHKE3tQDezh41D7ZutHsT2jY6gZ3C3x";
 /// USDC mainnet mint.
 const USDC_MINT_STR: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 /// SPL Token program.

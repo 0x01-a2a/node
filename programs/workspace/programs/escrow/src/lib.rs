@@ -4,7 +4,7 @@ use anchor_spl::{
     token::{self, Mint, Token, TokenAccount, Transfer},
 };
 
-declare_id!("Cb7QtsWXEWZSNcdLMyd4xhiDX9XbQrjwh87g4T9WhqUR");
+declare_id!("Es69yGQ7XnwhHjoj3TRv5oigUsQzCvbRYGXJTFcJrT9F");
 
 /// Protocol treasury — receives settlement fees.
 pub const TREASURY_PUBKEY: Pubkey = pubkey!("qw4hzfV7UUXTrNh3hiS9Q8KSPMXWUusNoyFKLvtcMMX");

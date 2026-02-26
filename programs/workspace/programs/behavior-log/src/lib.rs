@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program;
 
-declare_id!("3gXhgBLsVYVQkntuVcPdiDe2gRxbSt2CGFJKriA8q9bA");
+declare_id!("35DAMPQVu6wsmMEGv67URFAGgyauEYD73egd74uiX1sM");
 
 // ============================================================================
 // BehaviorLog Program (doc 5, §10.2)

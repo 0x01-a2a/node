@@ -4,7 +4,7 @@ use anchor_spl::{
     token::{self, Mint, Token, TokenAccount, Transfer},
 };
 
-declare_id!("6uMjFPETQEvALjbWUorc5pBZ7FagNzmr8wxovH89bgEi");
+declare_id!("5P8uXqavnQFGXbHKE3tQDezh41D7ZutHsT2jY6gZ3C3x");
 
 /// Protocol treasury wallet — receives all lease fees.
 /// Replace with the actual treasury pubkey before mainnet deploy.

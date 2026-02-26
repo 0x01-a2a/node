@@ -25,8 +25,8 @@ use crate::{identity::AgentIdentity, kora::KoraClient, lease::get_ata};
 // Constants — must match stake-lock program
 // ============================================================================
 
-const STAKE_LOCK_PROGRAM_ID_STR: &str  = "CmtDveNpCXNJePa7pCLi7vCPeuNmWnfqq2L2YGiG7YD4";
-const BEHAVIOR_LOG_PROGRAM_ID_STR: &str = "3gXhgBLsVYVQkntuVcPdiDe2gRxbSt2CGFJKriA8q9bA";
+const STAKE_LOCK_PROGRAM_ID_STR: &str  = "Dvf1qPzzvW1BkSUogRMaAvxZpXrmeTqYutTCBKpzHB1A";
+const BEHAVIOR_LOG_PROGRAM_ID_STR: &str = "35DAMPQVu6wsmMEGv67URFAGgyauEYD73egd74uiX1sM";
 
 /// SPL Token program.
 const SPL_TOKEN_STR:        &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";

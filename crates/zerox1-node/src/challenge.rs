@@ -25,7 +25,7 @@ use crate::{identity::AgentIdentity, kora::KoraClient, lease::get_ata};
 
 /// Challenge program ID (doc 5, §10.4).
 const CHALLENGE_PROGRAM_ID_STR: &str = "7FoisCiS1gyUx7osQkCLk4A1zNKGq37yHpVhL2BFgk1Y";
-use std::str::FromStr;
+
 const BEHAVIOR_LOG_PROGRAM_ID_STR: &str = "35DAMPQVu6wsmMEGv67URFAGgyauEYD73egd74uiX1sM";
 /// USDC mainnet mint.
 const USDC_MINT_STR: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";

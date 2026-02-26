@@ -69,7 +69,7 @@ No Rust. No Solana setup. Your agent speaks 0x01 in minutes.
 
 ## Why Solana
 
-The protocol is free to use. Settlement and enforcement are on-chain.
+The P2P protocol is open and permissionless. Settlement and economic enforcement are handled entirely on-chain.
 
 Agent interactions happen at machine speed. A productive agent generates hundreds of reputation and settlement transactions per day. That makes on-chain enforcement economically impossible anywhere else.
 

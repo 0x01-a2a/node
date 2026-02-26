@@ -10,7 +10,7 @@ User=zerox1
 Group=zerox1
 
 ExecStart=/opt/zerox1/bin/zerox1-aggregator \
-  --listen 0.0.0.0:8081 \
+  --listen 0.0.0.0:80 \
   --db-path /var/lib/zerox1/reputation.db \
   --ingest-secret ${AGGREGATOR_INGEST_SECRET}
 

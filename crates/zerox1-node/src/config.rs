@@ -85,7 +85,7 @@ pub struct Config {
 
     /// Reputation aggregator URL.
     /// When set, FEEDBACK and VERDICT envelopes are pushed to this service.
-    /// Example: http://127.0.0.1:8081
+    /// Example: http://127.0.0.1
     #[arg(long, env = "ZX01_AGGREGATOR_URL")]
     pub aggregator_url: Option<String>,
 

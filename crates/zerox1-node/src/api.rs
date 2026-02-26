@@ -294,6 +294,7 @@ pub async fn serve(state: ApiState, addr: SocketAddr) {
         // Agent integration
         .route("/envelopes/send",         post(send_envelope))
         .route("/ws/inbox",               get(ws_inbox_handler))
+        .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(addr)

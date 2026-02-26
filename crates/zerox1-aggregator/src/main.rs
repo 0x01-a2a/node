@@ -15,7 +15,7 @@ use store::ReputationStore;
 #[command(name = "zerox1-aggregator", about = "0x01 reputation aggregator service")]
 struct Config {
     /// HTTP listen address.
-    #[arg(long, default_value = "0.0.0.0:8081", env = "AGGREGATOR_LISTEN")]
+    #[arg(long, default_value = "0.0.0.0:80", env = "AGGREGATOR_LISTEN")]
     listen: std::net::SocketAddr,
 
     /// Shared secret for POST /ingest/envelope.
@@ -108,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/interactions/by/{agent_id}",          get(api::get_interactions_by))
         .route("/disputes/{agent_id}",                 get(api::get_disputes))
         .route("/registry",                            get(api::get_registry))
+        .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state);
 
     tracing::info!("zerox1-aggregator listening on {}", config.listen);

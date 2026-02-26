@@ -20,6 +20,94 @@ fn is_valid_agent_id(id: &str) -> bool {
     id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_list_agents_pagination() {
+        let store = ReputationStore::new();
+        
+        // Populate with 25 dummy agents
+        // Using "agent-{i:02}" ensures lexicographical order matches numerical order for easy testing
+        for i in 0..25 {
+            let agent_id = format!("agent-{:02}", i);
+            let mut inner = store.inner.write().unwrap();
+            inner.agents.insert(agent_id.clone(), AgentReputation::new(agent_id));
+        }
+
+        // Test case 1: Basic pagination (limit 10, offset 0)
+        let page1 = store.list_agents(10, 0);
+        assert_eq!(page1.len(), 10);
+        assert_eq!(page1[0].agent_id, "agent-00");
+        assert_eq!(page1[9].agent_id, "agent-09");
+
+        // Test case 2: Second page (limit 10, offset 10)
+        let page2 = store.list_agents(10, 10);
+        assert_eq!(page2.len(), 10);
+        assert_eq!(page2[0].agent_id, "agent-10");
+        assert_eq!(page2[9].agent_id, "agent-19");
+
+        // Test case 3: Partial last page (limit 10, offset 20) -> should get 5 items
+        let page3 = store.list_agents(10, 20);
+        assert_eq!(page3.len(), 5);
+        assert_eq!(page3[0].agent_id, "agent-20");
+        assert_eq!(page3[4].agent_id, "agent-24");
+
+        // Test case 4: Offset beyond range
+        let page4 = store.list_agents(10, 50);
+        assert!(page4.is_empty());
+
+        // Test case 5: Limit larger than total
+        let page5 = store.list_agents(100, 0);
+        assert_eq!(page5.len(), 25);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_list_agents_pagination() {
+        let store = ReputationStore::new();
+        
+        // Populate with 25 dummy agents
+        // Using "agent-{i:02}" ensures lexicographical order matches numerical order for easy testing
+        for i in 0..25 {
+            let agent_id = format!("agent-{:02}", i);
+            let mut inner = store.inner.write().unwrap();
+            inner.agents.insert(agent_id.clone(), AgentReputation::new(agent_id));
+        }
+
+        // Test case 1: Basic pagination (limit 10, offset 0)
+        let page1 = store.list_agents(10, 0);
+        assert_eq!(page1.len(), 10);
+        assert_eq!(page1[0].agent_id, "agent-00");
+        assert_eq!(page1[9].agent_id, "agent-09");
+
+        // Test case 2: Second page (limit 10, offset 10)
+        let page2 = store.list_agents(10, 10);
+        assert_eq!(page2.len(), 10);
+        assert_eq!(page2[0].agent_id, "agent-10");
+        assert_eq!(page2[9].agent_id, "agent-19");
+
+        // Test case 3: Partial last page (limit 10, offset 20) -> should get 5 items
+        let page3 = store.list_agents(10, 20);
+        assert_eq!(page3.len(), 5);
+        assert_eq!(page3[0].agent_id, "agent-20");
+        assert_eq!(page3[4].agent_id, "agent-24");
+
+        // Test case 4: Offset beyond range
+        let page4 = store.list_agents(10, 50);
+        assert!(page4.is_empty());
+
+        // Test case 5: Limit larger than total
+        let page5 = store.list_agents(100, 0);
+        assert_eq!(page5.len(), 25);
+    }
+}
+
 // ============================================================================
 // Wire types (matches node.rs push format + serde tag)
 // ============================================================================
@@ -1393,6 +1481,17 @@ impl ReputationStore {
 
     pub fn all_agents(&self) -> Vec<AgentReputation> {
         self.inner.read().unwrap().agents.values().cloned().collect()
+    }
+
+    pub fn list_agents(&self, limit: usize, offset: usize) -> Vec<AgentReputation> {
+        let inner = self.inner.read().unwrap();
+        let mut agents: Vec<&AgentReputation> = inner.agents.values().collect();
+        agents.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+        agents.into_iter()
+            .skip(offset)
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
     /// Network-wide summary stats: agent count, total interactions, uptime.

@@ -30,10 +30,7 @@ jobs:
             platform: darwin-x64
             binary: zerox1-node
             
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            platform: windows-x64
-            binary: zerox1-node.exe
+
 
 
     runs-on: ${{ matrix.os }}
@@ -111,48 +108,7 @@ jobs:
           path: target/release/zerox1-challenger
           if-no-files-found: error
 
-  build-server-services-win:
-    name: Build server services (Windows)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-
-      - name: Cache Cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: cargo-windows-x64-aggregator-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-windows-x64-aggregator-
-
-      - name: Build server services
-        run: |
-          cargo build --release -p zerox1-aggregator
-          cargo build --release -p zerox1-challenger
-        env:
-          CARGO_TERM_COLOR: always
-
-      - name: Upload aggregator artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: zerox1-aggregator-windows
-          path: target/release/zerox1-aggregator.exe
-          if-no-files-found: error
-
-      - name: Upload challenger artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: zerox1-challenger-windows
-          path: target/release/zerox1-challenger.exe
-          if-no-files-found: error
 
   # ── Assemble and publish npm packages ────────────────────────────────────
   publish-npm:
@@ -187,12 +143,10 @@ jobs:
           mkdir -p sdk/packages/darwin-arm64/bin
           mkdir -p sdk/packages/darwin-x64/bin
           mkdir -p sdk/packages/linux-x64/bin
-          mkdir -p sdk/packages/windows-x64/bin
 
           cp artifacts/zerox1-node-darwin-arm64/zerox1-node      sdk/packages/darwin-arm64/bin/
           cp artifacts/zerox1-node-darwin-x64/zerox1-node        sdk/packages/darwin-x64/bin/
           cp artifacts/zerox1-node-linux-x64/zerox1-node         sdk/packages/linux-x64/bin/
-          cp artifacts/zerox1-node-windows-x64/zerox1-node.exe   sdk/packages/windows-x64/bin/
 
           chmod +x sdk/packages/darwin-arm64/bin/zerox1-node
           chmod +x sdk/packages/darwin-x64/bin/zerox1-node
@@ -236,11 +190,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish platform packages (windows-x64)
-        working-directory: sdk/packages/windows-x64
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
 
       - name: Publish main @zerox1/sdk package
         working-directory: sdk
@@ -267,11 +217,8 @@ jobs:
           cp artifacts/zerox1-node-darwin-arm64/zerox1-node            zerox1-node-darwin-arm64
           cp artifacts/zerox1-node-darwin-x64/zerox1-node              zerox1-node-darwin-x64
           cp artifacts/zerox1-node-linux-x64/zerox1-node               zerox1-node-linux-x64
-          cp artifacts/zerox1-node-windows-x64/zerox1-node.exe         zerox1-node-windows-x64.exe
           cp artifacts/zerox1-aggregator/zerox1-aggregator             zerox1-aggregator-linux-x64
           cp artifacts/zerox1-challenger/zerox1-challenger             zerox1-challenger-linux-x64
-          cp artifacts/zerox1-aggregator-windows/zerox1-aggregator.exe zerox1-aggregator-windows-x64.exe
-          cp artifacts/zerox1-challenger-windows/zerox1-challenger.exe zerox1-challenger-windows-x64.exe
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -280,9 +227,6 @@ jobs:
             zerox1-node-darwin-arm64
             zerox1-node-darwin-x64
             zerox1-node-linux-x64
-            zerox1-node-windows-x64.exe
             zerox1-aggregator-linux-x64
             zerox1-challenger-linux-x64
-            zerox1-aggregator-windows-x64.exe
-            zerox1-challenger-windows-x64.exe
           generate_release_notes: true

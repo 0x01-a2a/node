@@ -103,6 +103,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/graph/agent/{agent_id}",             get(api::get_agent_flow))
         .route("/epochs/{agent_id}/{epoch}/envelopes", get(api::get_epoch_envelopes))
         .route("/agents/search",                       get(api::search_agents))
+        .route("/agents/search/name",                  get(api::search_agents_by_name))
+        .route("/agents/{agent_id}/profile",           get(api::get_agent_profile))
+        .route("/interactions/by/{agent_id}",          get(api::get_interactions_by))
         .route("/disputes/{agent_id}",                 get(api::get_disputes))
         .route("/registry",                            get(api::get_registry))
         .with_state(state);

@@ -9,7 +9,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::store::{CapabilityMatch, DisputeRecord, IngestEvent, NetworkStats, ReputationStore};
+use crate::store::{AgentProfile, AgentRegistryEntry, CapabilityMatch, DisputeRecord, IngestEvent, NetworkStats, ReputationStore};
 
 // ============================================================================
 // App state
@@ -454,6 +454,76 @@ pub async fn search_agents(
     }
     let results: Vec<CapabilityMatch> = state.store.search_by_capability(&cap, limit);
     Json(results).into_response()
+}
+
+// ============================================================================
+// Agent full profile
+// ============================================================================
+
+/// GET /agents/{agent_id}/profile
+///
+/// Returns reputation + entropy + capabilities + recent disputes + name in one call.
+/// Avoids 4 separate round trips for dashboard use.
+pub async fn get_agent_profile(
+    State(state):   State<AppState>,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    if agent_id.len() != 64 || !agent_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid agent_id" })),
+        ).into_response();
+    }
+    let profile: AgentProfile = state.store.agent_profile(&agent_id);
+    Json(profile).into_response()
+}
+
+// ============================================================================
+// Agent search by name
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct NameSearchParams {
+    name: String,
+    #[serde(default = "default_limit")]
+    limit: usize,
+}
+
+/// GET /agents/search/name?name=X[&limit=50]
+///
+/// Case-insensitive substring search against names broadcast in BEACON messages.
+pub async fn search_agents_by_name(
+    State(state):  State<AppState>,
+    Query(params): Query<NameSearchParams>,
+) -> impl IntoResponse {
+    let limit = params.limit.min(200);
+    let name  = params.name.trim().to_string();
+    if name.is_empty() || name.len() > 64 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid name" })),
+        ).into_response();
+    }
+    let results: Vec<AgentRegistryEntry> = state.store.search_by_name(&name, limit);
+    Json(results).into_response()
+}
+
+// ============================================================================
+// Sender-side interactions
+// ============================================================================
+
+/// GET /interactions/by/{agent_id}[?limit=100]
+///
+/// All interactions where the given agent was the *sender* (outbound history).
+/// Complements GET /interactions?to=X which shows inbound.
+pub async fn get_interactions_by(
+    State(state):   State<AppState>,
+    Path(agent_id): Path<String>,
+    Query(params):  Query<InteractionsParams>,
+) -> impl IntoResponse {
+    let limit  = params.limit.min(1_000);
+    let result = state.store.interactions(Some(&agent_id), None, limit);
+    Json(result)
 }
 
 // ============================================================================

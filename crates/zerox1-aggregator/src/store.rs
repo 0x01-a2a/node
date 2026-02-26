@@ -925,6 +925,8 @@ struct Inner {
     agents:       HashMap<String, AgentReputation>,
     /// Bounded ring buffer of recent interactions (used as fallback when no SQLite).
     interactions: VecDeque<RawInteraction>,
+    /// Maps agent_id -> c_coefficient (clustering factor) derived from on-chain Solana tokens.
+    solana_flow_clusters: HashMap<String, f64>,
 }
 
 #[derive(Clone)]
@@ -962,7 +964,11 @@ impl ReputationStore {
         );
 
         Ok(Self {
-            inner: Arc::new(RwLock::new(Inner { agents, interactions: VecDeque::new() })),
+            inner: Arc::new(RwLock::new(Inner { 
+                agents, 
+                interactions: VecDeque::new(),
+                solana_flow_clusters: HashMap::new(),
+            })),
             db:    Arc::new(Mutex::new(Some(db))),
         })
     }
@@ -1449,15 +1455,38 @@ impl ReputationStore {
     }
 
     /// C coefficient for a single agent (0.0 when not in any cluster).
+    /// Uses the Solana on-chain Capital Flow graph (GAP-02) computed by the background indexer.
     pub fn agent_c_coefficient(&self, agent_id: &str) -> f64 {
-        const WINDOW_30D: u64 = 30 * 24 * 3600;
-        let edges = self.capital_flow_edges(WINDOW_30D, 5_000);
-        if edges.is_empty() { return 0.0; }
-        let (agent_cluster, clusters) = compute_clusters_from_edges(&edges);
-        agent_cluster.get(agent_id)
-            .and_then(|&cid| clusters.iter().find(|c| c.cluster_id == cid))
-            .map(|c| c.c_coefficient)
-            .unwrap_or(0.0)
+        let inner = self.inner.read().unwrap();
+        inner.solana_flow_clusters.get(agent_id).copied().unwrap_or(0.0)
+    }
+
+    // =========================================================================
+    // External Indexer Hooks (GAP-02)
+    // =========================================================================
+
+    /// Returns the pubkeys of all agents currently in the local reputation store.
+    pub async fn get_active_agent_pubkeys(&self) -> anyhow::Result<Vec<String>> {
+        let inner = self.inner.read().unwrap();
+        Ok(inner.agents.keys().cloned().collect())
+    }
+
+    /// Stores the computed on-chain clusters. The C coefficient is derived from cluster size.
+    pub async fn update_capital_flow_clusters(&self, clusters: Vec<Vec<String>>) -> anyhow::Result<()> {
+        let mut inner = self.inner.write().unwrap();
+        inner.solana_flow_clusters.clear();
+
+        for cluster_agents in clusters {
+            // C multiplier calculation based closely on the paper/placeholder logic.
+            // i.e., larger group of linked ownership = higher multiplier.
+            let suspicion = ((cluster_agents.len() - 1) as f64 / 10.0).min(1.0);
+            for agent_id in cluster_agents {
+                inner.solana_flow_clusters.insert(agent_id, suspicion);
+            }
+        }
+        
+        tracing::debug!("Updated solana_flow_clusters map with on-chain data.");
+        Ok(())
     }
 
     /// Write a single reputation record to SQLite (fire-and-forget; failures are logged).

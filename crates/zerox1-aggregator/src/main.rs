@@ -1,5 +1,6 @@
 mod api;
 mod store;
+mod capital_flow;
 
 use axum::{
     routing::{get, post},
@@ -28,6 +29,11 @@ struct Config {
     /// Example: /var/lib/zerox1/reputation.db
     #[arg(long, env = "AGGREGATOR_DB_PATH")]
     db_path: Option<std::path::PathBuf>,
+
+    /// Solana RPC URL for Capital Flow Correlation (GAP-02 Sybil deterrence).
+    /// Used by the background indexer to fetch funding/sweep graphs.
+    #[arg(long, env = "ZX01_SOLANA_RPC")]
+    solana_rpc: Option<String>,
 }
 
 #[tokio::main]
@@ -63,6 +69,16 @@ async fn main() -> anyhow::Result<()> {
         store,
         ingest_secret: config.ingest_secret,
     };
+
+    if let Some(rpc_url) = config.solana_rpc {
+        tracing::info!("Starting Capital Flow indexer (GAP-02) using RPC: {}", rpc_url);
+        let indexer_state = state.clone();
+        tokio::spawn(async move {
+            capital_flow::run_indexer(rpc_url, indexer_state).await;
+        });
+    } else {
+        tracing::info!("No --solana-rpc provided - Capital Flow analysis (GAP-02) disabled.");
+    }
 
     let app = Router::new()
         .route("/health",                 get(api::health))

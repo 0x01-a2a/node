@@ -8979,7 +8979,7 @@ dependencies = [
 
 [[package]]
 name = "zerox1-aggregator"
-version = "0.1.0"
+version = "0.1.18"
 dependencies = [
  "anyhow",
  "axum",
@@ -9023,7 +9023,7 @@ dependencies = [
 
 [[package]]
 name = "zerox1-node"
-version = "0.1.0"
+version = "0.1.18"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9047,6 +9047,7 @@ dependencies = [
  "solana-sdk",
  "thiserror 1.0.69",
  "tokio",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
  "zerox1-protocol",
@@ -9055,7 +9056,7 @@ dependencies = [
 
 [[package]]
 name = "zerox1-protocol"
-version = "0.1.0"
+version = "0.1.18"
 dependencies = [
  "bytes",
  "ciborium",
@@ -9070,7 +9071,7 @@ dependencies = [
 
 [[package]]
 name = "zerox1-sati-client"
-version = "0.1.0"
+version = "0.1.18"
 dependencies = [
  "anyhow",
  "serde",
@@ -9086,7 +9087,7 @@ dependencies = [
 
 [[package]]
 name = "zerox1-simulator"
-version = "0.1.0"
+version = "0.1.18"
 dependencies = [
  "clap",
  "rand 0.8.5",

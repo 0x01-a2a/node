@@ -1164,18 +1164,35 @@ struct Inner {
     solana_flow_clusters: HashMap<String, f64>,
 }
 
+// ============================================================================
+// Network stats
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NetworkStats {
+    /// Number of distinct agents seen by the aggregator.
+    pub agent_count:       usize,
+    /// Total feedback events recorded (all-time).
+    pub interaction_count: u64,
+    /// Unix timestamp (seconds) when the aggregator process started.
+    pub started_at:        u64,
+}
+
 #[derive(Clone)]
 pub struct ReputationStore {
-    inner: Arc<RwLock<Inner>>,
+    inner:      Arc<RwLock<Inner>>,
     /// SQLite connection; None = in-memory only (no --db-path supplied).
-    db:    Arc<Mutex<Option<Db>>>,
+    db:         Arc<Mutex<Option<Db>>>,
+    /// Process start time — never changes after init.
+    started_at: u64,
 }
 
 impl Default for ReputationStore {
     fn default() -> Self {
         Self {
-            inner: Arc::new(RwLock::new(Inner::default())),
-            db:    Arc::new(Mutex::new(None)),
+            inner:      Arc::new(RwLock::new(Inner::default())),
+            db:         Arc::new(Mutex::new(None)),
+            started_at: now_secs(),
         }
     }
 }
@@ -1199,12 +1216,13 @@ impl ReputationStore {
         );
 
         Ok(Self {
-            inner: Arc::new(RwLock::new(Inner { 
-                agents, 
+            inner: Arc::new(RwLock::new(Inner {
+                agents,
                 interactions: VecDeque::new(),
                 solana_flow_clusters: HashMap::new(),
             })),
-            db:    Arc::new(Mutex::new(Some(db))),
+            db:         Arc::new(Mutex::new(Some(db))),
+            started_at: now_secs(),
         })
     }
 
@@ -1375,6 +1393,29 @@ impl ReputationStore {
 
     pub fn all_agents(&self) -> Vec<AgentReputation> {
         self.inner.read().unwrap().agents.values().cloned().collect()
+    }
+
+    /// Network-wide summary stats: agent count, total interactions, uptime.
+    pub fn network_stats(&self) -> NetworkStats {
+        let agent_count = self.inner.read().unwrap().agents.len();
+
+        // Prefer the authoritative SQLite count; fall back to in-memory ring buffer.
+        let interaction_count = {
+            let db = self.db.lock().unwrap();
+            if let Some(ref conn) = *db {
+                conn.0
+                    .query_row("SELECT COUNT(*) FROM feedback_events", [], |row| row.get::<_, i64>(0))
+                    .unwrap_or(0) as u64
+            } else {
+                self.inner.read().unwrap().interactions.len() as u64
+            }
+        };
+
+        NetworkStats {
+            agent_count,
+            interaction_count,
+            started_at: self.started_at,
+        }
     }
 
     /// Latest entropy vector for an agent.

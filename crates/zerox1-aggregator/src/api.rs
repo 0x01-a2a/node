@@ -9,7 +9,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::store::{CapabilityMatch, DisputeRecord, IngestEvent, ReputationStore};
+use crate::store::{CapabilityMatch, DisputeRecord, IngestEvent, NetworkStats, ReputationStore};
 
 // ============================================================================
 // App state
@@ -48,6 +48,21 @@ fn ct_eq(a: &str, b: &str) -> bool {
 
 pub async fn health() -> impl IntoResponse {
     Json(json!({ "status": "ok" }))
+}
+
+// ============================================================================
+// Network stats
+// ============================================================================
+
+/// GET /stats/network
+///
+/// Returns a quick summary of network-wide activity:
+/// - agent_count: distinct agents seen by the aggregator
+/// - interaction_count: total feedback events recorded (all-time)
+/// - started_at: unix timestamp when this aggregator process started
+pub async fn get_network_stats(State(state): State<AppState>) -> impl IntoResponse {
+    let stats: NetworkStats = state.store.network_stats();
+    Json(stats)
 }
 
 // ============================================================================

@@ -1,9 +1,9 @@
-import * as fs          from 'fs'
-import * as net         from 'net'
-import * as os          from 'os'
-import * as path        from 'path'
+import * as fs from 'fs'
+import * as net from 'net'
+import * as os from 'os'
+import * as path from 'path'
 import { spawn, ChildProcess } from 'child_process'
-import WebSocket               from 'ws'
+import WebSocket from 'ws'
 
 // ============================================================================
 // Public config / types
@@ -15,25 +15,25 @@ export interface Zerox1AgentConfig {
    * key file (raw 32 bytes). If the path does not exist, the node
    * generates a new key and writes it there.
    */
-  keypair:   Uint8Array | string
+  keypair: Uint8Array | string
   /** Display name broadcast in BEACON/ADVERTISE. Default: 'zerox1-agent'. */
-  name?:     string
+  name?: string
   /**
    * SATI mint address as hex (32 bytes). Required for mainnet.
    * Omit to run in dev mode (SATI checks are advisory only).
    */
   satiMint?: string
   /** Solana RPC URL. Default: mainnet-beta. */
-  rpcUrl?:   string
+  rpcUrl?: string
   /** Directory for per-epoch envelope logs. Default: current dir. */
-  logDir?:   string
+  logDir?: string
   /** Additional bootstrap peer multiaddrs. */
   bootstrap?: string[]
 }
 
 export type MsgType =
   | 'ADVERTISE' | 'DISCOVER'
-  | 'PROPOSE'   | 'COUNTER' | 'ACCEPT' | 'REJECT'
+  | 'PROPOSE' | 'COUNTER' | 'ACCEPT' | 'REJECT'
   | 'DELIVER'
   | 'NOTARIZE_BID' | 'NOTARIZE_ASSIGN'
   | 'VERDICT'
@@ -41,53 +41,53 @@ export type MsgType =
   | 'DISPUTE'
 
 export interface SendParams {
-  msgType:        MsgType
+  msgType: MsgType
   /** Hex-encoded 32-byte agent ID. Omit for broadcast types. */
-  recipient?:     string
+  recipient?: string
   /** Hex-encoded 16-byte conversation ID. */
   conversationId: string
-  payload:        Buffer | Uint8Array
+  payload: Buffer | Uint8Array
 }
 
 export interface SentConfirmation {
-  nonce:       number
+  nonce: number
   payloadHash: string
 }
 
 export interface FeedbackPayload {
   conversationId: string
-  targetAgent:    string
-  score:          number
-  outcome:        number
-  isDispute:      boolean
-  role:           number
+  targetAgent: string
+  score: number
+  outcome: number
+  isDispute: boolean
+  role: number
 }
 
 export interface NotarizeBidPayload {
-  bidType:        number
+  bidType: number
   conversationId: string
-  opaqueB64:      string
+  opaqueB64: string
 }
 
 export interface InboundEnvelope {
-  msgType:        MsgType
-  sender:         string
-  recipient:      string
+  msgType: MsgType
+  sender: string
+  recipient: string
   conversationId: string
-  slot:           number
-  nonce:          number
-  payloadB64:     string
-  feedback?:      FeedbackPayload
-  notarizeBid?:   NotarizeBidPayload
+  slot: number
+  nonce: number
+  payloadB64: string
+  feedback?: FeedbackPayload
+  notarizeBid?: NotarizeBidPayload
 }
 
 export interface SendFeedbackParams {
   conversationId: string
-  targetAgent:    string
+  targetAgent: string
   /** -100 to +100 */
-  score:          number
-  outcome:        'negative' | 'neutral' | 'positive'
-  role:           'participant' | 'notary'
+  score: number
+  outcome: 'negative' | 'neutral' | 'positive'
+  role: 'participant' | 'notary'
 }
 
 // ============================================================================
@@ -108,23 +108,23 @@ export interface SendFeedbackParams {
 
 function cborInt(n: number): Buffer {
   n = Math.trunc(n)
-  if (n >= 0   && n <= 23)  return Buffer.from([n])
-  if (n >= 24  && n <= 255) return Buffer.from([0x18, n])
-  if (n >= -24 && n <   0)  return Buffer.from([0x20 + (-n - 1)])
+  if (n >= 0 && n <= 23) return Buffer.from([n])
+  if (n >= 24 && n <= 255) return Buffer.from([0x18, n])
+  if (n >= -24 && n < 0) return Buffer.from([0x20 + (-n - 1)])
   if (n >= -256 && n < -24) return Buffer.from([0x38, -n - 1])
   throw new RangeError(`CBOR int out of range: ${n}`)
 }
 
 function encodeFeedbackCbor(
   conversationIdHex: string,
-  targetAgentHex:    string,
-  score:             number,
-  outcome:           number,
-  isDispute:         boolean,
-  role:              number,
+  targetAgentHex: string,
+  score: number,
+  outcome: number,
+  isDispute: boolean,
+  role: number,
 ): Buffer {
-  const convId      = Buffer.from(conversationIdHex, 'hex') // 16 bytes
-  const targetAgent = Buffer.from(targetAgentHex,    'hex') // 32 bytes
+  const convId = Buffer.from(conversationIdHex, 'hex') // 16 bytes
+  const targetAgent = Buffer.from(targetAgentHex, 'hex') // 32 bytes
   return Buffer.concat([
     Buffer.from([0x86]),                    // array(6)
     Buffer.from([0x50]), convId,            // bytes(16)
@@ -142,9 +142,9 @@ function encodeFeedbackCbor(
 
 function getBinaryPath(): string {
   const platform = process.platform // 'win32' | 'darwin' | 'linux'
-  const arch     = process.arch     // 'x64' | 'arm64'
-  const binName  = platform === 'win32' ? 'zerox1-node.exe' : 'zerox1-node'
-  const pkgName  = `@zerox1/sdk-${platform}-${arch}`
+  const arch = process.arch     // 'x64' | 'arm64'
+  const binName = platform === 'win32' ? 'zerox1-node.exe' : 'zerox1-node'
+  const pkgName = `@zerox1/sdk-${platform}-${arch}`
 
   try {
     const pkgJson = require.resolve(`${pkgName}/package.json`)
@@ -208,14 +208,14 @@ async function waitForReady(port: number, timeoutMs = 15_000): Promise<void> {
 type Handler = (env: InboundEnvelope) => void | Promise<void>
 
 export class Zerox1Agent {
-  private proc:            ChildProcess | null = null
-  private ws:              WebSocket | null    = null
-  private handlers:        Map<string, Handler[]> = new Map()
-  private port:            number = 0
-  private nodeUrl:         string = ''
+  private proc: ChildProcess | null = null
+  private ws: WebSocket | null = null
+  private handlers: Map<string, Handler[]> = new Map()
+  private port: number = 0
+  private nodeUrl: string = ''
   private _reconnectDelay: number = 1000
 
-  private constructor() {}
+  private constructor() { }
 
   // ── Factory ───────────────────────────────────────────────────────────────
 
@@ -239,21 +239,21 @@ export class Zerox1Agent {
    * Safe to await — resolves once the agent is live on the mesh.
    */
   async start(): Promise<void> {
-    this.port    = await getFreePort()
+    this.port = await getFreePort()
     this.nodeUrl = `http://127.0.0.1:${this.port}`
 
     const keypairPath = resolveKeypairPath(this._config.keypair)
-    const binaryPath  = getBinaryPath()
+    const binaryPath = getBinaryPath()
 
     const args: string[] = [
       '--keypair-path', keypairPath,
-      '--api-addr',     `127.0.0.1:${this.port}`,
-      '--agent-name',   this._config.name ?? 'zerox1-agent',
+      '--api-addr', `127.0.0.1:${this.port}`,
+      '--agent-name', this._config.name ?? 'zerox1-agent',
     ]
 
     if (this._config.satiMint) args.push('--sati-mint', this._config.satiMint)
-    if (this._config.rpcUrl)   args.push('--rpc-url',   this._config.rpcUrl)
-    if (this._config.logDir)   args.push('--log-dir',   this._config.logDir)
+    if (this._config.rpcUrl) args.push('--rpc-url', this._config.rpcUrl)
+    if (this._config.logDir) args.push('--log-dir', this._config.logDir)
     for (const b of this._config.bootstrap ?? []) {
       args.push('--bootstrap', b)
     }
@@ -297,7 +297,7 @@ export class Zerox1Agent {
    * Chain multiple `.on()` calls — all handlers for a type are called in order.
    */
   on(msgType: MsgType | '*', handler: Handler): this {
-    const key  = msgType === '*' ? '__all__' : msgType
+    const key = msgType === '*' ? '__all__' : msgType
     const list = this.handlers.get(key) ?? []
     list.push(handler)
     this.handlers.set(key, list)
@@ -320,25 +320,31 @@ export class Zerox1Agent {
    */
   async send(params: SendParams): Promise<SentConfirmation> {
     const body = {
-      msg_type:        params.msgType,
-      recipient:       params.recipient ?? null,
+      msg_type: params.msgType,
+      recipient: params.recipient ?? null,
       conversation_id: params.conversationId,
-      payload_b64:     Buffer.from(params.payload).toString('base64'),
+      payload_b64: Buffer.from(params.payload).toString('base64'),
     }
 
-    const res  = await fetch(`${this.nodeUrl}/envelopes/send`, {
-      method:  'POST',
+    const res = await fetch(`${this.nodeUrl}/envelopes/send`, {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify(body),
+      body: JSON.stringify(body),
     })
-    const json = await res.json() as Record<string, unknown>
-
+    const isJson = res.headers.get('content-type')?.includes('application/json')
     if (!res.ok) {
-      throw new Error((json['error'] as string) ?? `HTTP ${res.status}`)
+      if (isJson) {
+        const errJson = await res.json() as Record<string, unknown>
+        throw new Error((errJson['error'] as string) ?? `HTTP ${res.status}`)
+      } else {
+        const text = await res.text()
+        throw new Error(text || `HTTP ${res.status}`)
+      }
     }
 
+    const json = await res.json() as Record<string, unknown>
     return {
-      nonce:       json['nonce'] as number,
+      nonce: json['nonce'] as number,
       payloadHash: json['payload_hash'] as string,
     }
   }
@@ -352,7 +358,7 @@ export class Zerox1Agent {
       throw new RangeError(`score must be in [-100, 100], got ${params.score}`)
 
     const outcomeMap = { negative: 0, neutral: 1, positive: 2 } as const
-    const roleMap    = { participant: 0, notary: 1 } as const
+    const roleMap = { participant: 0, notary: 1 } as const
 
     const payload = encodeFeedbackCbor(
       params.conversationId,
@@ -364,7 +370,7 @@ export class Zerox1Agent {
     )
 
     return this.send({
-      msgType:        'FEEDBACK',
+      msgType: 'FEEDBACK',
       conversationId: params.conversationId,
       payload,
     })
@@ -394,8 +400,8 @@ export class Zerox1Agent {
 
   private _connectInbox(): void {
     const wsUrl = `ws://127.0.0.1:${this.port}/ws/inbox`
-    const ws    = new WebSocket(wsUrl)
-    this.ws     = ws
+    const ws = new WebSocket(wsUrl)
+    this.ws = ws
 
     ws.on('open', () => { this._reconnectDelay = 1000 })
 
@@ -403,25 +409,25 @@ export class Zerox1Agent {
       try {
         const raw = JSON.parse(data.toString())
         const env: InboundEnvelope = {
-          msgType:        raw.msg_type,
-          sender:         raw.sender,
-          recipient:      raw.recipient,
+          msgType: raw.msg_type,
+          sender: raw.sender,
+          recipient: raw.recipient,
           conversationId: raw.conversation_id,
-          slot:           raw.slot,
-          nonce:          raw.nonce,
-          payloadB64:     raw.payload_b64,
+          slot: raw.slot,
+          nonce: raw.nonce,
+          payloadB64: raw.payload_b64,
           feedback: raw.feedback ? {
             conversationId: raw.feedback.conversation_id,
-            targetAgent:    raw.feedback.target_agent,
-            score:          raw.feedback.score,
-            outcome:        raw.feedback.outcome,
-            isDispute:      raw.feedback.is_dispute,
-            role:           raw.feedback.role,
+            targetAgent: raw.feedback.target_agent,
+            score: raw.feedback.score,
+            outcome: raw.feedback.outcome,
+            isDispute: raw.feedback.is_dispute,
+            role: raw.feedback.role,
           } : undefined,
           notarizeBid: raw.notarize_bid ? {
-            bidType:        raw.notarize_bid.bid_type,
+            bidType: raw.notarize_bid.bid_type,
             conversationId: raw.notarize_bid.conversation_id,
-            opaqueB64:      raw.notarize_bid.opaque_b64,
+            opaqueB64: raw.notarize_bid.opaque_b64,
           } : undefined,
         }
         this._dispatch(env)

@@ -21,7 +21,7 @@ use crate::lease::get_ata;
 // ============================================================================
 
 /// Escrow program ID — placeholder until mainnet deploy.
-const ESCROW_PROGRAM_ID_STR: &str = "11111111111111111111111111111111";
+const ESCROW_PROGRAM_ID_STR: &str = "Cb7QtsWXEWZSNcdLMyd4xhiDX9XbQrjwh87g4T9WhqUR";
 
 const USDC_MINT_STR:              &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const SPL_TOKEN_PROGRAM_STR:      &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";

@@ -10,6 +10,7 @@ behavior_log = "3gXhgBLsVYVQkntuVcPdiDe2gRxbSt2CGFJKriA8q9bA"
 lease        = "6uMjFPETQEvALjbWUorc5pBZ7FagNzmr8wxovH89bgEi"
 challenge    = "6tVCJmogJghQMEMRhvk4qrUoT6JXPPDebUwmRHXTtygj"
 stake_lock   = "CmtDveNpCXNJePa7pCLi7vCPeuNmWnfqq2L2YGiG7YD4"
+escrow       = "Cb7QtsWXEWZSNcdLMyd4xhiDX9XbQrjwh87g4T9WhqUR"
 
 [registry]
 url = "https://api.apr.dev"

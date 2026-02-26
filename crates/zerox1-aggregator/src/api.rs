@@ -88,6 +88,7 @@ pub async fn ingest_envelope(
             ).into_response();
         }
     }
+    tracing::info!("Ingest: received event: {:?}", event);
     state.store.ingest(event);
     StatusCode::NO_CONTENT.into_response()
 }

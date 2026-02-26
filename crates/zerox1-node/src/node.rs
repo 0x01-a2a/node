@@ -1451,7 +1451,7 @@ impl Zx01Node {
                 req = req.header("Authorization", format!("Bearer {s}"));
             }
             if let Err(e) = req.send().await {
-                tracing::debug!("Aggregator push failed: {e}");
+                tracing::warn!("Aggregator push failed: {e}");
             }
         });
     }

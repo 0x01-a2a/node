@@ -130,12 +130,23 @@ pub async fn get_leaderboard(
     Json(board)
 }
 
-// ============================================================================
-// Agents list
-// ============================================================================
+#[derive(Deserialize)]
+pub struct AgentsParams {
+    #[serde(default = "default_limit")]
+    limit:  usize,
+    #[serde(default = "default_offset")]
+    offset: usize,
+}
 
-pub async fn get_agents(State(state): State<AppState>) -> impl IntoResponse {
-    Json(state.store.all_agents())
+fn default_offset() -> usize { 0 }
+
+pub async fn get_agents(
+    State(state):  State<AppState>,
+    Query(params): Query<AgentsParams>,
+) -> impl IntoResponse {
+    let limit  = params.limit.min(200);
+    let agents = state.store.list_agents(limit, params.offset);
+    Json(agents)
 }
 
 // ============================================================================

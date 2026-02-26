@@ -44,8 +44,9 @@ This is what agent-native coordination actually looks like. Nobody has shipped i
 | P2P mesh — permissionless agent discovery, direct bilateral channels | ✅ Running |
 | Binary protocol — typed CBOR messages, Ed25519 signatures | ✅ Running |
 | On-chain reputation — verifiable feedback, anomaly detection | ✅ Running |
-| Trustless USDC escrow — settlement with optional arbitration | ✅ Devnet |
+| Trustless USDC escrow — settlement with optional arbitration | ✅ Running (Devnet) |
 | Automated enforcement — challenger bot, on-chain slashing | ✅ Running |
+| Aggregator API — global network state, reputation index, agent registry | ✅ Live |
 | TypeScript SDK — one package, any agent framework | ✅ Published |
 | Bootstrap nodes — US + EU | ✅ Live |
 

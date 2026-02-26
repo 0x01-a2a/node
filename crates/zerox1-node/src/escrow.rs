@@ -109,17 +109,17 @@ pub async fn approve_payment_onchain(
     let treasury_ata        = get_ata(&treasury_key, &usdc);
     let notary_ata          = get_ata(&notary_pubkey, &usdc);
 
-    let ix = build_approve_payment_ix(
-        &approver_pubkey,
-        &escrow_key,
-        &vault_auth,
-        &vault_ata,
-        &provider_ata,
-        &treasury_ata,
-        &treasury_key,
-        &notary_ata,
-        &usdc,
-    );
+    let ix = build_approve_payment_ix(ApprovePaymentAccounts {
+        approver:     &approver_pubkey,
+        escrow_key:   &escrow_key,
+        vault_auth:   &vault_auth,
+        vault_ata:    &vault_ata,
+        provider_ata: &provider_ata,
+        treasury_ata: &treasury_ata,
+        treasury_key: &treasury_key,
+        notary_ata:   &notary_ata,
+        usdc:         &usdc,
+    });
 
     let mut kp_bytes = [0u8; 64];
     kp_bytes[..32].copy_from_slice(&sk_bytes);
@@ -146,28 +146,30 @@ pub async fn approve_payment_onchain(
 // Instruction builder
 // ============================================================================
 
-fn build_approve_payment_ix(
-    approver:      &Pubkey,
-    escrow_key:    &Pubkey,
-    vault_auth:    &Pubkey,
-    vault_ata:     &Pubkey,
-    provider_ata:  &Pubkey,
-    treasury_ata:  &Pubkey,
-    treasury_key:  &Pubkey,
-    notary_ata:    &Pubkey,
-    usdc:          &Pubkey,
-) -> Instruction {
+pub struct ApprovePaymentAccounts<'a> {
+    pub approver:     &'a Pubkey,
+    pub escrow_key:   &'a Pubkey,
+    pub vault_auth:   &'a Pubkey,
+    pub vault_ata:    &'a Pubkey,
+    pub provider_ata: &'a Pubkey,
+    pub treasury_ata: &'a Pubkey,
+    pub treasury_key: &'a Pubkey,
+    pub notary_ata:   &'a Pubkey,
+    pub usdc:         &'a Pubkey,
+}
+
+fn build_approve_payment_ix(accs: ApprovePaymentAccounts) -> Instruction {
     // Account order must match ApprovePayment<'info> struct field order.
     let accounts = vec![
-        AccountMeta::new_readonly(*approver,     true),  // approver (signer)
-        AccountMeta::new(*escrow_key,            false), // escrow_account (writable)
-        AccountMeta::new_readonly(*vault_auth,   false), // escrow_vault_authority
-        AccountMeta::new(*vault_ata,             false), // escrow_vault (writable)
-        AccountMeta::new(*provider_ata,          false), // provider_usdc (writable)
-        AccountMeta::new(*treasury_ata,          false), // treasury_usdc (writable)
-        AccountMeta::new_readonly(*treasury_key, false), // treasury
-        AccountMeta::new(*notary_ata,            false), // notary_usdc (writable; skip when notary_fee=0)
-        AccountMeta::new_readonly(*usdc,         false), // usdc_mint
+        AccountMeta::new_readonly(*accs.approver,     true),  // approver (signer)
+        AccountMeta::new(*accs.escrow_key,            false), // escrow_account (writable)
+        AccountMeta::new_readonly(*accs.vault_auth,   false), // escrow_vault_authority
+        AccountMeta::new(*accs.vault_ata,             false), // escrow_vault (writable)
+        AccountMeta::new(*accs.provider_ata,          false), // provider_usdc (writable)
+        AccountMeta::new(*accs.treasury_ata,          false), // treasury_usdc (writable)
+        AccountMeta::new_readonly(*accs.treasury_key, false), // treasury
+        AccountMeta::new(*accs.notary_ata,            false), // notary_usdc (writable; skip when notary_fee=0)
+        AccountMeta::new_readonly(*accs.usdc,         false), // usdc_mint
         AccountMeta::new_readonly(spl_token_program(), false), // token_program
     ];
 

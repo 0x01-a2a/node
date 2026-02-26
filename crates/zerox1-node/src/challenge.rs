@@ -111,21 +111,25 @@ pub fn vault_authority_pda(challenge_key: &Pubkey) -> (Pubkey, u8) {
 ///
 /// `contradicting_entry`: CBOR bytes of a signed Envelope from the log.
 /// `merkle_proof`:        Merkle sibling hashes from entry leaf to log_merkle_root.
+pub struct SubmitChallengeArgs {
+    pub target_agent_id:     [u8; 32],
+    pub epoch_number:        u64,
+    pub leaf_index:          u64,
+    pub contradicting_entry: Vec<u8>,
+    pub merkle_proof:        Vec<[u8; 32]>,
+}
+
 pub async fn submit_challenge_onchain(
     rpc:                 &RpcClient,
     identity:            &AgentIdentity,
     kora:                Option<&KoraClient>,
-    target_agent_id:     [u8; 32],
-    epoch_number:        u64,
-    leaf_index:          u64,
-    contradicting_entry: Vec<u8>,
-    merkle_proof:        Vec<[u8; 32]>,
+    args:                SubmitChallengeArgs,
 ) -> anyhow::Result<()> {
     let program_id       = challenge_program_id();
     let usdc             = usdc_mint();
     let challenger_pubkey = Pubkey::new_from_array(identity.verifying_key.to_bytes());
 
-    let batch_key      = batch_pda(&target_agent_id, epoch_number);
+    let batch_key      = batch_pda(&args.target_agent_id, args.epoch_number);
     let challenge_key  = challenge_pda(&batch_key, &challenger_pubkey);
     let (vault_auth, _) = vault_authority_pda(&challenge_key);
     let vault_ata       = get_ata(&vault_auth, &usdc);
@@ -155,11 +159,11 @@ pub async fn submit_challenge_onchain(
             &batch_key,
             &usdc,
             &program_id,
-            target_agent_id,
-            epoch_number,
-            leaf_index,
-            contradicting_entry,
-            merkle_proof,
+            args.target_agent_id,
+            args.epoch_number,
+            args.leaf_index,
+            args.contradicting_entry.clone(),
+            args.merkle_proof.clone(),
         );
 
         let message = Message::new_with_blockhash(&[ix], Some(&fee_payer), &recent_blockhash);
@@ -176,8 +180,8 @@ pub async fn submit_challenge_onchain(
         kora.sign_and_send(&tx_b64).await?;
 
         tracing::info!(
-            target_agent = %hex::encode(target_agent_id),
-            epoch         = epoch_number,
+            target_agent = %hex::encode(args.target_agent_id),
+            epoch         = args.epoch_number,
             "Challenge submitted via Kora (gasless)",
         );
     } else {
@@ -192,11 +196,11 @@ pub async fn submit_challenge_onchain(
             &batch_key,
             &usdc,
             &program_id,
-            target_agent_id,
-            epoch_number,
-            leaf_index,
-            contradicting_entry,
-            merkle_proof,
+            args.target_agent_id,
+            args.epoch_number,
+            args.leaf_index,
+            args.contradicting_entry,
+            args.merkle_proof,
         );
 
         let tx = Transaction::new_signed_with_payer(
@@ -213,8 +217,8 @@ pub async fn submit_challenge_onchain(
 
         tracing::info!(
             tx            = %sig,
-            target_agent  = %hex::encode(target_agent_id),
-            epoch         = epoch_number,
+            target_agent  = %hex::encode(args.target_agent_id),
+            epoch         = args.epoch_number,
             "Challenge submitted directly (agent pays gas)",
         );
     }

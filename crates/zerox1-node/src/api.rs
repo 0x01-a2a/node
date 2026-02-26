@@ -3,8 +3,8 @@
 //! Visualization (read-only):
 //!   GET  /ws/events              — WebSocket stream of node events
 //!   GET  /peers                  — All known peers with SATI/lease status
-//!   GET  /reputation/:agent_id   — Reputation vector for an agent
-//!   GET  /batch/:agent_id/:epoch — Batch summary (own node only)
+//!   GET  /reputation/{agent_id}    — Reputation vector for an agent
+//!   GET  /batch/{agent_id}/{epoch} — Batch summary (own node only)
 //!
 //! Agent integration:
 //!   POST /envelopes/send         — Send an envelope (node signs + routes)
@@ -289,11 +289,12 @@ pub async fn serve(state: ApiState, addr: SocketAddr) {
         // Visualization
         .route("/ws/events",              get(ws_events_handler))
         .route("/peers",                  get(get_peers))
-        .route("/reputation/:agent_id",   get(get_reputation))
-        .route("/batch/:agent_id/:epoch", get(get_batch))
+        .route("/reputation/{agent_id}",    get(get_reputation))
+        .route("/batch/{agent_id}/{epoch}", get(get_batch))
         // Agent integration
         .route("/envelopes/send",         post(send_envelope))
         .route("/ws/inbox",               get(ws_inbox_handler))
+        .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(addr)

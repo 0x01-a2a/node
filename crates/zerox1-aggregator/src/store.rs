@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -208,6 +209,18 @@ pub struct AgentRegistryEntry {
     pub last_seen:  u64,
 }
 
+/// Full agent profile — reputation + entropy + capabilities + recent disputes + name.
+/// Returned by GET /agents/{agent_id}/profile to avoid multiple round trips.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentProfile {
+    pub agent_id:     String,
+    pub name:         Option<String>,
+    pub reputation:   Option<AgentReputation>,
+    pub entropy:      Option<EntropyEvent>,
+    pub capabilities: Vec<CapabilityMatch>,
+    pub disputes:     Vec<DisputeRecord>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "msg_type")]
 pub enum IngestEvent {
@@ -242,7 +255,12 @@ pub struct AgentReputation {
     pub verdict_count:  u64,
     pub average_score:  f64,
     pub last_updated:   u64,
+    /// Computed on read from DB; not stored. "rising" | "falling" | "stable".
+    #[serde(default = "default_trend")]
+    pub trend:          String,
 }
+
+fn default_trend() -> String { "stable".to_string() }
 
 impl AgentReputation {
     fn new(agent_id: String) -> Self {
@@ -256,6 +274,7 @@ impl AgentReputation {
             verdict_count:  0,
             average_score:  0.0,
             last_updated:   now_secs(),
+            trend:          default_trend(),
         }
     }
 
@@ -705,6 +724,7 @@ impl Db {
                 verdict_count,
                 average_score,
                 last_updated,
+                trend: default_trend(),
             })
         })?;
 
@@ -834,6 +854,51 @@ impl Db {
             })
         })?;
         rows.collect()
+    }
+
+    /// Fetch last N feedback scores for an agent (newest first). Used for trend computation.
+    fn query_recent_scores(&self, agent_id: &str, n: usize) -> rusqlite::Result<Vec<i32>> {
+        let mut stmt = self.0.prepare(
+            "SELECT score FROM feedback_events
+             WHERE target_agent = ?1
+             ORDER BY ts DESC
+             LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![agent_id, n as i64],
+            |row| row.get::<_, i32>(0),
+        )?;
+        rows.collect()
+    }
+
+    /// Search agent_registry by name (case-insensitive prefix/contains match).
+    fn query_agents_by_name(&self, name: &str, limit: usize) -> rusqlite::Result<Vec<AgentRegistryEntry>> {
+        let pattern = format!("%{}%", name.to_lowercase());
+        let mut stmt = self.0.prepare(
+            "SELECT agent_id, name, first_seen, last_seen
+             FROM agent_registry
+             WHERE LOWER(name) LIKE ?1
+             ORDER BY last_seen DESC
+             LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], |row| {
+            Ok(AgentRegistryEntry {
+                agent_id:   row.get(0)?,
+                name:       row.get(1)?,
+                first_seen: row.get::<_, i64>(2)? as u64,
+                last_seen:  row.get::<_, i64>(3)? as u64,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Look up a single agent's name from the registry.
+    fn query_agent_name(&self, agent_id: &str) -> rusqlite::Result<Option<String>> {
+        self.0.query_row(
+            "SELECT name FROM agent_registry WHERE agent_id = ?1",
+            rusqlite::params![agent_id],
+            |row| row.get(0),
+        ).optional()
     }
 
     /// Upsert an entropy vector (agent_id + epoch is the unique key).
@@ -1451,6 +1516,16 @@ impl ReputationStore {
                 }
             }
             IngestEvent::Beacon(ev) => {
+                if !is_valid_agent_id(&ev.sender) {
+                    tracing::warn!("Ingest: invalid sender in BEACON '{}' — dropped", &ev.sender);
+                    return;
+                }
+                // Ensure sender has an entry so they appear in /stats/network agent_count.
+                inner.agents
+                    .entry(ev.sender.clone())
+                    .or_insert_with(|| AgentReputation::new(ev.sender.clone()));
+                drop(inner);
+
                 let ts = now_secs();
                 tracing::debug!("BEACON agent={} name={}", &ev.sender[..8.min(ev.sender.len())], &ev.name);
                 let db = self.db.lock().unwrap();
@@ -1464,7 +1539,15 @@ impl ReputationStore {
     }
 
     pub fn get(&self, agent_id: &str) -> Option<AgentReputation> {
-        self.inner.read().unwrap().agents.get(agent_id).cloned()
+        let mut rep = self.inner.read().unwrap().agents.get(agent_id).cloned()?;
+        // Compute trend from DB when available; keep "stable" otherwise.
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            if let Ok(scores) = conn.query_recent_scores(agent_id, 10) {
+                rep.trend = compute_trend(&scores).to_string();
+            }
+        }
+        Some(rep)
     }
 
     pub fn leaderboard(&self, limit: usize) -> Vec<AgentReputation> {
@@ -2048,6 +2131,67 @@ impl ReputationStore {
         }
         vec![]
     }
+
+    /// Full agent profile — combines reputation, entropy, capabilities, disputes, and name
+    /// into a single response to avoid multiple round trips.
+    pub fn agent_profile(&self, agent_id: &str) -> AgentProfile {
+        let reputation   = self.get(agent_id);
+        let entropy      = self.entropy_latest(agent_id);
+        let capabilities = self.search_by_capability_for_agent(agent_id);
+        let disputes     = self.disputes_for_agent(agent_id, 5);
+
+        let name = {
+            let db = self.db.lock().unwrap();
+            db.as_ref().and_then(|conn| conn.query_agent_name(agent_id).ok().flatten())
+        };
+
+        AgentProfile { agent_id: agent_id.to_string(), name, reputation, entropy, capabilities, disputes }
+    }
+
+    /// Capabilities advertised by a specific agent (for use in profile assembly).
+    fn search_by_capability_for_agent(&self, agent_id: &str) -> Vec<CapabilityMatch> {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            let res = conn.0.prepare(
+                "SELECT agent_id, capability, last_seen FROM capabilities WHERE agent_id = ?1"
+            ).and_then(|mut stmt| {
+                stmt.query_map(rusqlite::params![agent_id], |row| {
+                    Ok(CapabilityMatch {
+                        agent_id:   row.get(0)?,
+                        capability: row.get(1)?,
+                        last_seen:  row.get::<_, i64>(2)? as u64,
+                    })
+                }).and_then(|rows| rows.collect())
+            });
+            if let Ok(rows) = res { return rows; }
+        }
+        vec![]
+    }
+
+    /// Search agents by name (case-insensitive substring match on BEACON names).
+    pub fn search_by_name(&self, name: &str, limit: usize) -> Vec<AgentRegistryEntry> {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            match conn.query_agents_by_name(name, limit) {
+                Ok(rows) => return rows,
+                Err(e)   => tracing::warn!("query_agents_by_name failed: {e}"),
+            }
+        }
+        vec![]
+    }
+}  // end impl ReputationStore
+
+/// Compute trend from recent feedback scores (newest first).
+/// Splits scores in half: if the newer half averages >5 points above the older half → "rising",
+/// >5 below → "falling", otherwise "stable". Requires at least 6 samples.
+fn compute_trend(scores: &[i32]) -> &'static str {
+    if scores.len() < 6 { return "stable"; }
+    let mid    = scores.len() / 2;
+    let recent: f64 = scores[..mid].iter().sum::<i32>() as f64 / mid as f64;
+    let older:  f64 = scores[mid..].iter().sum::<i32>() as f64 / (scores.len() - mid) as f64;
+    if      recent > older + 5.0 { "rising"  }
+    else if recent < older - 5.0 { "falling" }
+    else                         { "stable"  }
 }
 
 fn now_secs() -> u64 {

@@ -15,9 +15,8 @@ ExecStart=/opt/zerox1/bin/zerox1-node \
   --agent-name zerox1-bootstrap \
   --log-dir /var/log/zerox1 \
   --kora-url http://127.0.0.1:8080 \
-  --aggregator-url http://127.0.0.1:8081 \
-  --aggregator-secret ${ZX01_AGGREGATOR_SECRET} \
-  --no-default-bootstrap
+  --aggregator-url http://127.0.0.1:80 \
+  --aggregator-secret ${ZX01_AGGREGATOR_SECRET}
 
 # Environment file holds secrets (not checked into git).
 # Create /etc/zerox1/env with:

@@ -27,7 +27,7 @@ use solana_sdk::signature::{read_keypair_file, Keypair};
 )]
 pub struct Cli {
     /// URL of the zerox1 aggregator API.
-    #[arg(long, default_value = "http://localhost:8081", env = "ZX01_AGGREGATOR_URL")]
+    #[arg(long, default_value = "http://localhost", env = "ZX01_AGGREGATOR_URL")]
     pub aggregator_url: String,
 
     /// Bearer token for the aggregator's ingest secret (read-only endpoints don't require it,

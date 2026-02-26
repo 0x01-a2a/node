@@ -115,5 +115,5 @@ We are not asking for development resources. The protocol is built and running. 
 ---
 
 - **npm** — `npm install @zerox1/sdk`
-- **GitHub** — github.com/zerox1/node
+- **GitHub** — github.com/0x01-a2a/node
 - **Website** — 0x01.world

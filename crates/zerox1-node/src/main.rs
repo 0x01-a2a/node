@@ -1,6 +1,7 @@
 mod api;
 mod batch;
 mod challenge;
+mod escrow;
 mod config;
 mod identity;
 mod inactive;

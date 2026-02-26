@@ -16,10 +16,11 @@ use zerox1_protocol::hash::keccak256;
 // Program IDs
 const CHALLENGE_PROGRAM_ID: &str     = "6tVCJmogJghQMEMRhvk4qrUoT6JXPPDebUwmRHXTtygj";
 const BEHAVIOR_LOG_PROGRAM_ID: &str  = "3gXhgBLsVYVQkntuVcPdiDe2gRxbSt2CGFJKriA8q9bA";
-const USDC_MINT: &str                = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"; // Devnet USDC (or configure via CLI)
+const USDC_MINT: &str                = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"; // Devnet USDC
 
 const SPL_TOKEN_PROGRAM_ID: &str     = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-const SPL_ATA_PROGRAM_ID: &str       = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+const SPL_ATA_PROGRAM_ID: &str       = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bJo";
+const TREASURY_PUBKEY: &str          = "qw4hzfV7UUXTrNh3hiS9Q8KSPMXWUusNoyFKLvtcMMX";
 
 fn challenge_program_id() -> Pubkey {
     CHALLENGE_PROGRAM_ID.parse().unwrap()
@@ -35,6 +36,9 @@ fn spl_token_id() -> Pubkey {
 }
 fn spl_ata_id() -> Pubkey {
     SPL_ATA_PROGRAM_ID.parse().unwrap()
+}
+fn treasury() -> Pubkey {
+    TREASURY_PUBKEY.parse().unwrap()
 }
 
 pub fn get_associated_token_address(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
@@ -182,5 +186,97 @@ pub async fn submit_challenge_onchain(
         .context("send_and_confirm_transaction challenge")?;
     
     tracing::info!("Challenge submitted! TX: {}", sig);
+    Ok(())
+}
+
+/// Build the `resolve_challenge` instruction (Borsh layout).
+fn build_resolve_challenge_ix(
+    resolver:      &Pubkey,
+    challenger:    &Pubkey,
+    agent_id:      &[u8; 32],
+    epoch:         u64,
+    entry:         &[u8],
+    merkle_proof:  &[[u8; 32]],
+) -> Instruction {
+    let mut data = Vec::new();
+    data.extend_from_slice(&anchor_discriminator("resolve_challenge"));
+    // contradicting_entry: Vec<u8>
+    data.extend_from_slice(&(entry.len() as u32).to_le_bytes());
+    data.extend_from_slice(entry);
+    // merkle_proof: Vec<[u8; 32]>
+    data.extend_from_slice(&(merkle_proof.len() as u32).to_le_bytes());
+    for p in merkle_proof {
+        data.extend_from_slice(p);
+    }
+    // contradicts_batch: bool (true — challenger asserts the entry contradicts the batch)
+    data.push(1u8);
+
+    let prog_id = challenge_program_id();
+
+    let (batch_pda, _) = Pubkey::find_program_address(
+        &[b"batch", agent_id, &epoch.to_le_bytes()],
+        &behavior_log_program_id(),
+    );
+    let (challenge_account, _) = Pubkey::find_program_address(
+        &[b"challenge", batch_pda.as_ref(), challenger.as_ref()],
+        &prog_id,
+    );
+    let (challenge_vault_authority, _) = Pubkey::find_program_address(
+        &[b"challenge_vault", challenge_account.as_ref()],
+        &prog_id,
+    );
+
+    let challenge_vault  = get_associated_token_address(&challenge_vault_authority, &usdc_mint());
+    let challenger_usdc  = get_associated_token_address(challenger, &usdc_mint());
+    let treasury_key     = treasury();
+    let treasury_usdc    = get_associated_token_address(&treasury_key, &usdc_mint());
+
+    Instruction {
+        program_id: prog_id,
+        accounts: vec![
+            AccountMeta::new(*resolver, true),
+            AccountMeta::new(challenge_account, false),
+            AccountMeta::new_readonly(challenge_vault_authority, false),
+            AccountMeta::new(challenge_vault, false),
+            AccountMeta::new(challenger_usdc, false),
+            AccountMeta::new(treasury_usdc, false),
+            AccountMeta::new_readonly(treasury_key, false),
+            AccountMeta::new_readonly(batch_pda, false),
+            AccountMeta::new_readonly(usdc_mint(), false),
+            AccountMeta::new_readonly(spl_token_id(), false),
+        ],
+        data,
+    }
+}
+
+pub async fn resolve_challenge_onchain(
+    rpc:          &RpcClient,
+    signer:       &Keypair,
+    agent_id_hex: &str,
+    epoch:        u64,
+    entry:        &[u8],
+    merkle_proof: &[[u8; 32]],
+) -> anyhow::Result<()> {
+    let agent_id_bytes = hex::decode(agent_id_hex).context("hex decode agent_id")?;
+    let mut agent_id = [0u8; 32];
+    agent_id.copy_from_slice(&agent_id_bytes);
+
+    let ix = build_resolve_challenge_ix(
+        &signer.pubkey(),
+        &signer.pubkey(),
+        &agent_id,
+        epoch,
+        entry,
+        merkle_proof,
+    );
+
+    let recent_blockhash = rpc.get_latest_blockhash().await?;
+    let message = Message::new(&[ix], Some(&signer.pubkey()));
+    let tx = Transaction::new(&[signer], message, recent_blockhash);
+
+    let sig = rpc.send_and_confirm_transaction(&tx).await
+        .context("send_and_confirm_transaction resolve_challenge")?;
+
+    tracing::info!("Challenge resolved! TX: {}", sig);
     Ok(())
 }

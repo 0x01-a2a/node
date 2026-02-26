@@ -319,9 +319,10 @@ pub mod stake_lock {
     ///
     /// Transfers `args.amount` USDC from stake vault to `recipient_usdc`.
     pub fn slash(ctx: Context<Slash>, args: SlashArgs) -> Result<()> {
-        // Enforce that the caller is the Challenge program.
+        // Enforce that the caller is the Challenge program via its PDA authority.
+        let (expected_auth, _) = Pubkey::find_program_address(&[b"slash_authority"], &CHALLENGE_PROGRAM_ID);
         require!(
-            ctx.accounts.challenge_program.key() == CHALLENGE_PROGRAM_ID,
+            ctx.accounts.challenge_authority.key() == expected_auth,
             StakeLockError::UnauthorizedCaller,
         );
 
@@ -583,9 +584,9 @@ pub struct TopUpStake<'info> {
 
 #[derive(Accounts)]
 pub struct Slash<'info> {
-    /// Must be the Challenge program — program ID enforced in handler.
-    /// CHECK: challenge_program.key() == CHALLENGE_PROGRAM_ID, checked in handler.
-    pub challenge_program: Signer<'info>,
+    /// Must be the Challenge program's PDA authority.
+    /// CHECK: PDA verified in handler against CHALLENGE_PROGRAM_ID.
+    pub challenge_authority: Signer<'info>,
 
     #[account(
         mut,

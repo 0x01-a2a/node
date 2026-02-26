@@ -32,7 +32,7 @@ const USDC_MINT_STR: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 /// SPL Token program.
 const SPL_TOKEN_PROGRAM_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 /// Associated Token Program.
-const ASSOCIATED_TOKEN_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+const ASSOCIATED_TOKEN_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bJo";
 /// Treasury pubkey (receives forfeited stake).
 pub const TREASURY_PUBKEY_STR: &str = "qw4hzfV7UUXTrNh3hiS9Q8KSPMXWUusNoyFKLvtcMMX";
 
@@ -117,6 +117,7 @@ pub async fn submit_challenge_onchain(
     kora:                Option<&KoraClient>,
     target_agent_id:     [u8; 32],
     epoch_number:        u64,
+    leaf_index:          u64,
     contradicting_entry: Vec<u8>,
     merkle_proof:        Vec<[u8; 32]>,
 ) -> anyhow::Result<()> {
@@ -156,6 +157,7 @@ pub async fn submit_challenge_onchain(
             &program_id,
             target_agent_id,
             epoch_number,
+            leaf_index,
             contradicting_entry,
             merkle_proof,
         );
@@ -192,6 +194,7 @@ pub async fn submit_challenge_onchain(
             &program_id,
             target_agent_id,
             epoch_number,
+            leaf_index,
             contradicting_entry,
             merkle_proof,
         );
@@ -331,6 +334,7 @@ fn build_submit_challenge_ix(
     program_id:          &Pubkey,
     agent_id:            [u8; 32],
     epoch_number:        u64,
+    leaf_index:          u64,
     contradicting_entry: Vec<u8>,
     merkle_proof:        Vec<[u8; 32]>,
 ) -> Instruction {
@@ -349,6 +353,8 @@ fn build_submit_challenge_ix(
     for hash in &merkle_proof {
         data.extend_from_slice(hash);
     }
+    // leaf_index: u64 (LE)
+    data.extend_from_slice(&leaf_index.to_le_bytes());
 
     Instruction {
         program_id: *program_id,

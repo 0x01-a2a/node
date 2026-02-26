@@ -17,7 +17,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, State,
     },
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -167,6 +167,8 @@ struct ApiInner {
     outbound_tx: mpsc::Sender<OutboundRequest>,
     /// Inbound envelopes from node loop to /ws/inbox subscribers.
     inbox_tx:    broadcast::Sender<InboundEnvelope>,
+    /// Optional bearer token to authenticate mutating API endpoints.
+    api_secret:  Option<String>,
 }
 
 /// Cheaply cloneable shared state passed to all axum handlers.
@@ -178,7 +180,7 @@ impl ApiState {
     ///
     /// Returns `(state, outbound_rx)`. The caller (node) must hold onto
     /// `outbound_rx` and drive it in the main event loop.
-    pub fn new(self_agent: [u8; 32]) -> (Self, mpsc::Receiver<OutboundRequest>) {
+    pub fn new(self_agent: [u8; 32], api_secret: Option<String>) -> (Self, mpsc::Receiver<OutboundRequest>) {
         let (event_tx, _)    = broadcast::channel(512);
         let (inbox_tx, _)    = broadcast::channel(256);
         let (outbound_tx, outbound_rx) = mpsc::channel(64);
@@ -191,6 +193,7 @@ impl ApiState {
             self_agent,
             outbound_tx,
             inbox_tx,
+            api_secret,
         }));
 
         (state, outbound_rx)
@@ -379,8 +382,24 @@ async fn get_batch(
 
 async fn send_envelope(
     State(state): State<ApiState>,
+    headers:      HeaderMap,
     Json(req):    Json<SendEnvelopeRequest>,
 ) -> impl IntoResponse {
+    // Authenticate outbound transmission requests.
+    if let Some(ref secret) = state.0.api_secret {
+        let expected = format!("Bearer {secret}");
+        let provided = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !ct_eq(provided, &expected) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "unauthorized" })),
+            );
+        }
+    }
+
     // Parse msg_type.
     let msg_type = match parse_msg_type(&req.msg_type) {
         Some(t) => t,
@@ -514,4 +533,17 @@ fn parse_msg_type(s: &str) -> Option<MsgType> {
         "DISPUTE"         => Some(MsgType::Dispute),
         _                 => None,
     }
+}
+
+fn ct_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let len = a.len().max(b.len());
+    let mut diff: u8 = (a.len() ^ b.len()) as u8;
+    for i in 0..len {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        diff |= x ^ y;
+    }
+    diff == 0
 }

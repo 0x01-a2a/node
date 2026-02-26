@@ -101,6 +101,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/graph/clusters",                     get(api::get_flow_clusters))
         .route("/graph/agent/{agent_id}",             get(api::get_agent_flow))
         .route("/epochs/{agent_id}/{epoch}/envelopes", get(api::get_epoch_envelopes))
+        .route("/agents/search",                       get(api::search_agents))
+        .route("/disputes/{agent_id}",                 get(api::get_disputes))
+        .route("/registry",                            get(api::get_registry))
         .with_state(state);
 
     tracing::info!("zerox1-aggregator listening on {}", config.listen);

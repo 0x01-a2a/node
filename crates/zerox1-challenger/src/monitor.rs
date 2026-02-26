@@ -9,8 +9,18 @@ use serde_json::Value;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::signature::Keypair;
 
+use base64::Engine as _;
+
 use crate::Cli;
-use crate::submit::{generate_merkle_proof, submit_challenge_onchain};
+use crate::submit::{generate_merkle_proof, submit_challenge_onchain, resolve_challenge_onchain};
+
+#[derive(Deserialize)]
+struct EnvelopeEntry {
+    #[allow(dead_code)]
+    seq:       i64,
+    leaf_hash: String,
+    bytes_b64: String,
+}
 
 // ============================================================================
 // Aggregator response types
@@ -320,8 +330,8 @@ async fn execute_challenge(
     let base = cli.aggregator_url.trim_end_matches('/');
     let url = format!("{}/epochs/{}/{}/envelopes", base, entry.agent_id, entry.epoch);
     
-    // Fetch envelope sequence for the epoch
-    let env_resp: Vec<(i64, String, Vec<u8>)> = fetch_json(client, &url, cli.aggregator_secret.as_deref())
+    // Fetch raw envelopes for the epoch.
+    let env_resp: Vec<EnvelopeEntry> = fetch_json(client, &url, cli.aggregator_secret.as_deref())
         .await
         .context("fetching epoch envelopes")
         .and_then(|v| serde_json::from_value(v).context("parsing envelopes"))?;
@@ -330,20 +340,22 @@ async fn execute_challenge(
         anyhow::bail!("No envelopes found for agent {} epoch {}", entry.agent_id, entry.epoch);
     }
 
-    // Convert to leaf hashes for Merkle proof
+    // Build leaf hash array from hex-encoded hashes (avoids re-hashing).
     let mut leaves = Vec::with_capacity(env_resp.len());
-    for (_, hex_hash, _) in &env_resp {
+    for e in &env_resp {
+        let bytes = hex::decode(&e.leaf_hash).context("hex decode leaf hash")?;
         let mut leaf = [0u8; 32];
-        let bytes = hex::decode(hex_hash).context("hex decode leaf hash")?;
         leaf.copy_from_slice(&bytes);
         leaves.push(leaf);
     }
 
-    // We can pick any envelope to challenge. Usually we pick the first one 
-    // or one that specifically seems anomalous. For now, pick the first.
+    // Pick the first envelope as the contradicting entry.
+    // In production: select one where aggregator score contradicts the batch.
     let target_idx = 0;
-    let (_, _, ref raw_entry) = env_resp[target_idx];
-    
+    let raw_entry = base64::engine::general_purpose::STANDARD
+        .decode(&env_resp[target_idx].bytes_b64)
+        .context("base64 decode envelope bytes")?;
+
     let proof = generate_merkle_proof(target_idx, &leaves);
 
     tracing::info!("Submitting on-chain challenge for agent {} epoch {}", entry.agent_id, entry.epoch);
@@ -354,7 +366,18 @@ async fn execute_challenge(
         &entry.agent_id,
         entry.epoch,
         target_idx,
-        raw_entry,
+        &raw_entry,
+        &proof,
+    ).await?;
+
+    tracing::info!("Resolving on-chain challenge for agent {} epoch {}", entry.agent_id, entry.epoch);
+
+    resolve_challenge_onchain(
+        rpc,
+        signer,
+        &entry.agent_id,
+        entry.epoch,
+        &raw_entry,
         &proof,
     ).await
 }

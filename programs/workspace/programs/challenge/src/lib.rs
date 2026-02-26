@@ -229,6 +229,27 @@ pub mod challenge {
                 challenger_reward: vault_balance,
                 treasury_amount:   0,
             });
+
+            // Slash the agent via StakeLock CPI.
+            let cpi_program = ctx.accounts.stake_program.to_account_info();
+            let cpi_accounts = stake_lock::cpi::accounts::Slash {
+                challenge_authority:   ctx.accounts.slash_authority.to_account_info(),
+                stake_account:         ctx.accounts.stake_account.to_account_info(),
+                stake_vault_authority: ctx.accounts.stake_vault_authority.to_account_info(),
+                stake_vault:           ctx.accounts.stake_vault.to_account_info(),
+                recipient_usdc:        ctx.accounts.challenger_usdc.to_account_info(),
+                usdc_mint:             ctx.accounts.usdc_mint.to_account_info(),
+                token_program:         ctx.accounts.token_program.to_account_info(),
+            };
+            // Note: slash_authority PDA bump used for CPI signing.
+            let slash_bump = ctx.bumps.slash_authority;
+            let slash_seeds: &[&[&[u8]]] = &[&[
+                b"slash_authority",
+                &[slash_bump],
+            ]];
+            let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, slash_seeds);
+            stake_lock::cpi::slash(cpi_ctx, stake_lock::SlashArgs { amount: MIN_STAKE_USDC })?;
+
         } else {
             // Forfeit challenger's stake to treasury.
             let cpi_ctx = CpiContext::new_with_signer(
@@ -360,7 +381,8 @@ pub struct SubmitChallenge<'info> {
 
 #[derive(Accounts)]
 pub struct ResolveChallenge<'info> {
-    /// Permissionless resolver.
+    /// Protocol oracle/treasury. Off-chain bot resolves v1.
+    #[account(mut, address = TREASURY_PUBKEY)]
     pub resolver: Signer<'info>,
 
     #[account(
@@ -412,6 +434,27 @@ pub struct ResolveChallenge<'info> {
     /// Batch account — log_merkle_root read from raw bytes for proof verification.
     /// CHECK: Batch account used as key for challenge PDA seed derivation.
     pub batch_account: UncheckedAccount<'info>,
+
+    // ===================================
+    // Accounts for StakeLock CPI (Slash)
+    // ===================================
+    
+    /// PDA authority for the challenge program to sign the CPI.
+    /// CHECK: derived in handler
+    #[account(seeds = [b"slash_authority"], bump)]
+    pub slash_authority: UncheckedAccount<'info>,
+
+    pub stake_program: Program<'info, stake_lock::program::StakeLock>,
+
+    #[account(mut)]
+    pub stake_account: Account<'info, stake_lock::StakeLockAccount>,
+
+    /// CHECK: PDA authority for vault ATA in stake_lock
+    #[account(mut)]
+    pub stake_vault_authority: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub stake_vault: Account<'info, TokenAccount>,
 
     pub usdc_mint:     Account<'info, Mint>,
     pub token_program: Program<'info, Token>,

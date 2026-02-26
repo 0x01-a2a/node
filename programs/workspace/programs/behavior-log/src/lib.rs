@@ -1,4 +1,5 @@
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program;
 
 declare_id!("3gXhgBLsVYVQkntuVcPdiDe2gRxbSt2CGFJKriA8q9bA");
 
@@ -31,8 +32,38 @@ pub mod behavior_log {
         // Ed25519 signature is pre-verified by the Solana Ed25519 program
         // via instruction introspection. The caller MUST include an Ed25519
         // verify instruction immediately before this one in the same transaction.
-        // Here we only check the batch_hash matches what was signed.
-        // (Full sig-verify via sysvar_instructions is wired in the client.)
+        let current_index = solana_program::sysvar::instructions::load_current_index_checked(
+            &ctx.accounts.instructions.to_account_info(),
+        )?;
+        require!(current_index > 0, BehaviorLogError::MissingSignatureInstruction);
+
+        let ed25519_ix = solana_program::sysvar::instructions::load_instruction_at_checked(
+            (current_index - 1) as usize,
+            &ctx.accounts.instructions.to_account_info(),
+        )?;
+        require!(
+            ed25519_ix.program_id == solana_program::ed25519_program::ID,
+            BehaviorLogError::MissingSignatureInstruction
+        );
+
+        // Introspect the ed25519 ix data to ensure the correctly signed pubkey and message.
+        require!(ed25519_ix.data.len() >= 16 + 32 + 64, BehaviorLogError::InvalidSignatureInstruction);
+        require!(ed25519_ix.data[0] == 1, BehaviorLogError::InvalidSignatureInstruction); // num_signatures = 1
+
+        let pubkey_offset = u16::from_le_bytes([ed25519_ix.data[4], ed25519_ix.data[5]]) as usize;
+        let msg_offset = u16::from_le_bytes([ed25519_ix.data[10], ed25519_ix.data[11]]) as usize;
+        let msg_size = u16::from_le_bytes([ed25519_ix.data[12], ed25519_ix.data[13]]) as usize;
+
+        require!(
+            pubkey_offset + 32 <= ed25519_ix.data.len() && msg_offset + msg_size <= ed25519_ix.data.len(),
+            BehaviorLogError::InvalidSignatureInstruction
+        );
+
+        let pubkey = &ed25519_ix.data[pubkey_offset..pubkey_offset + 32];
+        let msg = &ed25519_ix.data[msg_offset..msg_offset + msg_size];
+
+        require!(pubkey == args.agent_id, BehaviorLogError::SignerMismatch);
+        require!(msg == args.batch_hash, BehaviorLogError::MessageMismatch);
 
         batch.agent_id        = args.agent_id;
         batch.epoch_number    = args.epoch_number;
@@ -41,6 +72,8 @@ pub mod behavior_log {
         batch.submitted_slot  = clock.slot;
         batch.bump            = ctx.bumps.batch_account;
 
+        // Initialize registry agent_id if this is the first time (init_if_needed).
+        ctx.accounts.registry.agent_id = args.agent_id;
         // Advance registry epoch counter
         ctx.accounts.registry.next_epoch += 1;
 
@@ -92,6 +125,11 @@ pub struct SubmitBatch<'info> {
         bump
     )]
     pub registry: Account<'info, AgentBatchRegistry>,
+
+    /// Instructions sysvar to verify the Ed25519 signature instruction.
+    /// CHECK: Instructions sysvar checked by address.
+    #[account(address = solana_program::sysvar::instructions::ID)]
+    pub instructions: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
 }
@@ -175,4 +213,12 @@ pub enum BehaviorLogError {
     InvalidEpochNumber,
     #[msg("Batch hash must not be zero")]
     EmptyBatchHash,
+    #[msg("Missing preceding Ed25519 signature verification instruction")]
+    MissingSignatureInstruction,
+    #[msg("Invalid Ed25519 signature instruction data format")]
+    InvalidSignatureInstruction,
+    #[msg("Ed25519 signer pubkey does not match agent_id")]
+    SignerMismatch,
+    #[msg("Ed25519 signed message does not match batch_hash")]
+    MessageMismatch,
 }

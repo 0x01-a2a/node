@@ -54,6 +54,8 @@ const NOTARIZE_ASSIGN_VERIFIER_OFFSET: usize = 32;
 const MAX_NAME_LEN: usize = 64;
 /// Maximum tracked conversations (bilateral message sender ↔ conversation).
 const MAX_ACTIVE_CONVERSATIONS: usize = 10_000;
+/// Maximum number of notary candidates tracked.
+const MAX_NOTARY_POOL: usize = 100;
 
 // ============================================================================
 // Zx01Node
@@ -99,6 +101,10 @@ pub struct Zx01Node {
     http_client: reqwest::Client,
     /// Per-peer message rate limiter: PeerId → (count_in_window, window_start).
     rate_limiter: std::collections::HashMap<libp2p::PeerId, (u32, std::time::Instant)>,
+    /// Agents known to offer notary services (populated from NOTARIZE_BID broadcasts).
+    /// Used to auto-assign a notary when this node sends ACCEPT.
+    /// agent_id → libp2p PeerId (needed for bilateral send).
+    notary_pool: HashMap<[u8; 32], PeerId>,
 }
 
 impl Zx01Node {
@@ -117,7 +123,7 @@ impl Zx01Node {
         let usdc_mint         = config.usdc_mint_pubkey().ok().flatten();
         let aggregator_url    = config.aggregator_url.clone();
         let aggregator_secret = config.aggregator_secret.clone();
-        let (api, outbound_rx) = ApiState::new(identity.agent_id);
+        let (api, outbound_rx) = ApiState::new(identity.agent_id, config.api_secret.clone());
         let batch    = BatchAccumulator::new(epoch, 0);
         let logger   = EnvelopeLogger::new(log_dir, epoch);
 
@@ -156,6 +162,7 @@ impl Zx01Node {
             aggregator_secret,
             http_client: reqwest::Client::new(),
             rate_limiter: std::collections::HashMap::new(),
+            notary_pool:  HashMap::new(),
         }
     }
 
@@ -642,6 +649,18 @@ impl Zx01Node {
                 hex::encode(env.sender),
                 hex::encode(env.conversation_id),
             );
+            // Track as notary candidate (cap pool to prevent memory exhaustion).
+            if env.sender != self.identity.agent_id
+                && self.notary_pool.len() < MAX_NOTARY_POOL
+            {
+                self.notary_pool.insert(env.sender, source_peer);
+            }
+            self.push_to_aggregator(serde_json::json!({
+                "msg_type":        "NOTARIZE_BID",
+                "sender":          hex::encode(env.sender),
+                "conversation_id": hex::encode(env.conversation_id),
+                "slot":            self.current_slot,
+            }));
         } else if topic_str == TOPIC_BROADCAST {
             match env.msg_type {
                 MsgType::Advertise => {
@@ -650,6 +669,25 @@ impl Zx01Node {
                         hex::encode(env.sender),
                         env.payload.len(),
                     );
+                    // Parse capabilities JSON: {"capabilities": ["translation", "price-feed"]}
+                    if let Ok(text) = std::str::from_utf8(&env.payload) {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(text) {
+                            if let Some(arr) = val.get("capabilities").and_then(|v| v.as_array()) {
+                                let caps: Vec<String> = arr.iter()
+                                    .filter_map(|c| c.as_str().map(|s| s.to_string()))
+                                    .take(32)
+                                    .collect();
+                                if !caps.is_empty() {
+                                    self.push_to_aggregator(serde_json::json!({
+                                        "msg_type":     "ADVERTISE",
+                                        "sender":       hex::encode(env.sender),
+                                        "capabilities": caps,
+                                        "slot":         self.current_slot,
+                                    }));
+                                }
+                            }
+                        }
+                    }
                 }
                 MsgType::Discover => {
                     tracing::debug!("DISCOVER from {}", hex::encode(env.sender));
@@ -813,6 +851,13 @@ impl Zx01Node {
                     hex::encode(env.sender),
                     hex::encode(env.conversation_id),
                 );
+                self.push_to_aggregator(serde_json::json!({
+                    "msg_type":        "DISPUTE",
+                    "sender":          hex::encode(env.sender),
+                    "disputed_agent":  hex::encode(env.recipient),
+                    "conversation_id": hex::encode(env.conversation_id),
+                    "slot":            self.current_slot,
+                }));
             }
             _ => {}
         }
@@ -943,6 +988,13 @@ impl Zx01Node {
                     .filter(|c| c.is_ascii_graphic() || *c == ' ')
                     .collect();
                 tracing::debug!("Agent name: {safe}");
+                
+                self.push_to_aggregator(serde_json::json!({
+                    "msg_type": "BEACON",
+                    "sender":   hex::encode(env.sender),
+                    "name":     safe,
+                    "slot":     self.current_slot,
+                }));
             }
         }
     }
@@ -1053,11 +1105,105 @@ impl Zx01Node {
                 }
                 self.batch.record_message(req.msg_type, self.identity.agent_id, self.current_slot);
                 tracing::debug!("Sent {} nonce={nonce}", req.msg_type);
+
+                // VERDICT with approve payload → trigger escrow approve_payment on-chain.
+                // Payload convention: [0x00=approve | 0x01=reject][requester(32)][provider(32)]
+                if req.msg_type == MsgType::Verdict
+                    && env.payload.len() >= 65
+                    && env.payload[0] == 0x00
+                {
+                    let mut requester = [0u8; 32];
+                    let mut provider  = [0u8; 32];
+                    requester.copy_from_slice(&env.payload[1..33]);
+                    provider.copy_from_slice(&env.payload[33..65]);
+                    let rpc_url  = self.config.rpc_url.clone();
+                    let sk_bytes = self.identity.signing_key.to_bytes();
+                    let vk_bytes = self.identity.verifying_key.to_bytes();
+                    let conv_id  = req.conversation_id;
+                    // notary_bytes = our own vk (we are the notary sending this VERDICT).
+                    let notary_bytes = vk_bytes;
+                    tokio::spawn(async move {
+                        use solana_rpc_client::nonblocking::rpc_client::RpcClient as SolanaRpc;
+                        if let Err(e) = crate::escrow::approve_payment_onchain(
+                            &SolanaRpc::new(rpc_url),
+                            sk_bytes,
+                            vk_bytes,
+                            requester,
+                            provider,
+                            conv_id,
+                            notary_bytes,
+                        ).await {
+                            tracing::warn!("Escrow approve_payment failed: {e}");
+                        }
+                    });
+                }
+
+                // ACCEPT sent → auto-assign a notary for this conversation (if pool non-empty).
+                // This populates batch.verifier_ids, making hv (GAP-04) non-None.
+                if req.msg_type == MsgType::Accept {
+                    self.try_assign_notary(swarm, req.conversation_id);
+                }
             }
             Err(e) => tracing::warn!("Outbound send failed: {e}"),
         }
 
         let _ = req.reply.send(result.map(|_| SentConfirmation { nonce, payload_hash }));
+    }
+
+    // ========================================================================
+    // Notary auto-assignment (triggered on ACCEPT send)
+    // ========================================================================
+
+    /// Pick a notary from the pool and send NOTARIZE_ASSIGN for `conversation_id`.
+    ///
+    /// Uses the first 8 bytes of conversation_id as a selection seed so different
+    /// conversations pick different notaries — maximising verifier entropy (hv).
+    fn try_assign_notary(
+        &mut self,
+        swarm:           &mut Swarm<Zx01Behaviour>,
+        conversation_id: [u8; 16],
+    ) {
+        // Build a snapshot excluding ourselves.
+        let candidates: Vec<([u8; 32], PeerId)> = self.notary_pool.iter()
+            .filter(|(agent_id, _)| **agent_id != self.identity.agent_id)
+            .map(|(a, p)| (*a, *p))
+            .collect();
+
+        if candidates.is_empty() {
+            return;
+        }
+
+        // Use conversation_id[0..8] as an index seed for diverse selection.
+        let seed = u64::from_le_bytes(conversation_id[..8].try_into().unwrap());
+        let idx  = (seed as usize) % candidates.len();
+        let (notary_agent_id, notary_peer_id) = candidates[idx];
+
+        // Payload: notary's agent_id (32 bytes), confirming who is being assigned.
+        let env = self.build_envelope(
+            MsgType::NotarizeAssign,
+            notary_agent_id,
+            conversation_id,
+            notary_agent_id.to_vec(),
+        );
+
+        match self.send_bilateral(swarm, notary_peer_id, &env) {
+            Ok(_) => {
+                self.batch.record_notarize_assign(VerifierAssignment {
+                    conversation_id,
+                    verifier_id: notary_agent_id,
+                    slot:        self.current_slot,
+                });
+                tracing::info!(
+                    "NOTARIZE_ASSIGN → {} for conversation {}",
+                    &hex::encode(notary_agent_id)[..12],
+                    hex::encode(conversation_id),
+                );
+            }
+            Err(e) => tracing::warn!(
+                "NOTARIZE_ASSIGN send failed for {}: {e}",
+                &hex::encode(notary_agent_id)[..12],
+            ),
+        }
     }
 
     // ========================================================================

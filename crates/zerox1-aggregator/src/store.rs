@@ -64,6 +64,63 @@ pub struct EntropyEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotarizeBidEvent {
+    pub sender:          String,
+    pub conversation_id: String,
+    pub slot:            u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvertiseEvent {
+    pub sender:       String,
+    pub capabilities: Vec<String>,
+    pub slot:         u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DisputeEvent {
+    pub sender:          String,
+    pub disputed_agent:  String,
+    pub conversation_id: String,
+    pub slot:            u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeaconEvent {
+    pub sender: String,
+    pub name:   String,
+    pub slot:   u64,
+}
+
+/// A single dispute record — used by GET /disputes/{agent_id}.
+#[derive(Debug, Clone, Serialize)]
+pub struct DisputeRecord {
+    pub id:              i64,
+    pub sender:          String,
+    pub disputed_agent:  String,
+    pub conversation_id: String,
+    pub slot:            u64,
+    pub ts:              u64,
+}
+
+/// Capability match — used by GET /agents/search.
+#[derive(Debug, Clone, Serialize)]
+pub struct CapabilityMatch {
+    pub agent_id:   String,
+    pub capability: String,
+    pub last_seen:  u64,
+}
+
+/// A full registry entry populated by BEACON tracking
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentRegistryEntry {
+    pub agent_id:   String,
+    pub name:       String,
+    pub first_seen: u64,
+    pub last_seen:  u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "msg_type")]
 pub enum IngestEvent {
     #[serde(rename = "FEEDBACK")]
@@ -72,6 +129,14 @@ pub enum IngestEvent {
     Verdict(VerdictEvent),
     #[serde(rename = "ENTROPY")]
     Entropy(EntropyEvent),
+    #[serde(rename = "NOTARIZE_BID")]
+    NotarizeBid(NotarizeBidEvent),
+    #[serde(rename = "ADVERTISE")]
+    Advertise(AdvertiseEvent),
+    #[serde(rename = "DISPUTE")]
+    Dispute(DisputeEvent),
+    #[serde(rename = "BEACON")]
+    Beacon(BeaconEvent),
 }
 
 // ============================================================================
@@ -447,6 +512,43 @@ CREATE TABLE IF NOT EXISTS entropy_vectors (
 CREATE INDEX IF NOT EXISTS idx_ev_agent ON entropy_vectors(agent_id);
 CREATE INDEX IF NOT EXISTS idx_ev_ts    ON entropy_vectors(ts);
 
+CREATE TABLE IF NOT EXISTS notarize_bids (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender          TEXT    NOT NULL,
+    conversation_id TEXT    NOT NULL,
+    slot            INTEGER NOT NULL DEFAULT 0,
+    ts              INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_nb_sender ON notarize_bids(sender);
+CREATE INDEX IF NOT EXISTS idx_nb_ts     ON notarize_bids(ts);
+
+CREATE TABLE IF NOT EXISTS capabilities (
+    agent_id   TEXT    NOT NULL,
+    capability TEXT    NOT NULL,
+    last_seen  INTEGER NOT NULL,
+    PRIMARY KEY (agent_id, capability)
+);
+CREATE INDEX IF NOT EXISTS idx_cap_capability ON capabilities(capability);
+CREATE INDEX IF NOT EXISTS idx_cap_agent      ON capabilities(agent_id);
+
+CREATE TABLE IF NOT EXISTS disputes (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender          TEXT    NOT NULL,
+    disputed_agent  TEXT    NOT NULL,
+    conversation_id TEXT    NOT NULL,
+    slot            INTEGER NOT NULL DEFAULT 0,
+    ts              INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_disp_agent ON disputes(disputed_agent);
+CREATE INDEX IF NOT EXISTS idx_disp_ts    ON disputes(ts);
+
+CREATE TABLE IF NOT EXISTS agent_registry (
+    agent_id   TEXT NOT NULL PRIMARY KEY,
+    name       TEXT NOT NULL,
+    first_seen INTEGER NOT NULL,
+    last_seen  INTEGER NOT NULL
+);
+
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous  = NORMAL;
 ";
@@ -532,6 +634,24 @@ impl Db {
         Ok(())
     }
 
+    /// Upsert an agent registry record from a BEACON event.
+    fn upsert_registry(&self, ev: &BeaconEvent, ts: u64) -> rusqlite::Result<()> {
+        self.0.execute(
+            "INSERT INTO agent_registry (agent_id, name, first_seen, last_seen)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(agent_id) DO UPDATE SET
+                 name      = excluded.name,
+                 last_seen = excluded.last_seen",
+            rusqlite::params![
+                ev.sender,
+                ev.name,
+                ts as i64,
+                ts as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Insert a raw feedback event.
     fn insert_feedback(&self, fb: &FeedbackEvent, ts: u64) -> rusqlite::Result<()> {
         self.0.execute(
@@ -584,6 +704,24 @@ impl Db {
                 ts:              row.get::<_, i64>(8)? as u64,
             }),
         )?;
+        rows.collect()
+    }
+
+    /// Get all registered agents from BEACON tracking.
+    fn get_registry(&self) -> rusqlite::Result<Vec<AgentRegistryEntry>> {
+        let mut stmt = self.0.prepare(
+            "SELECT agent_id, name, first_seen, last_seen
+             FROM agent_registry
+             ORDER BY last_seen DESC"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(AgentRegistryEntry {
+                agent_id:   row.get(0)?,
+                name:       row.get(1)?,
+                first_seen: row.get::<_, i64>(2)? as u64,
+                last_seen:  row.get::<_, i64>(3)? as u64,
+            })
+        })?;
         rows.collect()
     }
 
@@ -895,6 +1033,80 @@ impl Db {
         )?;
         Ok(count)
     }
+
+    fn insert_notarize_bid(&self, bid: &NotarizeBidEvent, ts: u64) -> rusqlite::Result<()> {
+        self.0.execute(
+            "INSERT INTO notarize_bids (sender, conversation_id, slot, ts)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![bid.sender, bid.conversation_id, bid.slot as i64, ts as i64],
+        )?;
+        Ok(())
+    }
+
+    fn upsert_capability(&self, agent_id: &str, capability: &str, last_seen: u64) -> rusqlite::Result<()> {
+        self.0.execute(
+            "INSERT INTO capabilities (agent_id, capability, last_seen)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(agent_id, capability) DO UPDATE SET last_seen = excluded.last_seen",
+            rusqlite::params![agent_id, capability, last_seen as i64],
+        )?;
+        Ok(())
+    }
+
+    fn query_agents_by_capability(&self, capability: &str, limit: usize) -> rusqlite::Result<Vec<CapabilityMatch>> {
+        let mut stmt = self.0.prepare(
+            "SELECT agent_id, capability, last_seen FROM capabilities
+             WHERE capability = ?1
+             ORDER BY last_seen DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![capability, limit as i64],
+            |row| Ok(CapabilityMatch {
+                agent_id:   row.get(0)?,
+                capability: row.get(1)?,
+                last_seen:  row.get::<_, i64>(2)? as u64,
+            }),
+        )?;
+        rows.collect()
+    }
+
+    fn insert_dispute(&self, d: &DisputeEvent, ts: u64) -> rusqlite::Result<()> {
+        self.0.execute(
+            "INSERT INTO disputes (sender, disputed_agent, conversation_id, slot, ts)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                d.sender,
+                d.disputed_agent,
+                d.conversation_id,
+                d.slot as i64,
+                ts as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn query_disputes_for_agent(&self, agent_id: &str, limit: usize) -> rusqlite::Result<Vec<DisputeRecord>> {
+        let mut stmt = self.0.prepare(
+            "SELECT id, sender, disputed_agent, conversation_id, slot, ts
+             FROM disputes
+             WHERE disputed_agent = ?1
+             ORDER BY ts DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![agent_id, limit as i64],
+            |row| Ok(DisputeRecord {
+                id:              row.get(0)?,
+                sender:          row.get(1)?,
+                disputed_agent:  row.get(2)?,
+                conversation_id: row.get(3)?,
+                slot:            row.get::<_, i64>(4)? as u64,
+                ts:              row.get::<_, i64>(5)? as u64,
+            }),
+        )?;
+        rows.collect()
+    }
 }
 
 fn row_to_entropy(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntropyEvent> {
@@ -1041,6 +1253,81 @@ impl ReputationStore {
                 if let Some(ref conn) = *db {
                     if let Err(e) = conn.upsert_entropy(&ev, ts) {
                         tracing::warn!("SQLite upsert_entropy failed: {e}");
+                    }
+                }
+            }
+            IngestEvent::NotarizeBid(bid) => {
+                if !is_valid_agent_id(&bid.sender) {
+                    tracing::warn!("Ingest: invalid sender in NOTARIZE_BID '{}' — dropped", &bid.sender);
+                    return;
+                }
+                drop(inner);
+                let ts = now_secs();
+                tracing::debug!("NOTARIZE_BID sender={}", &bid.sender[..8]);
+                let db = self.db.lock().unwrap();
+                if let Some(ref conn) = *db {
+                    if let Err(e) = conn.insert_notarize_bid(&bid, ts) {
+                        tracing::warn!("SQLite insert_notarize_bid failed: {e}");
+                    }
+                }
+            }
+            IngestEvent::Advertise(ad) => {
+                if !is_valid_agent_id(&ad.sender) {
+                    tracing::warn!("Ingest: invalid sender in ADVERTISE '{}' — dropped", &ad.sender);
+                    return;
+                }
+                // Ensure sender has a reputation entry so they appear in /agents.
+                inner.agents
+                    .entry(ad.sender.clone())
+                    .or_insert_with(|| AgentReputation::new(ad.sender.clone()));
+                drop(inner);
+                let ts = now_secs();
+                // Sanitise: max 32 caps, each ≤64 chars, alphanumeric + dash/underscore.
+                let caps: Vec<String> = ad.capabilities.iter()
+                    .filter(|c| !c.is_empty() && c.len() <= 64
+                        && c.chars().all(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_'))
+                    .take(32)
+                    .cloned()
+                    .collect();
+                tracing::debug!("ADVERTISE agent={} caps={:?}", &ad.sender[..8], caps);
+                let db = self.db.lock().unwrap();
+                if let Some(ref conn) = *db {
+                    for cap in &caps {
+                        if let Err(e) = conn.upsert_capability(&ad.sender, cap, ts) {
+                            tracing::warn!("SQLite upsert_capability failed: {e}");
+                        }
+                    }
+                }
+            }
+            IngestEvent::Dispute(d) => {
+                if !is_valid_agent_id(&d.disputed_agent) {
+                    tracing::warn!("Ingest: invalid disputed_agent '{}' — dropped", &d.disputed_agent);
+                    return;
+                }
+                // Apply synthetic negative feedback so reputation and anomaly scores reflect the dispute.
+                let rep = inner.agents
+                    .entry(d.disputed_agent.clone())
+                    .or_insert_with(|| AgentReputation::new(d.disputed_agent.clone()));
+                rep.apply_feedback(-50, 0); // score=-50, outcome=0 (negative)
+                let rep = rep.clone();
+                drop(inner);
+                let ts = now_secs();
+                tracing::warn!("DISPUTE disputed_agent={}", &d.disputed_agent[..8.min(d.disputed_agent.len())]);
+                self.persist(&rep);
+                let db = self.db.lock().unwrap();
+                if let Some(ref conn) = *db {
+                    if let Err(e) = conn.insert_dispute(&d, ts) {
+                        tracing::warn!("SQLite insert_dispute failed: {e}");
+                    }
+                }
+            }
+            IngestEvent::Beacon(ev) => {
+                let ts = now_secs();
+                tracing::debug!("BEACON agent={} name={}", &ev.sender[..8.min(ev.sender.len())], &ev.name);
+                let db = self.db.lock().unwrap();
+                if let Some(ref conn) = *db {
+                    if let Err(e) = conn.upsert_registry(&ev, ts) {
+                        tracing::warn!("SQLite upsert_registry failed: {e}");
                     }
                 }
             }
@@ -1561,6 +1848,42 @@ impl ReputationStore {
                 .collect(),
             None => vec![],
         }
+    }
+
+    /// Search agents that have advertised a specific capability.
+    /// Returns up to `limit` results, most recently seen first.
+    pub fn search_by_capability(&self, capability: &str, limit: usize) -> Vec<CapabilityMatch> {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            match conn.query_agents_by_capability(capability, limit) {
+                Ok(rows) => return rows,
+                Err(e)   => tracing::warn!("query_agents_by_capability failed: {e}"),
+            }
+        }
+        vec![]
+    }
+
+    /// Return recent dispute records targeting a specific agent.
+    pub fn disputes_for_agent(&self, agent_id: &str, limit: usize) -> Vec<DisputeRecord> {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            match conn.query_disputes_for_agent(agent_id, limit) {
+                Ok(rows) => return rows,
+                Err(e)   => tracing::warn!("query_disputes_for_agent failed: {e}"),
+            }
+        }
+        vec![]
+    }
+    /// Query the agent registry built from BEACON events.
+    pub fn get_registry(&self) -> Vec<AgentRegistryEntry> {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            match conn.get_registry() {
+                Ok(rows) => return rows,
+                Err(e)   => tracing::warn!("get_registry failed: {e}"),
+            }
+        }
+        vec![]
     }
 }
 

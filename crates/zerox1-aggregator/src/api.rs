@@ -9,7 +9,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::store::{IngestEvent, ReputationStore};
+use crate::store::{CapabilityMatch, DisputeRecord, IngestEvent, ReputationStore};
 
 // ============================================================================
 // App state
@@ -121,6 +121,14 @@ pub async fn get_leaderboard(
 
 pub async fn get_agents(State(state): State<AppState>) -> impl IntoResponse {
     Json(state.store.all_agents())
+}
+
+// ============================================================================
+// Agent Registry (BEACON tracking)
+// ============================================================================
+
+pub async fn get_registry(State(state): State<AppState>) -> impl IntoResponse {
+    Json(state.store.get_registry())
 }
 
 // ============================================================================
@@ -397,4 +405,62 @@ pub async fn get_epoch_envelopes(
     Path(params):  Path<EpochPath>,
 ) -> impl IntoResponse {
     Json(state.store.epoch_envelopes(&params.agent_id, params.epoch))
+}
+
+// ============================================================================
+// Capability discovery (ADVERTISE indexing)
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct SearchParams {
+    /// Capability name to search for (e.g. "translation", "price-feed").
+    capability: String,
+    #[serde(default = "default_limit")]
+    limit: usize,
+}
+
+/// GET /agents/search?capability=<name>[&limit=50]
+///
+/// Returns agents that have advertised the given capability, newest first.
+/// Agents must have broadcast an ADVERTISE message with a matching
+/// capabilities JSON array to appear here.
+pub async fn search_agents(
+    State(state):  State<AppState>,
+    Query(params): Query<SearchParams>,
+) -> impl IntoResponse {
+    let limit: usize = params.limit.min(200);
+    // Sanitise capability string: alphanumeric + dash/underscore, max 64 chars.
+    let cap = params.capability.trim().to_lowercase();
+    if cap.is_empty() || cap.len() > 64 || !cap.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid capability name" })),
+        ).into_response();
+    }
+    let results: Vec<CapabilityMatch> = state.store.search_by_capability(&cap, limit);
+    Json(results).into_response()
+}
+
+// ============================================================================
+// Disputes
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct DisputeParams {
+    #[serde(default = "default_limit")]
+    limit: usize,
+}
+
+/// GET /disputes/{agent_id}[?limit=50]
+///
+/// Returns recent disputes targeting the given agent, newest first.
+/// Used by the challenger bot to identify agents that should be investigated.
+pub async fn get_disputes(
+    State(state):   State<AppState>,
+    Path(agent_id): Path<String>,
+    Query(params):  Query<DisputeParams>,
+) -> impl IntoResponse {
+    let limit: usize = params.limit.min(500);
+    let results: Vec<DisputeRecord> = state.store.disputes_for_agent(&agent_id, limit);
+    Json(results)
 }

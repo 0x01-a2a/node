@@ -72,6 +72,11 @@ pub struct Config {
     #[arg(long, env = "ZX01_API_ADDR")]
     pub api_addr: Option<String>,
 
+    /// Secret bearer token to authenticate the API (e.g. for /envelopes/send).
+    /// If absent, the API routes that mutate state will be unauthenticated.
+    #[arg(long, env = "ZX01_API_SECRET")]
+    pub api_secret: Option<String>,
+
     /// USDC SPL token mint address (base58).
     /// Required for inactivity slash enforcement — enables the node to receive
     /// slash bounties into its USDC ATA.

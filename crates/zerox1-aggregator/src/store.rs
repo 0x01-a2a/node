@@ -1611,7 +1611,7 @@ impl ReputationStore {
         let bpm = {
             let mut window = self.beacon_window.lock().unwrap();
             // Evict timestamps older than 60 seconds
-            while window.front().map_or(false, |&ts| ts < now.saturating_sub(60)) {
+            while window.front().is_some_and(|&ts| ts < now.saturating_sub(60)) {
                 window.pop_front();
             }
             window.len() as u64

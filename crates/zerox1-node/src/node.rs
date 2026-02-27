@@ -56,6 +56,8 @@ const MAX_NAME_LEN: usize = 64;
 const MAX_ACTIVE_CONVERSATIONS: usize = 10_000;
 /// Maximum number of notary candidates tracked.
 const MAX_NOTARY_POOL: usize = 100;
+/// Maximum broadcast envelopes queued while waiting for mesh peers.
+const MAX_PENDING_BROADCASTS: usize = 20;
 
 // ============================================================================
 // Zx01Node
@@ -107,6 +109,9 @@ pub struct Zx01Node {
     notary_pool: HashMap<[u8; 32], PeerId>,
     /// Bootstrap peer multiaddrs — used to redial when the node loses all connections.
     bootstrap_peers: Vec<libp2p::Multiaddr>,
+    /// Broadcasts queued when gossipsub had no mesh peers (InsufficientPeers).
+    /// Flushed the moment any peer subscribes to our topic.
+    pending_broadcasts: Vec<Envelope>,
 }
 
 impl Zx01Node {
@@ -164,8 +169,9 @@ impl Zx01Node {
             aggregator_secret,
             http_client: reqwest::Client::new(),
             rate_limiter: std::collections::HashMap::new(),
-            notary_pool:  HashMap::new(),
+            notary_pool:        HashMap::new(),
             bootstrap_peers,
+            pending_broadcasts: Vec::new(),
         }
     }
 
@@ -494,6 +500,7 @@ impl Zx01Node {
             }
             Zx01BehaviourEvent::Gossipsub(gossipsub::Event::Subscribed { peer_id, topic }) => {
                 tracing::debug!("{peer_id} subscribed to {topic}");
+                self.flush_pending_broadcasts(swarm);
             }
             Zx01BehaviourEvent::Gossipsub(_) => {}
 
@@ -1063,6 +1070,24 @@ impl Zx01Node {
         Ok(())
     }
 
+    /// Deliver any broadcasts that were queued due to InsufficientPeers.
+    /// Called each time a peer subscribes to a gossipsub topic.
+    fn flush_pending_broadcasts(&mut self, swarm: &mut Swarm<Zx01Behaviour>) {
+        if self.pending_broadcasts.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_broadcasts);
+        tracing::info!(
+            "Mesh peer joined — flushing {} queued broadcast(s)",
+            pending.len()
+        );
+        for env in pending {
+            if let Err(e) = self.publish_envelope(swarm, &env) {
+                tracing::warn!("Queued broadcast flush failed ({}): {e}", env.msg_type);
+            }
+        }
+    }
+
     pub fn send_bilateral(
         &self,
         swarm:   &mut Swarm<Zx01Behaviour>,
@@ -1100,8 +1125,30 @@ impl Zx01Node {
             || req.msg_type.is_notary_pubsub()
             || req.msg_type.is_reputation_pubsub()
         {
-            self.publish_envelope(swarm, &env)
-                .map_err(|e| e.to_string())
+            match self.publish_envelope(swarm, &env) {
+                Ok(()) => Ok(()),
+                Err(e) if e.to_string().contains("InsufficientPeers") => {
+                    // No mesh peers yet — queue and deliver once the first peer joins.
+                    // Return early: queued envelopes are not logged/batched until sent.
+                    if self.pending_broadcasts.len() < MAX_PENDING_BROADCASTS {
+                        tracing::debug!(
+                            "No mesh peers — queuing {} (queue len {})",
+                            req.msg_type,
+                            self.pending_broadcasts.len() + 1,
+                        );
+                        self.pending_broadcasts.push(env);
+                    } else {
+                        tracing::warn!(
+                            "Pending broadcast queue full ({}); dropping {}",
+                            MAX_PENDING_BROADCASTS,
+                            req.msg_type,
+                        );
+                    }
+                    let _ = req.reply.send(Ok(SentConfirmation { nonce, payload_hash }));
+                    return;
+                }
+                Err(e) => Err(e.to_string()),
+            }
         } else {
             match self.peer_states.peer_id_for_agent(&req.recipient) {
                 Some(peer_id) => self.send_bilateral(swarm, peer_id, &env)

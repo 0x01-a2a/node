@@ -50,6 +50,20 @@ pub async fn health() -> impl IntoResponse {
     Json(json!({ "status": "ok" }))
 }
 
+/// GET /version
+///
+/// Returns the current expected SDK and node version.
+/// Agents check this on startup and warn if their installed version is behind.
+pub async fn get_version() -> impl IntoResponse {
+    // SDK_VERSION is the npm package version that ships the current binary.
+    // Update this string on every release — it drives the SDK update warning.
+    const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
+    Json(json!({
+        "sdk":  SDK_VERSION,
+        "node": SDK_VERSION,
+    }))
+}
+
 // ============================================================================
 // Network stats
 // ============================================================================

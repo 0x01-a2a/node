@@ -38,29 +38,29 @@ mod tests {
         }
 
         // Test case 1: Basic pagination (limit 10, offset 0)
-        let page1 = store.list_agents(10, 0);
+        let page1 = store.list_agents(10, 0, "id");
         assert_eq!(page1.len(), 10);
         assert_eq!(page1[0].agent_id, "agent-00");
         assert_eq!(page1[9].agent_id, "agent-09");
 
         // Test case 2: Second page (limit 10, offset 10)
-        let page2 = store.list_agents(10, 10);
+        let page2 = store.list_agents(10, 10, "id");
         assert_eq!(page2.len(), 10);
         assert_eq!(page2[0].agent_id, "agent-10");
         assert_eq!(page2[9].agent_id, "agent-19");
 
         // Test case 3: Partial last page (limit 10, offset 20) -> should get 5 items
-        let page3 = store.list_agents(10, 20);
+        let page3 = store.list_agents(10, 20, "id");
         assert_eq!(page3.len(), 5);
         assert_eq!(page3[0].agent_id, "agent-20");
         assert_eq!(page3[4].agent_id, "agent-24");
 
         // Test case 4: Offset beyond range
-        let page4 = store.list_agents(10, 50);
+        let page4 = store.list_agents(10, 50, "id");
         assert!(page4.is_empty());
 
         // Test case 5: Limit larger than total
-        let page5 = store.list_agents(100, 0);
+        let page5 = store.list_agents(100, 0, "id");
         assert_eq!(page5.len(), 25);
     }
 }
@@ -619,6 +619,11 @@ CREATE TABLE IF NOT EXISTS agent_registry (
     last_seen  INTEGER NOT NULL
 );
 ",
+    // v2: Add persistent beacon_count and estimate historical data
+    "
+ALTER TABLE agent_registry ADD COLUMN beacon_count INTEGER NOT NULL DEFAULT 0;
+UPDATE agent_registry SET beacon_count = MAX(1, (last_seen - first_seen) / 60) WHERE beacon_count = 0;
+",
 ];
 
 struct Db(rusqlite::Connection);
@@ -730,11 +735,12 @@ impl Db {
     /// Upsert an agent registry record from a BEACON event.
     fn upsert_registry(&self, ev: &BeaconEvent, ts: u64) -> rusqlite::Result<()> {
         self.0.execute(
-            "INSERT INTO agent_registry (agent_id, name, first_seen, last_seen)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO agent_registry (agent_id, name, first_seen, last_seen, beacon_count)
+             VALUES (?1, ?2, ?3, ?4, 1)
              ON CONFLICT(agent_id) DO UPDATE SET
-                 name      = excluded.name,
-                 last_seen = excluded.last_seen",
+                 name         = excluded.name,
+                 last_seen    = excluded.last_seen,
+                 beacon_count = beacon_count + 1",
             rusqlite::params![
                 ev.sender,
                 ev.name,
@@ -1289,6 +1295,8 @@ pub struct NetworkStats {
     pub agent_count:       usize,
     /// Total feedback events recorded (all-time).
     pub interaction_count: u64,
+    /// Total BEACON events recorded (persistent since v2 migration).
+    pub beacon_count:      u64,
     /// Unix timestamp (seconds) when the aggregator process started.
     pub started_at:        u64,
 }
@@ -1576,6 +1584,16 @@ impl ReputationStore {
         NetworkStats {
             agent_count,
             interaction_count,
+            beacon_count: {
+                let db = self.db.lock().unwrap();
+                if let Some(ref conn) = *db {
+                    conn.0
+                        .query_row("SELECT SUM(beacon_count) FROM agent_registry", [], |row| row.get::<_, i64>(0))
+                        .unwrap_or(0) as u64
+                } else {
+                    0
+                }
+            },
             started_at: self.started_at,
         }
     }

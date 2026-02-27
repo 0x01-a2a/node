@@ -82,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/health",                 get(api::health))
+        .route("/version",                get(api::get_version))
         .route("/stats/network",          get(api::get_network_stats))
         .route("/ingest/envelope",        post(api::ingest_envelope))
         .route("/reputation/{agent_id}",  get(api::get_reputation))

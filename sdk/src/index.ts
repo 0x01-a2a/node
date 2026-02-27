@@ -275,8 +275,36 @@ export class Zerox1Agent {
     // Wait until the HTTP server is accepting connections.
     await waitForReady(this.port)
 
+    // Fire-and-forget version check: warn if a newer SDK is available.
+    this._checkVersion().catch(() => { /* never block the agent */ })
+
     // Open the inbox WebSocket.
     this._connectInbox()
+  }
+
+  /** Fetch /version from the aggregator and warn if this SDK is outdated. */
+  private async _checkVersion(): Promise<void> {
+    const AGGREGATOR = 'https://aggregator.0x01.world'
+    const CURRENT = '0.1.23' // updated by the release workflow
+    try {
+      const res = await fetch(`${AGGREGATOR}/version`, { signal: AbortSignal.timeout(4_000) })
+      if (!res.ok) return
+      const { sdk } = await res.json() as { sdk: string }
+      if (sdk && sdk !== CURRENT && this._isNewer(sdk, CURRENT)) {
+        process.stderr.write(
+          `\n⚠️  [zerox1] SDK update available: ${CURRENT} → ${sdk}\n` +
+          `   Run: npm install @zerox1/sdk@latest\n\n`
+        )
+      }
+    } catch { /* network unavailable — silently skip */ }
+  }
+
+  private _isNewer(latest: string, current: string): boolean {
+    const parse = (v: string) => v.split('.').map(Number)
+    const [lM, lm, lp] = parse(latest); const [cM, cm, cp] = parse(current)
+    if (lM !== cM) return lM > cM
+    if (lm !== cm) return lm > cm
+    return lp > cp
   }
 
   /**

@@ -137,16 +137,19 @@ pub struct AgentsParams {
     limit:  usize,
     #[serde(default = "default_offset")]
     offset: usize,
+    #[serde(default = "default_sort")]
+    sort:   String,
 }
 
 fn default_offset() -> usize { 0 }
+fn default_sort() -> String { "reputation".to_string() }
 
 pub async fn get_agents(
     State(state):  State<AppState>,
     Query(params): Query<AgentsParams>,
 ) -> impl IntoResponse {
     let limit  = params.limit.min(200);
-    let agents = state.store.list_agents(limit, params.offset);
+    let agents = state.store.list_agents(limit, params.offset, &params.sort);
     Json(agents)
 }
 

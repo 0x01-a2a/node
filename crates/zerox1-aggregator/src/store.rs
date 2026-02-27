@@ -176,6 +176,7 @@ pub struct AgentProfile {
     pub entropy:      Option<EntropyEvent>,
     pub capabilities: Vec<CapabilityMatch>,
     pub disputes:     Vec<DisputeRecord>,
+    pub last_seen:    Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -215,6 +216,8 @@ pub struct AgentReputation {
     /// Computed on read from DB; not stored. "rising" | "falling" | "stable".
     #[serde(default = "default_trend")]
     pub trend:          String,
+    #[serde(default)]
+    pub last_seen:      u64,
 }
 
 fn default_trend() -> String { "stable".to_string() }
@@ -232,6 +235,7 @@ impl AgentReputation {
             average_score:  0.0,
             last_updated:   now_secs(),
             trend:          default_trend(),
+            last_seen:      now_secs(),
         }
     }
 
@@ -682,6 +686,7 @@ impl Db {
                 average_score,
                 last_updated,
                 trend: default_trend(),
+                last_seen: last_updated, // Default to last_updated if loaded from DB where BEACON wasn't active
             })
         })?;
 
@@ -1477,10 +1482,11 @@ impl ReputationStore {
                     tracing::warn!("Ingest: invalid sender in BEACON '{}' — dropped", &ev.sender);
                     return;
                 }
-                // Ensure sender has an entry so they appear in /stats/network agent_count.
-                inner.agents
+                let ts = now_secs();
+                let rep = inner.agents
                     .entry(ev.sender.clone())
                     .or_insert_with(|| AgentReputation::new(ev.sender.clone()));
+                rep.last_seen = ts;
                 drop(inner);
 
                 let ts = now_secs();
@@ -1520,10 +1526,16 @@ impl ReputationStore {
     }
 
 
-    pub fn list_agents(&self, limit: usize, offset: usize) -> Vec<AgentReputation> {
+    pub fn list_agents(&self, limit: usize, offset: usize, sort_by: &str) -> Vec<AgentReputation> {
         let inner = self.inner.read().unwrap();
         let mut agents: Vec<&AgentReputation> = inner.agents.values().collect();
-        agents.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+        if sort_by == "recent" {
+            agents.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.agent_id.cmp(&b.agent_id)));
+        } else if sort_by == "reputation" {
+            agents.sort_by(|a, b| b.total_score.cmp(&a.total_score).then(a.agent_id.cmp(&b.agent_id)));
+        } else {
+            agents.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+        }
         agents.into_iter()
             .skip(offset)
             .take(limit)
@@ -2093,13 +2105,14 @@ impl ReputationStore {
         let entropy      = self.entropy_latest(agent_id);
         let capabilities = self.search_by_capability_for_agent(agent_id);
         let disputes     = self.disputes_for_agent(agent_id, 5);
+        let last_seen    = reputation.as_ref().map(|r| r.last_seen);
 
         let name = {
             let db = self.db.lock().unwrap();
             db.as_ref().and_then(|conn| conn.query_agent_name(agent_id).ok().flatten())
         };
 
-        AgentProfile { agent_id: agent_id.to_string(), name, reputation, entropy, capabilities, disputes }
+        AgentProfile { agent_id: agent_id.to_string(), name, reputation, entropy, capabilities, disputes, last_seen }
     }
 
     /// Capabilities advertised by a specific agent (for use in profile assembly).

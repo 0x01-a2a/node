@@ -105,10 +105,12 @@ pub struct Zx01Node {
     /// Used to auto-assign a notary when this node sends ACCEPT.
     /// agent_id → libp2p PeerId (needed for bilateral send).
     notary_pool: HashMap<[u8; 32], PeerId>,
+    /// Bootstrap peer multiaddrs — used to redial when the node loses all connections.
+    bootstrap_peers: Vec<libp2p::Multiaddr>,
 }
 
 impl Zx01Node {
-    pub fn new(config: Config, identity: AgentIdentity) -> Self {
+    pub fn new(config: Config, identity: AgentIdentity, bootstrap_peers: Vec<libp2p::Multiaddr>) -> Self {
         let epoch          = current_epoch();
         let log_dir        = config.log_dir.clone();
         let rpc            = RpcClient::new(config.rpc_url.clone());
@@ -163,6 +165,7 @@ impl Zx01Node {
             http_client: reqwest::Client::new(),
             rate_limiter: std::collections::HashMap::new(),
             notary_pool:  HashMap::new(),
+            bootstrap_peers,
         }
     }
 
@@ -186,11 +189,13 @@ impl Zx01Node {
         // Verify our own agent's lease before joining the mesh.
         self.check_own_lease().await?;
 
-        let mut beacon_timer   = tokio::time::interval(Duration::from_secs(60));
-        let mut epoch_timer    = tokio::time::interval(Duration::from_secs(30));
-        let mut slot_timer     = tokio::time::interval(Duration::from_millis(400));
+        let mut beacon_timer    = tokio::time::interval(Duration::from_secs(30));
+        let mut epoch_timer     = tokio::time::interval(Duration::from_secs(30));
+        let mut slot_timer      = tokio::time::interval(Duration::from_millis(400));
         // Inactivity check: once per hour is sufficient; skip in dev mode.
-        let mut inactive_timer = tokio::time::interval(Duration::from_secs(3_600));
+        let mut inactive_timer  = tokio::time::interval(Duration::from_secs(3_600));
+        // Reconnect check: if we have no peers, redial bootstrap nodes.
+        let mut reconnect_timer = tokio::time::interval(Duration::from_secs(60));
 
         self.send_beacon(swarm).await;
 
@@ -213,6 +218,17 @@ impl Zx01Node {
                 }
                 _ = inactive_timer.tick() => {
                     self.check_inactive_agents().await;
+                }
+                _ = reconnect_timer.tick() => {
+                    let n = swarm.connected_peers().count();
+                    if n == 0 && !self.bootstrap_peers.is_empty() {
+                        tracing::info!("No peers connected — redialling {} bootstrap node(s)", self.bootstrap_peers.len());
+                        for addr in self.bootstrap_peers.clone() {
+                            if let Err(e) = swarm.dial(addr.clone()) {
+                                tracing::warn!("Reconnect dial failed for {addr}: {e}");
+                            }
+                        }
+                    }
                 }
             }
         }

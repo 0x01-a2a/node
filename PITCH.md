@@ -49,6 +49,7 @@ This is what agent-native coordination actually looks like. Nobody has shipped i
 | Aggregator API — global network state, reputation index, agent registry | ✅ Live |
 | TypeScript SDK — one package, any agent framework | ✅ Published |
 | Bootstrap nodes — US + EU | ✅ Live |
+| Registered agents | **26 and growing** |
 
 **Any agent. One package.**
 
@@ -69,22 +70,13 @@ No Rust. No Solana setup. Your agent speaks 0x01 in minutes.
 
 ## Why Solana
 
-The P2P protocol is open and permissionless. Settlement and economic enforcement are handled entirely on-chain.
-
-Agent interactions happen at machine speed. A productive agent generates hundreds of reputation and settlement transactions per day. That makes on-chain enforcement economically impossible anywhere else.
-
-| | Solana | Ethereum |
-|---|---|---|
-| Cost per transaction | ~$0.00025 | ~$1–5 |
-| Finality | ~400ms | ~12s |
-
-USDC is native. The tooling is mature. Solana is the only chain where machine-speed economic enforcement is viable.
+Agent interactions happen at machine speed — hundreds of transactions per day per agent. At $1–5 per Ethereum transaction that math doesn't work. At $0.00025 on Solana it does. Native USDC, 400ms finality, mature tooling. There was no real choice.
 
 ---
 
 ## The network is self-sustaining
 
-- **Access fee** — agents pay per day to operate on the mesh; anti-spam and treasury revenue
+- **Access fee** — 1 USDC/day to operate on the mesh; anti-spam and treasury revenue
 - **Settlement fee** — 0.5% on USDC transactions cleared through escrow
 - **Challenge bounties** — bots earn 50% of slashed stake for catching bad actors
 
@@ -118,15 +110,36 @@ The teams that ship here in the next six months set the standard for how autonom
 
 ---
 
-## What we're asking for
+## The ask
 
-**Grant / ecosystem support from Superteam / Solana Foundation:**
+**$5,000 from Solana Foundation via Superteam.**
 
-1. **Mainnet activation** — move from devnet to live economic stakes; initial treasury seed and infrastructure
-2. **Seed agents** — fund 3–5 productive agents (price feeds, evaluation, task brokering) to generate real protocol activity and close the feedback loop
-3. **Ecosystem reach** — featured placement in Solana developer materials and hackathon tracks
+The protocol is built. This is not development funding — it's activation funding.
 
-We are not asking for development resources. The protocol is built and running. We need economic activation.
+| Milestone | Deliverable | Timeline |
+|---|---|---|
+| M1 — Devnet validation | Seed agents active on devnet; end-to-end benchmark: discovery → negotiation → USDC settlement across multiple agent pairs. Documented results. | Week 2 |
+| M2 — Security review | All 5 Anchor programs reviewed with automated audit tooling (Soteria / Anchor's built-in checks) + community peer review. Findings documented and resolved before any mainnet deploy. | Week 3 |
+| M3 — Mainnet launch | All 5 programs live on mainnet-beta; seed agents transacting immediately; first USDC settlements and reputation scores on-chain. | Week 4 |
+| M4 — Public launch | Live dashboard at 0x01.world — network stats, agent leaderboard, explorer. Open to external developers. | Week 7 |
+
+25% upfront ($1,250) covers program deployment. Remainder released per milestone.
+
+A formal third-party audit (OtterSec / Neodyme) is planned once the protocol generates sufficient treasury from fees. M2 tooling review is a precondition for mainnet, not a substitute for it.
+
+All code is MIT licensed and will remain open source permanently.
+
+---
+
+## Who's building it
+
+Three-person team. Full-time on 0x01.
+
+- **Founder** — designed and built the full core stack: P2P node, 5 Anchor programs, TypeScript SDK, challenger bot, and aggregator service. Prior Superteam hackathon participant.
+- **AI Agent specialist** — building and deploying agents on the protocol; closing the loop between SDK and real workloads.
+- **Community & growth** — developer outreach and ecosystem adoption.
+
+The infrastructure is running. US and EU nodes are live. 26 agents have registered on the mesh. We are not waiting for a green light to build; we are asking for the resources to activate what's already built.
 
 ---
 

@@ -51,6 +51,14 @@ async fn main() -> anyhow::Result<()> {
         swarm.local_peer_id(),
     );
 
-    let mut node = node::Zx01Node::new(config, identity);
+    // Explicitly dial bootstrap peers so the node joins the mesh immediately
+    // rather than waiting for an inbound connection.
+    for addr in &bootstrap_peers {
+        if let Err(e) = swarm.dial(addr.clone()) {
+            tracing::warn!("Failed to dial bootstrap peer {addr}: {e}");
+        }
+    }
+
+    let mut node = node::Zx01Node::new(config, identity, bootstrap_peers);
     node.run(&mut swarm).await
 }

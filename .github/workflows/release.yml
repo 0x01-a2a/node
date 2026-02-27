@@ -68,7 +68,7 @@ jobs:
           path: target/${{ matrix.target }}/release/${{ matrix.binary }}
           if-no-files-found: error
 
-  # ── Build zerox1-aggregator and challenger (Linux only — server-side services) ─────────────
+  # ── Build zerox1-aggregator (Linux only — server-side service) ───────────
   build-server-services:
     name: Build server services
     runs-on: ubuntu-22.04
@@ -89,10 +89,8 @@ jobs:
           key: cargo-linux-x64-aggregator-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-linux-x64-aggregator-
 
-      - name: Build server services
-        run: |
-          cargo build --release -p zerox1-aggregator
-          cargo build --release -p zerox1-challenger
+      - name: Build aggregator
+        run: cargo build --release -p zerox1-aggregator
         env:
           CARGO_TERM_COLOR: always
 
@@ -103,11 +101,63 @@ jobs:
           path: target/release/zerox1-aggregator
           if-no-files-found: error
 
+  # ── Build zerox1-challenger for all platforms (public bounty hunter) ──────
+  build-challenger:
+    name: Build challenger (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x64
+            binary: zerox1-challenger
+
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            platform: darwin-arm64
+            binary: zerox1-challenger
+
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            platform: darwin-x64
+            binary: zerox1-challenger
+
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: win32-x64
+            binary: zerox1-challenger.exe
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-challenger-${{ matrix.platform }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-challenger-${{ matrix.platform }}-
+
+      - name: Build challenger
+        run: cargo build --release -p zerox1-challenger --target ${{ matrix.target }}
+        env:
+          CARGO_TERM_COLOR: always
+
       - name: Upload challenger artifact
         uses: actions/upload-artifact@v4
         with:
-          name: zerox1-challenger
-          path: target/release/zerox1-challenger
+          name: zerox1-challenger-${{ matrix.platform }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
           if-no-files-found: error
 
 
@@ -209,7 +259,7 @@ jobs:
   # ── Create GitHub Release with binary attachments ─────────────────────────
   github-release:
     name: GitHub Release
-    needs: [build, build-server-services]
+    needs: [build, build-server-services, build-challenger]
     runs-on: ubuntu-latest
 
     steps:
@@ -225,9 +275,12 @@ jobs:
           cp artifacts/zerox1-node-darwin-arm64/zerox1-node            zerox1-node-darwin-arm64
           cp artifacts/zerox1-node-darwin-x64/zerox1-node              zerox1-node-darwin-x64
           cp artifacts/zerox1-node-linux-x64/zerox1-node               zerox1-node-linux-x64
-          cp artifacts/zerox1-node-win32-x64/zerox1-node.exe           zerox1-node-win32-x64.exe
-          cp artifacts/zerox1-aggregator/zerox1-aggregator             zerox1-aggregator-linux-x64
-          cp artifacts/zerox1-challenger/zerox1-challenger             zerox1-challenger-linux-x64
+          cp artifacts/zerox1-node-win32-x64/zerox1-node.exe               zerox1-node-win32-x64.exe
+          cp artifacts/zerox1-aggregator/zerox1-aggregator               zerox1-aggregator-linux-x64
+          cp artifacts/zerox1-challenger-linux-x64/zerox1-challenger      zerox1-challenger-linux-x64
+          cp artifacts/zerox1-challenger-darwin-arm64/zerox1-challenger   zerox1-challenger-darwin-arm64
+          cp artifacts/zerox1-challenger-darwin-x64/zerox1-challenger     zerox1-challenger-darwin-x64
+          cp artifacts/zerox1-challenger-win32-x64/zerox1-challenger.exe  zerox1-challenger-win32-x64.exe
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -239,4 +292,7 @@ jobs:
             zerox1-node-win32-x64.exe
             zerox1-aggregator-linux-x64
             zerox1-challenger-linux-x64
+            zerox1-challenger-darwin-arm64
+            zerox1-challenger-darwin-x64
+            zerox1-challenger-win32-x64.exe
           generate_release_notes: true

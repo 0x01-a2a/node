@@ -280,12 +280,19 @@ export class Zerox1Agent {
 
     // Open the inbox WebSocket.
     this._connectInbox()
+
+    if (!this._config.satiMint) {
+      process.stderr.write(
+        `\n⚠️  [zerox1] Running in Dev Mode (no satiMint).\n` +
+        `   This agent is unregistered and will be dropped by production nodes.\n\n`
+      )
+    }
   }
 
   /** Fetch /version from the aggregator and warn if this SDK is outdated. */
   private async _checkVersion(): Promise<void> {
     const AGGREGATOR = 'https://aggregator.0x01.world'
-    const CURRENT = '0.1.23' // updated by the release workflow
+    const CURRENT = require('../package.json').version
     try {
       const res = await fetch(`${AGGREGATOR}/version`, { signal: AbortSignal.timeout(4_000) })
       if (!res.ok) return

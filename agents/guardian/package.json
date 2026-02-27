@@ -1,0 +1,21 @@
+{
+    "name": "zerox1-guardian",
+    "version": "0.1.0",
+    "description": "0x01 Mesh Guardian NPC — Intelligent onboarding agent",
+    "main": "dist/index.js",
+    "scripts": {
+        "build": "tsc",
+        "start": "node dist/index.js",
+        "dev": "ts-node src/index.ts"
+    },
+    "dependencies": {
+        "@zerox1/sdk": "file:../../sdk",
+        "dotenv": "^16.4.5",
+        "openai": "^4.28.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.11.24",
+        "ts-node": "^10.9.2",
+        "typescript": "^5.3.3"
+    }
+}

@@ -1297,6 +1297,8 @@ pub struct NetworkStats {
     pub interaction_count: u64,
     /// Total BEACON events recorded (persistent since v2 migration).
     pub beacon_count:      u64,
+    /// Beacons per minute (sliding 60s window).
+    pub beacon_bpm:        u64,
     /// Unix timestamp (seconds) when the aggregator process started.
     pub started_at:        u64,
 }
@@ -1308,6 +1310,8 @@ pub struct ReputationStore {
     db:         Arc<Mutex<Option<Db>>>,
     /// Process start time — never changes after init.
     started_at: u64,
+    /// Sliding window of BEACON timestamps for BPM calculation.
+    beacon_window: Arc<Mutex<VecDeque<u64>>>,
 }
 
 impl Default for ReputationStore {
@@ -1316,6 +1320,7 @@ impl Default for ReputationStore {
             inner:      Arc::new(RwLock::new(Inner::default())),
             db:         Arc::new(Mutex::new(None)),
             started_at: now_secs(),
+            beacon_window: Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
         }
     }
 }
@@ -1360,6 +1365,7 @@ impl ReputationStore {
             })),
             db:         Arc::new(Mutex::new(Some(db))),
             started_at: now_secs(),
+            beacon_window: Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
         })
     }
 
@@ -1500,6 +1506,13 @@ impl ReputationStore {
                 }
             }
             IngestEvent::Beacon(ev) => {
+                // Record for BPM sliding window
+                let now = now_secs();
+                {
+                    let mut window = self.beacon_window.lock().unwrap();
+                    window.push_back(now);
+                }
+
                 if !is_valid_agent_id(&ev.sender) {
                     tracing::warn!("Ingest: invalid sender in BEACON '{}' — dropped", &ev.sender);
                     return;
@@ -1567,7 +1580,8 @@ impl ReputationStore {
 
     /// Network-wide summary stats: agent count, total interactions, uptime.
     pub fn network_stats(&self) -> NetworkStats {
-        let agent_count = self.inner.read().unwrap().agents.len();
+        let inner = self.inner.read().unwrap();
+        let agent_count = inner.agents.len();
 
         // Prefer the authoritative SQLite count; fall back to in-memory ring buffer.
         let interaction_count = {
@@ -1581,21 +1595,39 @@ impl ReputationStore {
             }
         };
 
+        let beacon_count = {
+            let db = self.db.lock().unwrap();
+            if let Some(ref conn) = *db {
+                conn.0
+                    .query_row("SELECT SUM(beacon_count) FROM agent_registry", [], |row| row.get::<_, i64>(0))
+                    .unwrap_or(0) as u64
+            } else {
+                0
+            }
+        };
+
+        // Calculate BPM (Beacons Per Minute)
+        let now = now_secs();
+        let bpm = {
+            let mut window = self.beacon_window.lock().unwrap();
+            // Evict timestamps older than 60 seconds
+            while window.front().map_or(false, |&ts| ts < now.saturating_sub(60)) {
+                window.pop_front();
+            }
+            window.len() as u64
+        };
+
         NetworkStats {
             agent_count,
             interaction_count,
-            beacon_count: {
-                let db = self.db.lock().unwrap();
-                if let Some(ref conn) = *db {
-                    conn.0
-                        .query_row("SELECT SUM(beacon_count) FROM agent_registry", [], |row| row.get::<_, i64>(0))
-                        .unwrap_or(0) as u64
-                } else {
-                    0
-                }
-            },
-            started_at: self.started_at,
+            beacon_count,
+            beacon_bpm: bpm,
+            started_at: self.at_start_time(),
         }
+    }
+
+    fn at_start_time(&self) -> u64 {
+        self.started_at
     }
 
     /// Latest entropy vector for an agent.

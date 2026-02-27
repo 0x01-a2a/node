@@ -1317,12 +1317,26 @@ impl ReputationStore {
         Self::default()
     }
 
-    /// Open (or create) a SQLite database at `path` and load existing data.
     pub fn with_db(path: &Path) -> anyhow::Result<Self> {
         let db = Db::open(path)
             .map_err(|e| anyhow::anyhow!("SQLite open failed: {e}"))?;
-        let agents = db.load_all()
+        let mut agents = db.load_all()
             .map_err(|e| anyhow::anyhow!("SQLite load failed: {e}"))?;
+
+        if let Ok(registry) = db.get_registry() {
+            for entry in registry {
+                let rep = agents
+                    .entry(entry.agent_id.clone())
+                    .or_insert_with(|| {
+                        let mut r = AgentReputation::new(entry.agent_id);
+                        r.last_seen = entry.last_seen;
+                        r
+                    });
+                if entry.last_seen > rep.last_seen {
+                    rep.last_seen = entry.last_seen;
+                }
+            }
+        }
 
         tracing::info!(
             "Loaded {} reputation records from {}",

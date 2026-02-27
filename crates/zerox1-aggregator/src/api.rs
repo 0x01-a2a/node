@@ -1,17 +1,18 @@
 //! REST API handlers.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query, State, WebSocketUpgrade},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
 use serde_json::json;
+use tokio::sync::broadcast;
 
 use crate::store::{
-    AgentProfile, AgentRegistryEntry, CapabilityMatch, DisputeRecord, IngestEvent, NetworkStats,
-    PendingMessage, ReputationStore,
+    ActivityEvent, AgentProfile, AgentRegistryEntry, CapabilityMatch, DisputeRecord, IngestEvent,
+    NetworkStats, PendingMessage, ReputationStore,
 };
 
 // ============================================================================
@@ -30,6 +31,8 @@ pub struct AppState {
     pub fcm_server_key: Option<String>,
     /// Shared HTTP client for FCM push calls.
     pub http_client:    reqwest::Client,
+    /// Broadcast channel for real-time activity events (GET /ws/activity).
+    pub activity_tx:    broadcast::Sender<ActivityEvent>,
 }
 
 // ============================================================================
@@ -112,7 +115,9 @@ pub async fn ingest_envelope(
         }
     }
     tracing::info!("Ingest: received event: {:?}", event);
-    state.store.ingest(event);
+    if let Some(activity) = state.store.ingest(event) {
+        let _ = state.activity_tx.send(activity);
+    }
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -722,6 +727,61 @@ pub async fn post_pending(
     }
 
     StatusCode::ACCEPTED.into_response()
+}
+
+// ============================================================================
+// Activity feed
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct ActivityParams {
+    #[serde(default = "default_activity_limit")]
+    limit:  usize,
+    before: Option<i64>,
+}
+
+fn default_activity_limit() -> usize { 50 }
+
+/// GET /activity[?limit=50&before=<id>]
+///
+/// Returns recent activity events (JOIN, FEEDBACK, DISPUTE, VERDICT), newest first.
+/// Use `before=<id>` for cursor-based pagination.
+pub async fn get_activity(
+    State(state):  State<AppState>,
+    Query(params): Query<ActivityParams>,
+) -> impl IntoResponse {
+    let limit = params.limit.min(200);
+    Json(state.store.list_activity(limit, params.before))
+}
+
+/// GET /ws/activity
+///
+/// WebSocket endpoint that streams activity events in real-time.
+/// Sends JSON-encoded ActivityEvent frames as they are ingested.
+pub async fn ws_activity(
+    ws:           WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> Response {
+    ws.on_upgrade(move |mut socket| async move {
+        use axum::extract::ws::Message;
+        let mut rx = state.activity_tx.subscribe();
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    if let Ok(text) = serde_json::to_string(&ev) {
+                        if socket.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    // Skip missed events and continue.
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
 }
 
 /// Fire a Firebase Cloud Messaging push to wake a sleeping node.

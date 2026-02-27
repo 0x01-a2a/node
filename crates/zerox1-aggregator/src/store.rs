@@ -195,6 +195,21 @@ pub struct AgentProfile {
     pub last_seen:    Option<u64>,
 }
 
+/// Activity event broadcast to WebSocket clients and stored in activity_log.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityEvent {
+    pub id:              i64,
+    pub ts:              i64,
+    pub event_type:      String,  // "JOIN" | "FEEDBACK" | "DISPUTE" | "VERDICT"
+    pub agent_id:        String,
+    pub target_id:       Option<String>,
+    pub score:           Option<i64>,
+    pub name:            Option<String>,
+    pub target_name:     Option<String>,
+    pub slot:            Option<i64>,
+    pub conversation_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "msg_type")]
 pub enum IngestEvent {
@@ -234,6 +249,9 @@ pub struct AgentReputation {
     pub trend:          String,
     #[serde(default)]
     pub last_seen:      u64,
+    /// Human-readable name from the last BEACON, empty string if unknown.
+    #[serde(default)]
+    pub name:           String,
 }
 
 fn default_trend() -> String { "stable".to_string() }
@@ -252,6 +270,7 @@ impl AgentReputation {
             last_updated:   now_secs(),
             trend:          default_trend(),
             last_seen:      now_secs(),
+            name:           String::new(),
         }
     }
 
@@ -640,6 +659,22 @@ CREATE TABLE IF NOT EXISTS agent_registry (
 ALTER TABLE agent_registry ADD COLUMN beacon_count INTEGER NOT NULL DEFAULT 0;
 UPDATE agent_registry SET beacon_count = MAX(1, (last_seen - first_seen) / 60) WHERE beacon_count = 0;
 ",
+    // v3: Activity log for social feed
+    "
+CREATE TABLE IF NOT EXISTS activity_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              INTEGER NOT NULL,
+    event_type      TEXT    NOT NULL,
+    agent_id        TEXT    NOT NULL,
+    target_id       TEXT,
+    score           INTEGER,
+    name            TEXT,
+    target_name     TEXT,
+    slot            INTEGER,
+    conversation_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_activity_log_ts ON activity_log(ts DESC);
+",
 ];
 
 struct Db(rusqlite::Connection);
@@ -708,6 +743,7 @@ impl Db {
                 last_updated,
                 trend: default_trend(),
                 last_seen: last_updated, // Default to last_updated if loaded from DB where BEACON wasn't active
+                name: String::new(),
             })
         })?;
 
@@ -1267,6 +1303,53 @@ impl Db {
         )?;
         rows.collect()
     }
+
+    /// Insert an activity event and return it with the assigned rowid.
+    fn insert_activity(&self, ev: &ActivityEvent) -> rusqlite::Result<ActivityEvent> {
+        self.0.execute(
+            "INSERT INTO activity_log
+                 (ts, event_type, agent_id, target_id, score, name, target_name, slot, conversation_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                ev.ts,
+                ev.event_type,
+                ev.agent_id,
+                ev.target_id,
+                ev.score,
+                ev.name,
+                ev.target_name,
+                ev.slot,
+                ev.conversation_id,
+            ],
+        )?;
+        let id = self.0.last_insert_rowid();
+        Ok(ActivityEvent { id, ..ev.clone() })
+    }
+
+    fn query_activity(&self, limit: usize, before_id: Option<i64>) -> rusqlite::Result<Vec<ActivityEvent>> {
+        let mut stmt = self.0.prepare(
+            "SELECT id, ts, event_type, agent_id, target_id, score, name, target_name, slot, conversation_id
+             FROM activity_log
+             WHERE (?1 IS NULL OR id < ?1)
+             ORDER BY id DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![before_id, limit as i64], |row| {
+            Ok(ActivityEvent {
+                id:              row.get(0)?,
+                ts:              row.get(1)?,
+                event_type:      row.get(2)?,
+                agent_id:        row.get(3)?,
+                target_id:       row.get(4)?,
+                score:           row.get(5)?,
+                name:            row.get(6)?,
+                target_name:     row.get(7)?,
+                slot:            row.get(8)?,
+                conversation_id: row.get(9)?,
+            })
+        })?;
+        rows.collect()
+    }
 }
 
 fn row_to_entropy(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntropyEvent> {
@@ -1376,6 +1459,9 @@ impl ReputationStore {
                 if entry.last_seen > rep.last_seen {
                     rep.last_seen = entry.last_seen;
                 }
+                if rep.name.is_empty() {
+                    rep.name = entry.name;
+                }
             }
         }
 
@@ -1456,13 +1542,13 @@ impl ReputationStore {
     // Ingest
     // ========================================================================
 
-    pub fn ingest(&self, event: IngestEvent) {
+    pub fn ingest(&self, event: IngestEvent) -> Option<ActivityEvent> {
         let mut inner = self.inner.write().unwrap();
         match event {
             IngestEvent::Feedback(fb) => {
                 if !is_valid_agent_id(&fb.target_agent) {
                     tracing::warn!("Ingest: invalid target_agent '{}' — dropped", &fb.target_agent);
-                    return;
+                    return None;
                 }
                 let rep = inner.agents
                     .entry(fb.target_agent.clone())
@@ -1495,24 +1581,71 @@ impl ReputationStore {
                     let epoch = ts / 86_400u64;
                     self.store_raw_envelope(&fb.sender, epoch, ts, raw);
                 }
+
+                let db = self.db.lock().unwrap();
+                if let Some(ref conn) = *db {
+                    let sender_name = conn.query_agent_name(&fb.sender).ok().flatten();
+                    let target_name = conn.query_agent_name(&fb.target_agent).ok().flatten();
+                    let ev = ActivityEvent {
+                        id:              0,
+                        ts:              ts as i64,
+                        event_type:      "FEEDBACK".to_string(),
+                        agent_id:        fb.sender.clone(),
+                        target_id:       Some(fb.target_agent.clone()),
+                        score:           Some(fb.score as i64),
+                        name:            sender_name,
+                        target_name,
+                        slot:            Some(fb.slot as i64),
+                        conversation_id: Some(fb.conversation_id.clone()),
+                    };
+                    match conn.insert_activity(&ev) {
+                        Ok(saved) => return Some(saved),
+                        Err(e) => tracing::warn!("SQLite insert_activity(FEEDBACK) failed: {e}"),
+                    }
+                }
+                None
             }
             IngestEvent::Verdict(v) => {
                 if !is_valid_agent_id(&v.recipient) {
                     tracing::warn!("Ingest: invalid recipient '{}' — dropped", &v.recipient);
-                    return;
+                    return None;
                 }
                 let rep = inner.agents
                     .entry(v.recipient.clone())
-                    .or_insert_with(|| AgentReputation::new(v.recipient));
+                    .or_insert_with(|| AgentReputation::new(v.recipient.clone()));
                 rep.apply_verdict();
                 let rep = rep.clone();
                 drop(inner);
                 self.persist(&rep);
+
+                let ts = now_secs();
+                let db = self.db.lock().unwrap();
+                if let Some(ref conn) = *db {
+                    let name = conn.query_agent_name(&v.sender).ok().flatten();
+                    let target_name = conn.query_agent_name(&v.recipient).ok().flatten();
+                    let ev = ActivityEvent {
+                        id:              0,
+                        ts:              ts as i64,
+                        event_type:      "VERDICT".to_string(),
+                        agent_id:        v.sender.clone(),
+                        target_id:       Some(v.recipient.clone()),
+                        score:           None,
+                        name,
+                        target_name,
+                        slot:            Some(v.slot as i64),
+                        conversation_id: Some(v.conversation_id.clone()),
+                    };
+                    match conn.insert_activity(&ev) {
+                        Ok(saved) => return Some(saved),
+                        Err(e) => tracing::warn!("SQLite insert_activity(VERDICT) failed: {e}"),
+                    }
+                }
+                None
             }
             IngestEvent::Entropy(ev) => {
                 if !is_valid_agent_id(&ev.agent_id) {
                     tracing::warn!("Ingest: invalid agent_id in ENTROPY '{}' — dropped", &ev.agent_id);
-                    return;
+                    return None;
                 }
                 drop(inner);
                 let ts = now_secs();
@@ -1526,11 +1659,12 @@ impl ReputationStore {
                         tracing::warn!("SQLite upsert_entropy failed: {e}");
                     }
                 }
+                None
             }
             IngestEvent::NotarizeBid(bid) => {
                 if !is_valid_agent_id(&bid.sender) {
                     tracing::warn!("Ingest: invalid sender in NOTARIZE_BID '{}' — dropped", &bid.sender);
-                    return;
+                    return None;
                 }
                 drop(inner);
                 let ts = now_secs();
@@ -1541,11 +1675,12 @@ impl ReputationStore {
                         tracing::warn!("SQLite insert_notarize_bid failed: {e}");
                     }
                 }
+                None
             }
             IngestEvent::Advertise(ad) => {
                 if !is_valid_agent_id(&ad.sender) {
                     tracing::warn!("Ingest: invalid sender in ADVERTISE '{}' — dropped", &ad.sender);
-                    return;
+                    return None;
                 }
                 // Ensure sender has a reputation entry so they appear in /agents.
                 inner.agents
@@ -1569,11 +1704,12 @@ impl ReputationStore {
                         }
                     }
                 }
+                None
             }
             IngestEvent::Dispute(d) => {
                 if !is_valid_agent_id(&d.disputed_agent) {
                     tracing::warn!("Ingest: invalid disputed_agent '{}' — dropped", &d.disputed_agent);
-                    return;
+                    return None;
                 }
                 // Apply synthetic negative feedback so reputation and anomaly scores reflect the dispute.
                 let rep = inner.agents
@@ -1590,7 +1726,26 @@ impl ReputationStore {
                     if let Err(e) = conn.insert_dispute(&d, ts) {
                         tracing::warn!("SQLite insert_dispute failed: {e}");
                     }
+                    let name = conn.query_agent_name(&d.sender).ok().flatten();
+                    let target_name = conn.query_agent_name(&d.disputed_agent).ok().flatten();
+                    let ev = ActivityEvent {
+                        id:              0,
+                        ts:              ts as i64,
+                        event_type:      "DISPUTE".to_string(),
+                        agent_id:        d.sender.clone(),
+                        target_id:       Some(d.disputed_agent.clone()),
+                        score:           None,
+                        name,
+                        target_name,
+                        slot:            Some(d.slot as i64),
+                        conversation_id: Some(d.conversation_id.clone()),
+                    };
+                    match conn.insert_activity(&ev) {
+                        Ok(saved) => return Some(saved),
+                        Err(e) => tracing::warn!("SQLite insert_activity(DISPUTE) failed: {e}"),
+                    }
                 }
+                None
             }
             IngestEvent::Beacon(ev) => {
                 // Record for BPM sliding window
@@ -1602,23 +1757,43 @@ impl ReputationStore {
 
                 if !is_valid_agent_id(&ev.sender) {
                     tracing::warn!("Ingest: invalid sender in BEACON '{}' — dropped", &ev.sender);
-                    return;
+                    return None;
                 }
                 let ts = now_secs();
+                let is_new = !inner.agents.contains_key(&ev.sender);
                 let rep = inner.agents
                     .entry(ev.sender.clone())
                     .or_insert_with(|| AgentReputation::new(ev.sender.clone()));
                 rep.last_seen = ts;
+                rep.name = ev.name.clone();
                 drop(inner);
 
-                let ts = now_secs();
                 tracing::debug!("BEACON agent={} name={}", &ev.sender[..8.min(ev.sender.len())], &ev.name);
                 let db = self.db.lock().unwrap();
                 if let Some(ref conn) = *db {
                     if let Err(e) = conn.upsert_registry(&ev, ts) {
                         tracing::warn!("SQLite upsert_registry failed: {e}");
                     }
+                    if is_new {
+                        let join_ev = ActivityEvent {
+                            id:              0,
+                            ts:              ts as i64,
+                            event_type:      "JOIN".to_string(),
+                            agent_id:        ev.sender.clone(),
+                            target_id:       None,
+                            score:           None,
+                            name:            Some(ev.name.clone()),
+                            target_name:     None,
+                            slot:            Some(ev.slot as i64),
+                            conversation_id: None,
+                        };
+                        match conn.insert_activity(&join_ev) {
+                            Ok(saved) => return Some(saved),
+                            Err(e) => tracing::warn!("SQLite insert_activity(JOIN) failed: {e}"),
+                        }
+                    }
                 }
+                None
             }
         }
     }
@@ -1651,7 +1826,10 @@ impl ReputationStore {
     pub fn list_agents(&self, limit: usize, offset: usize, sort_by: &str) -> Vec<AgentReputation> {
         let inner = self.inner.read().unwrap();
         let mut agents: Vec<&AgentReputation> = inner.agents.values().collect();
-        if sort_by == "recent" {
+        if sort_by == "recent" || sort_by == "active" {
+            agents.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.agent_id.cmp(&b.agent_id)));
+        } else if sort_by == "new" {
+            // "new" — use last_seen ascending so newest-first approximates join order.
             agents.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.agent_id.cmp(&b.agent_id)));
         } else if sort_by == "reputation" {
             agents.sort_by(|a, b| b.total_score.cmp(&a.total_score).then(a.agent_id.cmp(&b.agent_id)));
@@ -1663,6 +1841,18 @@ impl ReputationStore {
             .take(limit)
             .cloned()
             .collect()
+    }
+
+    /// List activity events, newest first, with optional cursor-based pagination.
+    pub fn list_activity(&self, limit: usize, before_id: Option<i64>) -> Vec<ActivityEvent> {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            match conn.query_activity(limit, before_id) {
+                Ok(rows) => return rows,
+                Err(e) => tracing::warn!("query_activity failed: {e}"),
+            }
+        }
+        vec![]
     }
 
     /// Network-wide summary stats: agent count, total interactions, uptime.

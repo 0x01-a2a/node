@@ -8,9 +8,10 @@ use axum::{
 };
 
 use clap::Parser;
+use tokio::sync::broadcast;
 
 use api::AppState;
-use store::ReputationStore;
+use store::{ActivityEvent, ReputationStore};
 
 #[derive(Parser, Debug)]
 #[command(name = "zerox1-aggregator", about = "0x01 reputation aggregator service")]
@@ -81,11 +82,14 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    let (activity_tx, _) = broadcast::channel::<ActivityEvent>(512);
+
     let state = AppState {
         store,
         ingest_secret:  config.ingest_secret,
         fcm_server_key: config.fcm_server_key,
         http_client:    reqwest::Client::new(),
+        activity_tx,
     };
 
     if let Some(rpc_url) = config.solana_rpc {
@@ -132,6 +136,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/fcm/sleep",                           post(api::fcm_sleep))
         .route("/agents/{agent_id}/sleeping",          get(api::get_sleep_status))
         .route("/agents/{agent_id}/pending",           get(api::get_pending).post(api::post_pending))
+        // ── Activity social feed ────────────────────────────────────────────
+        .route("/activity",                            get(api::get_activity))
+        .route("/ws/activity",                         get(api::ws_activity))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state);
 

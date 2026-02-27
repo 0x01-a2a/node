@@ -145,6 +145,7 @@ jobs:
           mkdir -p sdk/packages/darwin-arm64/bin
           mkdir -p sdk/packages/darwin-x64/bin
           mkdir -p sdk/packages/linux-x64/bin
+          mkdir -p sdk/packages/win32-x64/bin
 
           cp artifacts/zerox1-node-darwin-arm64/zerox1-node      sdk/packages/darwin-arm64/bin/
           cp artifacts/zerox1-node-darwin-x64/zerox1-node        sdk/packages/darwin-x64/bin/

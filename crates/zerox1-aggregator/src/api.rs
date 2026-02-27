@@ -9,7 +9,10 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::store::{AgentProfile, AgentRegistryEntry, CapabilityMatch, DisputeRecord, IngestEvent, NetworkStats, ReputationStore};
+use crate::store::{
+    AgentProfile, AgentRegistryEntry, CapabilityMatch, DisputeRecord, IngestEvent, NetworkStats,
+    PendingMessage, ReputationStore,
+};
 
 // ============================================================================
 // App state
@@ -17,10 +20,16 @@ use crate::store::{AgentProfile, AgentRegistryEntry, CapabilityMatch, DisputeRec
 
 #[derive(Clone)]
 pub struct AppState {
-    pub store:         ReputationStore,
+    pub store:          ReputationStore,
     /// Shared secret for POST /ingest/envelope.
     /// None = unauthenticated (dev/local only).
-    pub ingest_secret: Option<String>,
+    pub ingest_secret:  Option<String>,
+    /// Firebase server key for sending FCM push notifications.
+    /// Required for the sleeping node wake-push feature.
+    /// Set via --fcm-server-key / FCM_SERVER_KEY env var.
+    pub fcm_server_key: Option<String>,
+    /// Shared HTTP client for FCM push calls.
+    pub http_client:    reqwest::Client,
 }
 
 // ============================================================================
@@ -577,4 +586,185 @@ pub async fn get_disputes(
     let limit: usize = params.limit.min(500);
     let results: Vec<DisputeRecord> = state.store.disputes_for_agent(&agent_id, limit);
     Json(results)
+}
+
+// ============================================================================
+// FCM / Sleeping node
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct FcmRegisterBody {
+    pub agent_id:  String,
+    pub fcm_token: String,
+}
+
+#[derive(Deserialize)]
+pub struct FcmSleepBody {
+    pub agent_id: String,
+    pub sleeping: bool,
+}
+
+#[derive(Deserialize)]
+pub struct PostPendingBody {
+    /// Hex-encoded agent_id of the sender.
+    pub from:     String,
+    /// Protocol message type, e.g. "PROPOSE".
+    pub msg_type: String,
+    /// Base64-encoded raw CBOR envelope bytes.
+    pub payload:  String,
+}
+
+/// POST /fcm/register
+///
+/// Register or update the FCM device token for an agent.
+/// Called by a mobile node on startup to enable push-wake behaviour.
+pub async fn fcm_register(
+    State(state): State<AppState>,
+    Json(body):   Json<FcmRegisterBody>,
+) -> impl IntoResponse {
+    if body.agent_id.len() != 64 || !body.agent_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    state.store.store_fcm_token(body.agent_id.clone(), body.fcm_token);
+    tracing::debug!("FCM token registered for agent {}", body.agent_id);
+    StatusCode::OK.into_response()
+}
+
+/// POST /fcm/sleep
+///
+/// Mark an agent as sleeping (offline) or awake.
+/// Called by a mobile node before backgrounding and on wakeup.
+pub async fn fcm_sleep(
+    State(state): State<AppState>,
+    Json(body):   Json<FcmSleepBody>,
+) -> impl IntoResponse {
+    if body.agent_id.len() != 64 || !body.agent_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    state.store.set_sleeping(&body.agent_id, body.sleeping);
+    tracing::debug!(
+        "Agent {} sleep state → {}",
+        body.agent_id,
+        if body.sleeping { "sleeping" } else { "awake" }
+    );
+    StatusCode::OK.into_response()
+}
+
+/// GET /agents/{agent_id}/sleeping
+///
+/// Returns whether the agent is currently in sleep mode.
+/// Senders check this before posting a pending message.
+pub async fn get_sleep_status(
+    State(state):   State<AppState>,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    Json(serde_json::json!({ "sleeping": state.store.is_sleeping(&agent_id) }))
+}
+
+/// GET /agents/{agent_id}/pending
+///
+/// Drain and return all pending messages held for this agent.
+/// The queue is cleared on retrieval — messages are delivered exactly once.
+/// Returns 200 with an empty array when there are no pending messages.
+pub async fn get_pending(
+    State(state):   State<AppState>,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    let msgs = state.store.drain_pending(&agent_id);
+    // Mark the agent as awake now that it is polling.
+    state.store.set_sleeping(&agent_id, false);
+    Json(msgs)
+}
+
+/// POST /agents/{agent_id}/pending
+///
+/// Submit a message to be held for a sleeping agent.
+/// If the agent has a registered FCM token and is sleeping, a push
+/// notification is fired immediately to wake the app.
+pub async fn post_pending(
+    State(state):   State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(body):     Json<PostPendingBody>,
+) -> impl IntoResponse {
+    if agent_id.len() != 64 || !agent_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
+    let msg = PendingMessage {
+        id:       format!("{ts:016x}"),
+        from:     body.from.clone(),
+        msg_type: body.msg_type.clone(),
+        payload:  body.payload,
+        ts:       (ts / 1_000_000_000) as u64,
+    };
+
+    state.store.push_pending(&agent_id, msg);
+
+    // Fire FCM push if the agent is sleeping and has a token.
+    if state.store.is_sleeping(&agent_id) {
+        if let Some(token) = state.store.get_fcm_token(&agent_id) {
+            if let Some(ref fcm_key) = state.fcm_server_key {
+                let client  = state.http_client.clone();
+                let key     = fcm_key.clone();
+                let aid     = agent_id.clone();
+                let from    = body.from.clone();
+                let msgtype = body.msg_type.clone();
+                tokio::spawn(async move {
+                    send_fcm_push(&key, &token, &aid, &from, &msgtype, &client).await;
+                });
+            }
+        }
+    }
+
+    StatusCode::ACCEPTED.into_response()
+}
+
+/// Fire a Firebase Cloud Messaging push to wake a sleeping node.
+///
+/// Uses the FCM legacy HTTP API (v1 API requires OAuth2 which adds
+/// unnecessary complexity for this use-case).
+async fn send_fcm_push(
+    fcm_key:      &str,
+    device_token: &str,
+    agent_id:     &str,
+    from:         &str,
+    msg_type:     &str,
+    client:       &reqwest::Client,
+) {
+    let payload = serde_json::json!({
+        "to": device_token,
+        "data": {
+            "action":   "wake",
+            "agent_id": agent_id,
+            "from":     from,
+            "msg_type": msg_type,
+        },
+        "notification": {
+            "title": "0x01 — New job offer",
+            "body":  format!("{msg_type} from {}", &from[..8.min(from.len())]),
+        },
+    });
+
+    match client
+        .post("https://fcm.googleapis.com/fcm/send")
+        .header("Authorization", format!("key={fcm_key}"))
+        .json(&payload)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            tracing::debug!("FCM push sent for agent {agent_id}");
+        }
+        Ok(resp) => {
+            tracing::warn!("FCM push HTTP {} for agent {agent_id}", resp.status());
+        }
+        Err(e) => {
+            tracing::warn!("FCM push error for agent {agent_id}: {e}");
+        }
+    }
 }

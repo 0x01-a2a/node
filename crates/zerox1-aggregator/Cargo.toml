@@ -25,3 +25,4 @@ solana-client = { workspace = true }
 solana-sdk = { workspace = true }
 solana-transaction-status = "2.1"
 petgraph   = "0.6"
+reqwest    = { workspace = true }

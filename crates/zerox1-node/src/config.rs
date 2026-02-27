@@ -93,6 +93,29 @@ pub struct Config {
     /// Must match the aggregator's --ingest-secret.
     #[arg(long, env = "ZX01_AGGREGATOR_SECRET")]
     pub aggregator_secret: Option<String>,
+
+    /// Enable relay server mode.
+    /// When set, this node accepts circuit relay reservations from peers so
+    /// that NAT-restricted nodes (e.g. mobile phones) can project their
+    /// presence through this node. Enable only on always-on infrastructure
+    /// nodes (GCP genesis fleet) — it consumes bandwidth proportional to
+    /// the number of relayed circuits.
+    #[arg(long, env = "ZX01_RELAY_SERVER", default_value = "false")]
+    pub relay_server: bool,
+
+    /// Circuit relay multiaddr to listen on.
+    /// Used by mobile / NAT-restricted nodes to project their identity
+    /// through a relay node (typically a genesis bootstrap node).
+    /// Format: /p2p/<RELAY_PEER_ID>/p2p-circuit
+    /// Example: /p2p/12D3KooWLudabD69eAYzfoZMVRqJb8XHBLDKsQvRn6Q9hTQqvMuY/p2p-circuit
+    #[arg(long, env = "ZX01_RELAY_ADDR")]
+    pub relay_addr: Option<Multiaddr>,
+
+    /// Firebase Cloud Messaging device token (for mobile / phone-as-node deployments).
+    /// When set, this token is registered with the aggregator so that a push
+    /// notification can wake the app when a PROPOSE arrives while offline.
+    #[arg(long, env = "ZX01_FCM_TOKEN")]
+    pub fcm_token: Option<String>,
 }
 
 impl Config {

@@ -8987,6 +8987,7 @@ dependencies = [
  "clap",
  "hex",
  "petgraph",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",

@@ -7,7 +7,8 @@ use zerox1_sati_client::client::SatiClient;
 use ed25519_dalek::VerifyingKey;
 use futures::StreamExt;
 use libp2p::{
-    gossipsub, identify, kad, mdns, request_response, swarm::SwarmEvent, PeerId, Swarm,
+    autonat, dcutr, gossipsub, identify, kad, mdns, relay, request_response,
+    swarm::SwarmEvent, PeerId, Swarm,
 };
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 
@@ -33,6 +34,7 @@ use crate::{
     logger::EnvelopeLogger,
     network::{Zx01Behaviour, Zx01BehaviourEvent},
     peer_state::PeerStateMap,
+    push_notary,
     reputation::ReputationTracker,
     submit,
 };
@@ -194,6 +196,49 @@ impl Zx01Node {
         // ── Startup lease check ───────────────────────────────────────────────
         // Verify our own agent's lease before joining the mesh.
         self.check_own_lease().await?;
+
+        // ── FCM registration (phone-as-node) ─────────────────────────────────
+        // If a Firebase device token is configured, register it with the
+        // aggregator and pull any messages that arrived while sleeping.
+        if let (Some(ref fcm_token), Some(ref agg_url)) = (
+            self.config.fcm_token.clone(),
+            self.config.aggregator_url.clone(),
+        ) {
+            let agent_id_hex = hex::encode(self.identity.agent_id);
+            // Register token.
+            if let Err(e) = push_notary::register_fcm_token(
+                agg_url, &agent_id_hex, fcm_token, &self.http_client,
+            ).await {
+                tracing::warn!("FCM token registration failed: {e}");
+            } else {
+                tracing::info!("FCM token registered with aggregator.");
+            }
+            // Mark this node as awake.
+            if let Err(e) = push_notary::set_sleep_mode(
+                agg_url, &agent_id_hex, false, &self.http_client,
+            ).await {
+                tracing::warn!("FCM wake notification failed: {e}");
+            }
+            // Pull any messages held while sleeping.
+            match push_notary::pull_pending_messages(
+                agg_url, &agent_id_hex, &self.http_client,
+            ).await {
+                Ok(msgs) if !msgs.is_empty() => {
+                    tracing::info!(
+                        "{} pending message(s) retrieved from aggregator while sleeping.",
+                        msgs.len()
+                    );
+                    for msg in &msgs {
+                        tracing::info!(
+                            "Pending [{}] from {} — {}",
+                            msg.msg_type, msg.from, msg.id
+                        );
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("Failed to pull pending messages: {e}"),
+            }
+        }
 
         let mut beacon_timer    = tokio::time::interval(Duration::from_secs(30));
         let mut epoch_timer     = tokio::time::interval(Duration::from_secs(30));
@@ -558,6 +603,56 @@ impl Zx01Node {
                 tracing::warn!("Bilateral inbound failure from {peer}: {error}");
             }
             Zx01BehaviourEvent::RequestResponse(_) => {}
+
+            // ── Relay server events (genesis nodes) ──────────────────────────
+            Zx01BehaviourEvent::RelayServer(relay::Event::ReservationReqAccepted {
+                src_peer_id, ..
+            }) => {
+                tracing::info!("Relay: reservation accepted from {src_peer_id}");
+            }
+            Zx01BehaviourEvent::RelayServer(relay::Event::CircuitReqAccepted {
+                src_peer_id, dst_peer_id,
+            }) => {
+                tracing::debug!("Relay: circuit opened {src_peer_id} → {dst_peer_id}");
+            }
+            Zx01BehaviourEvent::RelayServer(relay::Event::CircuitClosed {
+                src_peer_id, dst_peer_id, ..
+            }) => {
+                tracing::debug!("Relay: circuit closed {src_peer_id} → {dst_peer_id}");
+            }
+            Zx01BehaviourEvent::RelayServer(_) => {}
+
+            // ── Relay client events (mobile / NAT-restricted nodes) ──────────
+            Zx01BehaviourEvent::RelayClient(relay::client::Event::ReservationReqAccepted {
+                relay_peer_id, ..
+            }) => {
+                tracing::info!("Circuit relay reservation accepted by {relay_peer_id}");
+            }
+            Zx01BehaviourEvent::RelayClient(relay::client::Event::OutboundCircuitEstablished {
+                relay_peer_id, ..
+            }) => {
+                tracing::debug!("Relay circuit established via {relay_peer_id}");
+            }
+            Zx01BehaviourEvent::RelayClient(relay::client::Event::InboundCircuitEstablished {
+                src_peer_id, ..
+            }) => {
+                tracing::debug!("Inbound relay circuit from {src_peer_id}");
+            }
+
+            // ── dcutr — upgrades relay connections to direct connections ─────
+            // dcutr::Event is a struct with remote_peer_id and result fields.
+            Zx01BehaviourEvent::Dcutr(dcutr::Event { remote_peer_id, result }) => {
+                match result {
+                    Ok(_)  => tracing::info!("dcutr: direct connection established with {remote_peer_id}"),
+                    Err(e) => tracing::debug!("dcutr: upgrade failed with {remote_peer_id}: {e}"),
+                }
+            }
+
+            // ── AutoNAT — external reachability probe ────────────────────────
+            Zx01BehaviourEvent::Autonat(autonat::Event::StatusChanged { old, new }) => {
+                tracing::info!("AutoNAT status: {old:?} → {new:?}");
+            }
+            Zx01BehaviourEvent::Autonat(_) => {}
         }
     }
 

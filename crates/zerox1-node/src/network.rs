@@ -3,7 +3,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use libp2p::{
-    gossipsub, identify, kad, mdns, noise, request_response, tcp, yamux,
+    autonat, dcutr, gossipsub, identify, kad, mdns, noise, relay, request_response, tcp, yamux,
     swarm::NetworkBehaviour,
     StreamProtocol,
 };
@@ -23,6 +23,19 @@ pub struct Zx01Behaviour {
     pub mdns:             mdns::tokio::Behaviour,
     pub identify:         identify::Behaviour,
     pub request_response: request_response::Behaviour<Zx01Codec>,
+    /// Relay server — lets other nodes use this node as a relay.
+    /// Active (max_reservations > 0) only when --relay-server is set.
+    /// On regular nodes the limits are zeroed so no circuits are accepted.
+    pub relay_server:     relay::Behaviour,
+    /// Relay client — lets this node project its presence through a relay.
+    /// Always active; used by mobile nodes to receive connections via relay.
+    pub relay_client:     relay::client::Behaviour,
+    /// Direct Connection Upgrade Through Relay — upgrades relay connections
+    /// to direct connections when both peers are reachable via hole-punching.
+    pub dcutr:            dcutr::Behaviour,
+    /// AutoNAT — probes external reachability; helps classify the node as
+    /// publicly reachable, behind NAT, or unknown.
+    pub autonat:          autonat::Behaviour,
 }
 
 // ============================================================================
@@ -88,16 +101,25 @@ async fn write_framed<T: AsyncWrite + Unpin>(io: &mut T, data: &[u8]) -> io::Res
 // Swarm builder
 // ============================================================================
 
+/// Build the libp2p swarm.
+///
+/// `is_relay_server` — when true (genesis/GCP nodes), this node accepts
+/// circuit relay reservations from peers. When false (regular and mobile
+/// nodes), the relay server limits are set to zero so no circuits are relayed,
+/// but the relay client is still active for outbound relay use.
 pub fn build_swarm(
     keypair: libp2p::identity::Keypair,
     listen_addr: libp2p::Multiaddr,
     bootstrap_peers: &[libp2p::Multiaddr],
+    is_relay_server: bool,
 ) -> anyhow::Result<libp2p::Swarm<Zx01Behaviour>> {
     let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
         .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
+        .with_quic()
         .with_dns()?
-        .with_behaviour(|key| {
+        .with_relay_client(noise::Config::new, yamux::Config::default)?
+        .with_behaviour(|key, relay_client| {
             let peer_id = key.public().to_peer_id();
 
             let gossip_cfg = gossipsub::ConfigBuilder::default()
@@ -134,17 +156,36 @@ pub fn build_swarm(
                 request_response::Config::default(),
             );
 
+            // Relay server: active on genesis/GCP nodes; disabled elsewhere.
+            let relay_cfg = if is_relay_server {
+                relay::Config::default()
+            } else {
+                relay::Config {
+                    max_reservations: 0,
+                    max_circuits: 0,
+                    ..Default::default()
+                }
+            };
+            let relay_server = relay::Behaviour::new(peer_id, relay_cfg);
+
+            let dcutr   = dcutr::Behaviour::new(peer_id);
+            let autonat = autonat::Behaviour::new(peer_id, autonat::Config::default());
+
             Ok(Zx01Behaviour {
                 gossipsub,
                 kademlia,
                 mdns,
                 identify,
                 request_response,
+                relay_server,
+                relay_client,
+                dcutr,
+                autonat,
             })
         })?
         .build();
 
-    // Subscribe to all 0x01 pubsub topics
+    // Subscribe to all 0x01 pubsub topics.
     for topic_str in [
         zerox1_protocol::constants::TOPIC_BROADCAST,
         zerox1_protocol::constants::TOPIC_NOTARY,
@@ -156,7 +197,7 @@ pub fn build_swarm(
             .subscribe(&gossipsub::IdentTopic::new(topic_str))?;
     }
 
-    // Add bootstrap peers to Kademlia
+    // Add bootstrap peers to Kademlia.
     for addr in bootstrap_peers {
         if let Some(peer_id) = addr.iter().find_map(|p| {
             if let libp2p::multiaddr::Protocol::P2p(pid) = p {
@@ -169,6 +210,38 @@ pub fn build_swarm(
         }
     }
 
-    swarm.listen_on(listen_addr)?;
+    // Listen on TCP.
+    swarm.listen_on(listen_addr.clone())?;
+
+    // Also listen on QUIC (same IP, same port, UDP).
+    // TCP and UDP can share the same port number without conflict.
+    if let Some(quic_addr) = to_quic_addr(&listen_addr) {
+        match swarm.listen_on(quic_addr.clone()) {
+            Ok(_)  => tracing::info!("Also listening on QUIC: {quic_addr}"),
+            Err(e) => tracing::warn!("QUIC listen failed for {quic_addr}: {e}"),
+        }
+    }
+
     Ok(swarm)
+}
+
+/// Derive a QUIC listen address from a TCP listen address.
+///
+/// /ip4/X.X.X.X/tcp/PORT → /ip4/X.X.X.X/udp/PORT/quic-v1
+/// Returns None if the address contains no /tcp component.
+fn to_quic_addr(tcp_addr: &libp2p::Multiaddr) -> Option<libp2p::Multiaddr> {
+    use libp2p::multiaddr::Protocol;
+    let mut new_addr = libp2p::Multiaddr::empty();
+    let mut found = false;
+    for proto in tcp_addr.iter() {
+        match proto {
+            Protocol::Tcp(port) => {
+                new_addr.push(Protocol::Udp(port));
+                new_addr.push(Protocol::QuicV1);
+                found = true;
+            }
+            other => new_addr.push(other),
+        }
+    }
+    if found { Some(new_addr) } else { None }
 }

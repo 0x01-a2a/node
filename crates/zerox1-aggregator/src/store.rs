@@ -4,7 +4,7 @@
 //! Every ingest event is also written to SQLite (when `--db-path` is set)
 //! so data survives restarts without replaying node pushes.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -136,6 +136,22 @@ pub struct BeaconEvent {
     pub sender: String,
     pub name:   String,
     pub slot:   u64,
+}
+
+/// A message held by the aggregator for a sleeping phone node.
+/// Drained on the next `GET /agents/{id}/pending` call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingMessage {
+    /// Unique ID — nanosecond hex timestamp on arrival.
+    pub id:       String,
+    /// Hex-encoded agent_id of the sender.
+    pub from:     String,
+    /// Protocol message type, e.g. "PROPOSE".
+    pub msg_type: String,
+    /// Base64-encoded raw CBOR envelope bytes.
+    pub payload:  String,
+    /// Unix timestamp (seconds) when the aggregator received this message.
+    pub ts:       u64,
 }
 
 /// A single dispute record — used by GET /disputes/{agent_id}.
@@ -1312,15 +1328,27 @@ pub struct ReputationStore {
     started_at: u64,
     /// Sliding window of BEACON timestamps for BPM calculation.
     beacon_window: Arc<Mutex<VecDeque<u64>>>,
+    /// FCM device tokens: agent_id (hex) → Firebase device token.
+    /// In-memory only; not persisted to SQLite (tokens are re-registered on each app start).
+    fcm_tokens: Arc<Mutex<HashMap<String, String>>>,
+    /// Set of agent_ids currently in sleep mode (app backgrounded / offline).
+    sleep_states: Arc<Mutex<HashSet<String>>>,
+    /// Messages held for sleeping agents: agent_id → queue of pending messages.
+    /// Capped at 100 messages per agent; oldest are dropped when the cap is reached.
+    /// The queue is drained (and cleared) on the next pull request from the agent.
+    pending_messages: Arc<Mutex<HashMap<String, VecDeque<PendingMessage>>>>,
 }
 
 impl Default for ReputationStore {
     fn default() -> Self {
         Self {
-            inner:      Arc::new(RwLock::new(Inner::default())),
-            db:         Arc::new(Mutex::new(None)),
-            started_at: now_secs(),
-            beacon_window: Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
+            inner:            Arc::new(RwLock::new(Inner::default())),
+            db:               Arc::new(Mutex::new(None)),
+            started_at:       now_secs(),
+            beacon_window:    Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
+            fcm_tokens:       Arc::new(Mutex::new(HashMap::new())),
+            sleep_states:     Arc::new(Mutex::new(HashSet::new())),
+            pending_messages: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -1363,11 +1391,70 @@ impl ReputationStore {
                 interactions: VecDeque::new(),
                 solana_flow_clusters: HashMap::new(),
             })),
-            db:         Arc::new(Mutex::new(Some(db))),
-            started_at: now_secs(),
-            beacon_window: Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
+            db:               Arc::new(Mutex::new(Some(db))),
+            started_at:       now_secs(),
+            beacon_window:    Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
+            fcm_tokens:       Arc::new(Mutex::new(HashMap::new())),
+            sleep_states:     Arc::new(Mutex::new(HashSet::new())),
+            pending_messages: Arc::new(Mutex::new(HashMap::new())),
         })
     }
+
+    // ========================================================================
+    // FCM / Sleeping node
+    // ========================================================================
+
+    /// Store or update the FCM device token for an agent.
+    pub fn store_fcm_token(&self, agent_id: String, token: String) {
+        self.fcm_tokens.lock().unwrap().insert(agent_id, token);
+    }
+
+    /// Retrieve the FCM device token for an agent, if registered.
+    pub fn get_fcm_token(&self, agent_id: &str) -> Option<String> {
+        self.fcm_tokens.lock().unwrap().get(agent_id).cloned()
+    }
+
+    /// Mark an agent as sleeping (true) or awake (false).
+    pub fn set_sleeping(&self, agent_id: &str, sleeping: bool) {
+        let mut states = self.sleep_states.lock().unwrap();
+        if sleeping {
+            states.insert(agent_id.to_string());
+        } else {
+            states.remove(agent_id);
+        }
+    }
+
+    /// Returns true if the agent is currently in sleep mode.
+    pub fn is_sleeping(&self, agent_id: &str) -> bool {
+        self.sleep_states.lock().unwrap().contains(agent_id)
+    }
+
+    /// Enqueue a pending message for a sleeping agent.
+    ///
+    /// Drops the oldest message if the per-agent queue is at capacity (100).
+    pub fn push_pending(&self, agent_id: &str, msg: PendingMessage) {
+        const CAP: usize = 100;
+        let mut map = self.pending_messages.lock().unwrap();
+        let queue   = map.entry(agent_id.to_string()).or_default();
+        if queue.len() >= CAP {
+            queue.pop_front();
+        }
+        queue.push_back(msg);
+    }
+
+    /// Drain and return all pending messages for an agent.
+    ///
+    /// The queue is cleared on pull — messages are delivered exactly once.
+    pub fn drain_pending(&self, agent_id: &str) -> Vec<PendingMessage> {
+        let mut map = self.pending_messages.lock().unwrap();
+        map.remove(agent_id)
+            .map(|q| q.into_iter().collect())
+            .unwrap_or_default()
+    }
+
+    // ========================================================================
+    // Ingest
+    // ========================================================================
 
     pub fn ingest(&self, event: IngestEvent) {
         let mut inner = self.inner.write().unwrap();

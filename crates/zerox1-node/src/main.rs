@@ -11,6 +11,7 @@ mod logger;
 mod network;
 mod node;
 mod peer_state;
+mod push_notary;
 mod reputation;
 mod submit;
 mod stake_lock;
@@ -40,7 +41,17 @@ async fn main() -> anyhow::Result<()> {
         identity.libp2p_keypair.clone(),
         config.listen_addr.clone(),
         &bootstrap_peers,
+        config.relay_server,
     )?;
+
+    // Mobile / NAT-restricted mode: listen on a circuit relay address so that
+    // peers can reach this node through the relay even from behind CGNAT.
+    if let Some(ref relay_addr) = config.relay_addr {
+        match swarm.listen_on(relay_addr.clone()) {
+            Ok(_) => tracing::info!("Listening on relay circuit: {relay_addr}"),
+            Err(e) => tracing::warn!("Failed to listen on relay circuit {relay_addr}: {e}"),
+        }
+    }
 
     // Log the full multiaddr so operators can copy it into config.rs.
     tracing::info!(

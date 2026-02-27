@@ -6,6 +6,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+
 use clap::Parser;
 
 use api::AppState;
@@ -34,6 +35,14 @@ struct Config {
     /// Used by the background indexer to fetch funding/sweep graphs.
     #[arg(long, env = "ZX01_SOLANA_RPC")]
     solana_rpc: Option<String>,
+
+    /// Firebase Cloud Messaging server key for sending push notifications to
+    /// sleeping phone nodes. Obtain from the Firebase project console under
+    /// Project Settings → Cloud Messaging → Server key.
+    /// When absent, the FCM push feature is disabled (token registration and
+    /// sleep-state tracking still work, but no pushes are sent).
+    #[arg(long, env = "FCM_SERVER_KEY")]
+    fcm_server_key: Option<String>,
 }
 
 #[tokio::main]
@@ -65,9 +74,18 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    if config.fcm_server_key.is_none() {
+        tracing::info!(
+            "No --fcm-server-key set. FCM push notifications are disabled. \
+             Token registration and sleep-state tracking still work."
+        );
+    }
+
     let state = AppState {
         store,
-        ingest_secret: config.ingest_secret,
+        ingest_secret:  config.ingest_secret,
+        fcm_server_key: config.fcm_server_key,
+        http_client:    reqwest::Client::new(),
     };
 
     if let Some(rpc_url) = config.solana_rpc {
@@ -109,6 +127,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/interactions/by/{agent_id}",          get(api::get_interactions_by))
         .route("/disputes/{agent_id}",                 get(api::get_disputes))
         .route("/registry",                            get(api::get_registry))
+        // ── Sleeping node / FCM push ────────────────────────────────────────
+        .route("/fcm/register",                        post(api::fcm_register))
+        .route("/fcm/sleep",                           post(api::fcm_sleep))
+        .route("/agents/{agent_id}/sleeping",          get(api::get_sleep_status))
+        .route("/agents/{agent_id}/pending",           get(api::get_pending).post(api::post_pending))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state);
 

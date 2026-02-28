@@ -9032,6 +9032,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bincode",
+ "bs58",
  "bytes",
  "ciborium",
  "clap",

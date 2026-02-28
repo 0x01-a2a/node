@@ -6,6 +6,7 @@ members = [
     "programs/challenge",
     "programs/stake-lock",
     "programs/escrow",
+    "programs/agent-ownership",
 ]
 
 # constant_time_eq 0.4.2 requires edition2024 (rustc >=1.85).

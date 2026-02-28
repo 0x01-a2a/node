@@ -4,5 +4,6 @@
   "description": "zerox1-node binary for macOS x64 (Intel)",
   "os": ["darwin"],
   "cpu": ["x64"],
+  "license": "MIT",
   "files": ["bin/"]
 }

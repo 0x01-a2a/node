@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-declare_id!("AgntownERRBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
+declare_id!("9GYVDTgc345bBa2k7j9a15aJSeKjzC75eyxdL3XCYVS9");
 
 // ============================================================================
 // AgentOwnership Program
@@ -27,7 +27,7 @@ pub mod agent_ownership {
     /// Propose a human owner for an agent.
     ///
     /// Creates (or overwrites) a ClaimInvitation PDA. Fails if the agent
-    /// already has an accepted owner (AgentOwnership PDA discriminator check).
+    /// already has an accepted owner (AgentOwnership PDA exists).
     pub fn propose_ownership(
         ctx: Context<ProposeOwnership>,
         agent_id: [u8; 32],
@@ -35,10 +35,9 @@ pub mod agent_ownership {
     ) -> Result<()> {
         require!(proposed_owner != Pubkey::default(), OwnershipError::ZeroAddress);
 
-        // Reject if already claimed — AgentOwnership PDA exists (non-zero data).
-        let ownership_info = &ctx.accounts.agent_ownership_check;
+        // Reject if already claimed — AgentOwnership PDA exists (non-zero lamports).
         require!(
-            ownership_info.data_is_empty(),
+            ctx.accounts.agent_ownership_check.lamports() == 0,
             OwnershipError::AlreadyClaimed,
         );
 
@@ -110,8 +109,9 @@ pub struct ProposeOwnership<'info> {
     )]
     pub claim_invitation: Account<'info, ClaimInvitation>,
 
-    /// Read-only guard: must be empty (uncreated) for proposal to proceed.
-    /// CHECK: we only inspect data_is_empty(); no write to this account.
+    /// Read-only guard: must have zero lamports (uncreated) to allow new proposals.
+    /// If the AgentOwnership PDA exists, lamports > 0 and propose_ownership rejects.
+    /// CHECK: only used for lamport check — no reads or writes.
     #[account(seeds = [b"agent_owner", agent_id.as_ref()], bump)]
     pub agent_ownership_check: UncheckedAccount<'info>,
 

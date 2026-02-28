@@ -16,7 +16,11 @@ ExecStart=/opt/zerox1/bin/zerox1-node \
   --log-dir /var/log/zerox1 \
   --kora-url http://127.0.0.1:8080 \
   --aggregator-url http://127.0.0.1:80 \
-  --aggregator-secret ${ZX01_AGGREGATOR_SECRET}
+  --aggregator-secret ${ZX01_AGGREGATOR_SECRET} \
+  --api-addr 0.0.0.0:8081 \
+  --hosting \
+  --hosting-fee-bps 0 \
+  --public-api-url https://us1.0x01.world
 
 # Environment file holds secrets (not checked into git).
 # Create /etc/zerox1/env with:

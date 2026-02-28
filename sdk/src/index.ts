@@ -117,6 +117,30 @@ export interface HostedAgentConfig {
 }
 
 // ============================================================================
+// Ownership types
+// ============================================================================
+
+export interface OwnerProposal {
+  status: 'pending'
+  agent_id: string
+  proposed_owner: string
+  proposed_at: number
+}
+
+export interface OwnerRecord {
+  status: 'claimed'
+  agent_id: string
+  owner: string
+  claimed_at: number
+}
+
+export interface OwnerUnclaimed {
+  status: 'unclaimed'
+}
+
+export type OwnerStatus = OwnerUnclaimed | OwnerProposal | OwnerRecord
+
+// ============================================================================
 // CBOR encoding for FEEDBACK payload
 //
 // FEEDBACK payloads must be CBOR-encoded. Receiving nodes run
@@ -296,6 +320,58 @@ export class Zerox1Agent {
    */
   static createHosted(config: HostedAgentConfig): HostedAgent {
     return new HostedAgent(config)
+  }
+
+  // ── Ownership claims ───────────────────────────────────────────────────────
+
+  /**
+   * Propose a human wallet as the owner of this agent.
+   *
+   * Called by the agent or its operator. The human wallet is notified
+   * and can accept via `accept_claim()` in the agent-ownership Solana program,
+   * then call `claimOwner()` (or POST /agents/:id/claim-owner) to confirm.
+   *
+   * Optional — agents without an owner are fully functional on the mesh.
+   *
+   * @param agentId        - Hex-encoded 64-char agent ID.
+   * @param proposedOwner  - Base58 Solana wallet address of the intended human.
+   * @param aggregatorUrl  - Aggregator base URL (defaults to mainnet).
+   */
+  static async proposeOwner(
+    agentId: string,
+    proposedOwner: string,
+    aggregatorUrl = 'https://api.0x01.world',
+  ): Promise<{ status: string; agent_id: string; proposed_owner: string }> {
+    const res = await fetch(`${aggregatorUrl}/agents/${agentId}/propose-owner`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ proposed_owner: proposedOwner }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
+      throw new Error(`proposeOwner failed: ${(err as { error?: string }).error ?? res.status}`)
+    }
+    return res.json() as Promise<{ status: string; agent_id: string; proposed_owner: string }>
+  }
+
+  /**
+   * Read the current ownership status of an agent.
+   *
+   * Possible responses:
+   *   - `{ status: "unclaimed" }`
+   *   - `{ status: "pending",  proposed_owner: "7XsB...", proposed_at: 123 }`
+   *   - `{ status: "claimed",  owner: "7XsB...", claimed_at: 123 }`
+   *
+   * @param agentId       - Hex-encoded 64-char agent ID.
+   * @param aggregatorUrl - Aggregator base URL.
+   */
+  static async getOwner(
+    agentId: string,
+    aggregatorUrl = 'https://api.0x01.world',
+  ): Promise<OwnerStatus> {
+    const res = await fetch(`${aggregatorUrl}/agents/${agentId}/owner`)
+    if (!res.ok) throw new Error(`getOwner failed: HTTP ${res.status}`)
+    return res.json() as Promise<OwnerStatus>
   }
 
   private _config!: Zerox1AgentConfig

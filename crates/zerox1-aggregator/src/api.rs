@@ -12,7 +12,7 @@ use tokio::sync::broadcast;
 
 use crate::store::{
     ActivityEvent, AgentProfile, AgentRegistryEntry, CapabilityMatch, DisputeRecord, HostingNode,
-    IngestEvent, NetworkStats, PendingMessage, ReputationStore,
+    IngestEvent, NetworkStats, OwnerStatus, PendingMessage, ReputationStore,
 };
 
 // ============================================================================
@@ -946,4 +946,107 @@ pub async fn post_hosting_register(
 pub async fn get_hosting_nodes(State(state): State<AppState>) -> impl IntoResponse {
     let nodes: Vec<HostingNode> = state.store.list_hosting_nodes();
     Json(nodes)
+}
+
+// ============================================================================
+// Agent ownership claim handlers
+// ============================================================================
+
+/// Request body for POST /agents/:agent_id/propose-owner.
+#[derive(Deserialize)]
+pub struct ProposeOwnerBody {
+    /// Base58-encoded Solana wallet address of the intended human owner.
+    pub proposed_owner: String,
+}
+
+/// Request body for POST /agents/:agent_id/claim-owner.
+///
+/// The human wallet that accepts the claim must submit their wallet address.
+/// The agent-ownership Solana program already enforces the on-chain claim;
+/// this endpoint records it in the aggregator so the profile shows "Claimed".
+#[derive(Deserialize)]
+pub struct ClaimOwnerBody {
+    /// Base58-encoded Solana wallet address of the human who accepted.
+    pub owner_wallet: String,
+}
+
+/// POST /agents/:agent_id/propose-owner
+///
+/// Called by the agent (or operator) to propose a human owner.
+/// The proposed_owner is stored as pending until the human calls /claim-owner.
+pub async fn post_propose_owner(
+    Path(agent_id): Path<String>,
+    State(state):   State<AppState>,
+    Json(body):     Json<ProposeOwnerBody>,
+) -> impl IntoResponse {
+    // Validate agent_id format (64 hex chars = 32-byte SATI mint).
+    if agent_id.len() != 64 || !agent_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid agent_id" })),
+        );
+    }
+    // Validate proposed_owner: Solana base58 pubkeys are 32–44 chars.
+    if body.proposed_owner.len() < 32 || body.proposed_owner.len() > 44 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid proposed_owner (expected base58 Solana address)" })),
+        );
+    }
+
+    match state.store.propose_owner(&agent_id, &body.proposed_owner) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "pending",
+                "agent_id": agent_id,
+                "proposed_owner": body.proposed_owner,
+            })),
+        ),
+        Err(e) => (StatusCode::CONFLICT, Json(json!({ "error": e }))),
+    }
+}
+
+/// POST /agents/:agent_id/claim-owner
+///
+/// Called by the human wallet AFTER accepting the on-chain AgentOwnership PDA.
+/// Records the claim in the aggregator — the agent profile will now show
+/// `"status": "claimed"` with the owner's wallet address.
+pub async fn post_claim_owner(
+    Path(agent_id): Path<String>,
+    State(state):   State<AppState>,
+    Json(body):     Json<ClaimOwnerBody>,
+) -> impl IntoResponse {
+    // Validate agent_id format (64 hex chars = 32-byte SATI mint).
+    if agent_id.len() != 64 || !agent_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid agent_id" })),
+        );
+    }
+    if body.owner_wallet.len() < 32 || body.owner_wallet.len() > 44 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid owner_wallet (expected base58 Solana address)" })),
+        );
+    }
+
+    match state.store.claim_owner(&agent_id, &body.owner_wallet) {
+        Ok(record) => (StatusCode::OK, Json(serde_json::to_value(record).unwrap_or_default())),
+        Err(e) => (StatusCode::CONFLICT, Json(json!({ "error": e }))),
+    }
+}
+
+/// GET /agents/:agent_id/owner
+///
+/// Returns the ownership status for an agent:
+///   - `{ "status": "unclaimed" }`
+///   - `{ "status": "pending",  "agent_id": "...", "proposed_owner": "...", "proposed_at": 123 }`
+///   - `{ "status": "claimed",  "agent_id": "...", "owner": "...", "claimed_at": 123 }`
+pub async fn get_agent_owner(
+    Path(agent_id): Path<String>,
+    State(state):   State<AppState>,
+) -> impl IntoResponse {
+    let status: OwnerStatus = state.store.get_owner(&agent_id);
+    Json(serde_json::to_value(status).unwrap_or_default())
 }

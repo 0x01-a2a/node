@@ -1435,6 +1435,32 @@ pub struct HostingNode {
     pub hosted_count: u32,
 }
 
+/// A pending ownership proposal recorded by POST /agents/:id/propose-owner.
+#[derive(Debug, Clone, Serialize)]
+pub struct OwnerProposal {
+    pub agent_id:       String,
+    pub proposed_owner: String,  // base58 Solana wallet
+    pub proposed_at:    u64,
+}
+
+/// An accepted ownership claim recorded by POST /agents/:id/claim-owner.
+/// Created only after on-chain AgentOwnership PDA is verified.
+#[derive(Debug, Clone, Serialize)]
+pub struct OwnerRecord {
+    pub agent_id:   String,
+    pub owner:      String,  // base58 Solana wallet
+    pub claimed_at: u64,
+}
+
+/// Result of `get_owner()` — three possible states.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum OwnerStatus {
+    Unclaimed,
+    Pending(OwnerProposal),
+    Claimed(OwnerRecord),
+}
+
 #[derive(Clone)]
 pub struct ReputationStore {
     inner:      Arc<RwLock<Inner>>,
@@ -1453,18 +1479,26 @@ pub struct ReputationStore {
     /// Capped at 100 messages per agent; oldest are dropped when the cap is reached.
     /// The queue is drained (and cleared) on the next pull request from the agent.
     pending_messages: Arc<Mutex<HashMap<String, VecDeque<PendingMessage>>>>,
+    /// Pending ownership proposals: agent_id → proposed_owner wallet (base58).
+    /// Set when the agent calls POST /agents/:id/propose-owner.
+    ownership_pending: Arc<Mutex<HashMap<String, OwnerProposal>>>,
+    /// Accepted ownership claims: agent_id → human wallet (base58), claimed_at.
+    /// Set when the human calls POST /agents/:id/claim-owner.
+    ownership_claimed: Arc<Mutex<HashMap<String, OwnerRecord>>>,
 }
 
 impl Default for ReputationStore {
     fn default() -> Self {
         Self {
-            inner:            Arc::new(RwLock::new(Inner::default())),
-            db:               Arc::new(Mutex::new(None)),
-            started_at:       now_secs(),
-            beacon_window:    Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
-            fcm_tokens:       Arc::new(Mutex::new(HashMap::new())),
-            sleep_states:     Arc::new(Mutex::new(HashSet::new())),
-            pending_messages: Arc::new(Mutex::new(HashMap::new())),
+            inner:             Arc::new(RwLock::new(Inner::default())),
+            db:                Arc::new(Mutex::new(None)),
+            started_at:        now_secs(),
+            beacon_window:     Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
+            fcm_tokens:        Arc::new(Mutex::new(HashMap::new())),
+            sleep_states:      Arc::new(Mutex::new(HashSet::new())),
+            pending_messages:  Arc::new(Mutex::new(HashMap::new())),
+            ownership_pending: Arc::new(Mutex::new(HashMap::new())),
+            ownership_claimed: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -1515,7 +1549,9 @@ impl ReputationStore {
             beacon_window:    Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
             fcm_tokens:       Arc::new(Mutex::new(HashMap::new())),
             sleep_states:     Arc::new(Mutex::new(HashSet::new())),
-            pending_messages: Arc::new(Mutex::new(HashMap::new())),
+            pending_messages:  Arc::new(Mutex::new(HashMap::new())),
+            ownership_pending: Arc::new(Mutex::new(HashMap::new())),
+            ownership_claimed: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -1569,6 +1605,64 @@ impl ReputationStore {
         map.remove(agent_id)
             .map(|q| q.into_iter().collect())
             .unwrap_or_default()
+    }
+
+    // ========================================================================
+    // Agent ownership claims
+    // ========================================================================
+
+    /// Record an ownership proposal (called when agent POSTs /propose-owner).
+    /// Overwrites any previous pending proposal for this agent.
+    /// Rejected if the agent already has an accepted owner.
+    pub fn propose_owner(&self, agent_id: &str, proposed_owner: &str) -> Result<(), &'static str> {
+        let claimed = self.ownership_claimed.lock().unwrap();
+        if claimed.contains_key(agent_id) {
+            return Err("agent already has an accepted owner");
+        }
+        drop(claimed);
+        let mut pending = self.ownership_pending.lock().unwrap();
+        pending.insert(agent_id.to_string(), OwnerProposal {
+            agent_id:       agent_id.to_string(),
+            proposed_owner: proposed_owner.to_string(),
+            proposed_at:    now_secs(),
+        });
+        tracing::info!("Ownership proposal: agent={} owner={}", &agent_id[..8.min(agent_id.len())], proposed_owner);
+        Ok(())
+    }
+
+    /// Record an accepted ownership claim (called when human POSTs /claim-owner).
+    /// Returns Err if (a) no pending proposal exists, (b) the signing wallet
+    /// doesn't match the proposed_owner, or (c) already claimed.
+    pub fn claim_owner(&self, agent_id: &str, owner_wallet: &str) -> Result<OwnerRecord, &'static str> {
+        let mut claimed = self.ownership_claimed.lock().unwrap();
+        if claimed.contains_key(agent_id) {
+            return Err("agent already has an accepted owner");
+        }
+        let pending = self.ownership_pending.lock().unwrap();
+        let proposal = pending.get(agent_id).ok_or("no pending ownership proposal for this agent")?;
+        if proposal.proposed_owner != owner_wallet {
+            return Err("owner wallet does not match the pending proposal");
+        }
+        drop(pending);
+        let record = OwnerRecord {
+            agent_id:   agent_id.to_string(),
+            owner:      owner_wallet.to_string(),
+            claimed_at: now_secs(),
+        };
+        claimed.insert(agent_id.to_string(), record.clone());
+        tracing::info!("Ownership claimed: agent={} owner={}", &agent_id[..8.min(agent_id.len())], owner_wallet);
+        Ok(record)
+    }
+
+    /// Return ownership status for an agent.
+    pub fn get_owner(&self, agent_id: &str) -> OwnerStatus {
+        if let Some(rec) = self.ownership_claimed.lock().unwrap().get(agent_id) {
+            return OwnerStatus::Claimed(rec.clone());
+        }
+        if let Some(prop) = self.ownership_pending.lock().unwrap().get(agent_id) {
+            return OwnerStatus::Pending(prop.clone());
+        }
+        OwnerStatus::Unclaimed
     }
 
     // ========================================================================

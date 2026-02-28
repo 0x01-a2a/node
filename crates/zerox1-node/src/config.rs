@@ -166,16 +166,31 @@ impl Config {
         }
     }
 
-    /// Parse SATI mint from hex string to bytes32, if provided.
+    /// Parse SATI mint from a Solana address string to bytes32, if provided.
+    ///
+    /// Accepts both formats:
+    ///   - base58  (standard Solana format, what `create-sati-agent publish` outputs)
+    ///     e.g. "2LETZxjxSpEZzHM42Fp6RYrcuxtjLytdVUSgGVAbVrqi"
+    ///   - hex (legacy / manual usage)
+    ///     e.g. "0xabcdef..." or "abcdef..."
     pub fn sati_mint_bytes(&self) -> anyhow::Result<Option<[u8; 32]>> {
         match &self.sati_mint {
             None => Ok(None),
             Some(s) => {
-                let bytes = hex::decode(s.trim_start_matches("0x"))
-                    .map_err(|e| anyhow::anyhow!("invalid sati_mint hex: {e}"))?;
+                let s = s.trim();
+                let bytes = if s.starts_with("0x") || s.chars().all(|c| c.is_ascii_hexdigit()) {
+                    // Hex path: strip optional "0x" prefix.
+                    hex::decode(s.trim_start_matches("0x"))
+                        .map_err(|e| anyhow::anyhow!("invalid sati_mint hex: {e}"))?
+                } else {
+                    // Base58 path: standard Solana pubkey format.
+                    bs58::decode(s)
+                        .into_vec()
+                        .map_err(|e| anyhow::anyhow!("invalid sati_mint base58: {e}"))?
+                };
                 let arr: [u8; 32] = bytes
                     .try_into()
-                    .map_err(|_| anyhow::anyhow!("sati_mint must be 32 bytes"))?;
+                    .map_err(|_| anyhow::anyhow!("sati_mint must be 32 bytes (got a wrong-length address)"))?;
                 Ok(Some(arr))
             }
         }

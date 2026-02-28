@@ -157,6 +157,15 @@ async fn main() -> anyhow::Result<()> {
         // ── Node hosting registry ───────────────────────────────────────────
         .route("/hosting/register",                    post(api::post_hosting_register))
         .route("/hosting/nodes",                       get(api::get_hosting_nodes))
+        // ── Agent ownership claims ──────────────────────────────────────────
+        // An agent proposes a human wallet as its owner. The human can then
+        // accept on-chain (via the agent-ownership Anchor program), then call
+        // POST /agents/:id/claim-owner to record acceptance in the aggregator.
+        // If the on-chain AgentOwnership PDA is verified, the profile is marked
+        // "claimed". The proposal is also tracked off-chain for "pending" status.
+        .route("/agents/{agent_id}/propose-owner",     post(api::post_propose_owner))
+        .route("/agents/{agent_id}/claim-owner",       post(api::post_claim_owner))
+        .route("/agents/{agent_id}/owner",             get(api::get_agent_owner))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state);
 

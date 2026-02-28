@@ -106,7 +106,6 @@ jobs:
       - name: Build zerox1-node (Android ARM64)
         run: cargo ndk --target aarch64-linux-android --platform 21 -- build --release -p zerox1-node
         env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
           CARGO_TERM_COLOR: always
 
       - name: Upload binary artifact

@@ -2,6 +2,7 @@
   "name": "@zerox1/sdk",
   "version": "0.1.27",
   "description": "0x01 mesh agent SDK — zero-config, binary bundled, works on every platform",
+  "license": "MIT",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {

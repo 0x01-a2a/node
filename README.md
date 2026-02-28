@@ -157,4 +157,6 @@ Full protocol spec in [`docs/`](./docs/):
 
 ## License
 
-MIT
+Dual-licensed to protect the network while maximizing agent adoption:
+- **`zerox1-node` (Infrastructure)**: [AGPL-3.0](./LICENSE) — Run it freely, but if you modify the routing or protocol logic for a hosted commercial service, your changes must be open-source.
+- **`@zerox1/sdk` (Agent Integrations)**: [MIT](./sdk/LICENSE) — Build agents and integrate them into any proprietary or open-source stack without restriction.

@@ -694,6 +694,20 @@ CREATE TABLE IF NOT EXISTS hosted_agents (
     FOREIGN KEY (host_node_id) REFERENCES hosting_nodes(node_id) ON DELETE CASCADE
 );
 ",
+    // v5: Agent ownership proposals and accepted claims
+    "
+CREATE TABLE IF NOT EXISTS ownership_proposals (
+    agent_id       TEXT    PRIMARY KEY,
+    proposed_owner TEXT    NOT NULL,
+    proposed_at    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ownership_claims (
+    agent_id   TEXT    PRIMARY KEY,
+    owner      TEXT    NOT NULL,
+    claimed_at INTEGER NOT NULL
+);
+",
 ];
 
 struct Db(rusqlite::Connection);
@@ -1388,6 +1402,73 @@ fn row_to_entropy(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntropyEvent> {
     })
 }
 
+// ── Ownership persistence helpers (part of impl Db) ───────────────────────────
+
+impl Db {
+    /// Upsert / overwrite a pending ownership proposal.
+    pub fn upsert_ownership_proposal(&self, agent_id: &str, proposed_owner: &str, proposed_at: u64) -> rusqlite::Result<()> {
+        self.0.execute(
+            "INSERT INTO ownership_proposals (agent_id, proposed_owner, proposed_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(agent_id) DO UPDATE SET
+                 proposed_owner = excluded.proposed_owner,
+                 proposed_at    = excluded.proposed_at",
+            rusqlite::params![agent_id, proposed_owner, proposed_at as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Insert an accepted claim (immutable — ignored if already exists).
+    pub fn insert_ownership_claim(&self, agent_id: &str, owner: &str, claimed_at: u64) -> rusqlite::Result<()> {
+        self.0.execute(
+            "INSERT OR IGNORE INTO ownership_claims (agent_id, owner, claimed_at)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![agent_id, owner, claimed_at as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Load all pending proposals into a HashMap.
+    pub fn load_ownership_proposals(&self) -> rusqlite::Result<HashMap<String, OwnerProposal>> {
+        let mut stmt = self.0.prepare(
+            "SELECT agent_id, proposed_owner, proposed_at FROM ownership_proposals"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let agent_id: String       = row.get(0)?;
+            let proposed_owner: String = row.get(1)?;
+            let proposed_at: i64       = row.get(2)?;
+            Ok((agent_id.clone(), OwnerProposal {
+                agent_id,
+                proposed_owner,
+                proposed_at: proposed_at as u64,
+            }))
+        })?;
+        let mut map = HashMap::new();
+        for row in rows { let (k, v) = row?; map.insert(k, v); }
+        Ok(map)
+    }
+
+    /// Load all accepted claims into a HashMap.
+    pub fn load_ownership_claims(&self) -> rusqlite::Result<HashMap<String, OwnerRecord>> {
+        let mut stmt = self.0.prepare(
+            "SELECT agent_id, owner, claimed_at FROM ownership_claims"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let agent_id: String  = row.get(0)?;
+            let owner: String     = row.get(1)?;
+            let claimed_at: i64   = row.get(2)?;
+            Ok((agent_id.clone(), OwnerRecord {
+                agent_id,
+                owner,
+                claimed_at: claimed_at as u64,
+            }))
+        })?;
+        let mut map = HashMap::new();
+        for row in rows { let (k, v) = row?; map.insert(k, v); }
+        Ok(map)
+    }
+}
+
 // ============================================================================
 // ReputationStore
 // ============================================================================
@@ -1538,20 +1619,30 @@ impl ReputationStore {
             path.display()
         );
 
+        // Load ownership state so it survives aggregator restarts.
+        let ownership_pending = db.load_ownership_proposals()
+            .map_err(|e| anyhow::anyhow!("SQLite load_ownership_proposals failed: {e}"))?;
+        let ownership_claimed = db.load_ownership_claims()
+            .map_err(|e| anyhow::anyhow!("SQLite load_ownership_claims failed: {e}"))?;
+        tracing::info!(
+            "Loaded {} ownership proposals, {} ownership claims from {}",
+            ownership_pending.len(), ownership_claimed.len(), path.display()
+        );
+
         Ok(Self {
             inner: Arc::new(RwLock::new(Inner {
                 agents,
                 interactions: VecDeque::new(),
                 solana_flow_clusters: HashMap::new(),
             })),
-            db:               Arc::new(Mutex::new(Some(db))),
-            started_at:       now_secs(),
-            beacon_window:    Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
-            fcm_tokens:       Arc::new(Mutex::new(HashMap::new())),
-            sleep_states:     Arc::new(Mutex::new(HashSet::new())),
+            db:                Arc::new(Mutex::new(Some(db))),
+            started_at:        now_secs(),
+            beacon_window:     Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
+            fcm_tokens:        Arc::new(Mutex::new(HashMap::new())),
+            sleep_states:      Arc::new(Mutex::new(HashSet::new())),
             pending_messages:  Arc::new(Mutex::new(HashMap::new())),
-            ownership_pending: Arc::new(Mutex::new(HashMap::new())),
-            ownership_claimed: Arc::new(Mutex::new(HashMap::new())),
+            ownership_pending: Arc::new(Mutex::new(ownership_pending)),
+            ownership_claimed: Arc::new(Mutex::new(ownership_claimed)),
         })
     }
 
@@ -1620,12 +1711,21 @@ impl ReputationStore {
             return Err("agent already has an accepted owner");
         }
         drop(claimed);
+        let proposed_at = now_secs();
         let mut pending = self.ownership_pending.lock().unwrap();
         pending.insert(agent_id.to_string(), OwnerProposal {
             agent_id:       agent_id.to_string(),
             proposed_owner: proposed_owner.to_string(),
-            proposed_at:    now_secs(),
+            proposed_at,
         });
+        drop(pending);
+        // Persist to SQLite so the proposal survives restarts.
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            if let Err(e) = conn.upsert_ownership_proposal(agent_id, proposed_owner, proposed_at) {
+                tracing::warn!("SQLite upsert_ownership_proposal failed: {e}");
+            }
+        }
         tracing::info!("Ownership proposal: agent={} owner={}", &agent_id[..8.min(agent_id.len())], proposed_owner);
         Ok(())
     }
@@ -1650,6 +1750,14 @@ impl ReputationStore {
             claimed_at: now_secs(),
         };
         claimed.insert(agent_id.to_string(), record.clone());
+        drop(claimed);
+        // Persist to SQLite — INSERT OR IGNORE keeps the claim immutable.
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            if let Err(e) = conn.insert_ownership_claim(agent_id, owner_wallet, record.claimed_at) {
+                tracing::warn!("SQLite insert_ownership_claim failed: {e}");
+            }
+        }
         tracing::info!("Ownership claimed: agent={} owner={}", &agent_id[..8.min(agent_id.len())], owner_wallet);
         Ok(record)
     }

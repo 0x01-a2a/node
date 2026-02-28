@@ -124,9 +124,10 @@ pub struct AcceptClaim<'info> {
     #[account(mut)]
     pub owner: Signer<'info>,
 
-    /// The pending invitation.
+    /// The pending invitation — closed on acceptance; rent returned to owner.
     #[account(
         mut,
+        close = owner,
         seeds = [b"claim_invite", claim_invitation.agent_id.as_ref()],
         bump  = claim_invitation.bump,
     )]

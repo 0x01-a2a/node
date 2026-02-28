@@ -1065,9 +1065,14 @@ pub async fn get_agent_owner(
 ///
 /// Uploads a media blob.
 /// Required Headers:
-///   X-0x01-Agent-Id:  Hex-encoded 32-byte public key.
+///   X-0x01-Agent-Id:  Hex-encoded 32-byte agent identity (SATI mint in SATI
+///                     mode; Ed25519 verifying key in dev mode).  Used for
+///                     reputation / tier lookup.
+///   X-0x01-Signer:   Hex-encoded 32-byte Ed25519 verifying key that produced
+///                     X-0x01-Signature.  Optional: falls back to X-0x01-Agent-Id
+///                     when absent (dev mode — agent_id == verifying key).
 ///   X-0x01-Timestamp: Unix seconds.
-///   X-0x01-Signature: Ed25519 signature of the payload + timestamp.
+///   X-0x01-Signature: Ed25519 signature of body bytes || timestamp LE-u64.
 pub async fn post_blob(
     State(state): State<AppState>,
     headers:      HeaderMap,
@@ -1079,11 +1084,18 @@ pub async fn post_blob(
     };
 
     // 1. Extract and validate headers
-    let agent_id_hex = headers.get("X-0x01-Agent-Id").and_then(|h| h.to_str().ok()).unwrap_or("");
+    let agent_id_hex  = headers.get("X-0x01-Agent-Id") .and_then(|h| h.to_str().ok()).unwrap_or("");
     let timestamp_str = headers.get("X-0x01-Timestamp").and_then(|h| h.to_str().ok()).unwrap_or("");
     let signature_hex = headers.get("X-0x01-Signature").and_then(|h| h.to_str().ok()).unwrap_or("");
+    // X-0x01-Signer is the actual Ed25519 verifying key, which may differ from
+    // agent_id in SATI mode (where agent_id = SATI mint address).
+    let signer_hex = headers.get("X-0x01-Signer")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or(agent_id_hex);  // dev-mode fallback: signer == agent_id
 
-    if agent_id_hex.len() != 64 || timestamp_str.is_empty() || signature_hex.len() != 128 {
+    if agent_id_hex.len() != 64 || signer_hex.len() != 64
+        || timestamp_str.is_empty() || signature_hex.len() != 128
+    {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "missing or invalid X-0x01 headers" }))).into_response();
     }
 
@@ -1099,22 +1111,24 @@ pub async fn post_blob(
     }
 
     // 2. Verify Signature
-    let agent_id_bytes = match hex::decode(agent_id_hex) {
+    // Use X-0x01-Signer for the crypto check; it equals X-0x01-Agent-Id in
+    // dev mode, but is the node's Ed25519 key (not the SATI mint) in SATI mode.
+    let signer_bytes = match hex::decode(signer_hex) {
         Ok(b) => b,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid agent_id hex" }))).into_response(),
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid signer hex" }))).into_response(),
     };
     let sig_bytes = match hex::decode(signature_hex) {
         Ok(b) => b,
         Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid signature hex" }))).into_response(),
     };
 
-    let pubkey_bytes: [u8; 32] = match agent_id_bytes.as_slice().try_into() {
+    let pubkey_bytes: [u8; 32] = match signer_bytes.as_slice().try_into() {
         Ok(b) => b,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid public key length" }))).into_response(),
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid signer key length" }))).into_response(),
     };
     let pubkey = match VerifyingKey::from_bytes(&pubkey_bytes) {
         Ok(k) => k,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid public key" }))).into_response(),
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid signer key" }))).into_response(),
     };
 
     let sig_bytes: [u8; 64] = match sig_bytes.as_slice().try_into() {

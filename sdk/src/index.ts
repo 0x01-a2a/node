@@ -657,11 +657,19 @@ export class Zerox1Agent {
     const pubKey = await ed.getPublicKey(secretKey)
     const signature = await ed.sign(msg, secretKey)
 
+    // In dev mode agent_id == verifying key (same hex).
+    // In SATI mode agent_id is the SATI mint address (different key).
+    // The aggregator uses X-0x01-Agent-Id for reputation lookup and
+    // X-0x01-Signer for signature verification — always the Ed25519 key.
+    const signerHex  = Buffer.from(pubKey).toString('hex')
+    const agentIdHex = this._config.satiMint ?? signerHex
+
     const res = await fetch(`${aggregatorUrl}/blobs`, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/octet-stream',
-        'X-0x01-Agent-Id': Buffer.from(pubKey).toString('hex'),
+        'Content-Type':   'application/octet-stream',
+        'X-0x01-Agent-Id': agentIdHex,
+        'X-0x01-Signer':   signerHex,
         'X-0x01-Timestamp': timestamp.toString(),
         'X-0x01-Signature': Buffer.from(signature).toString('hex'),
       },

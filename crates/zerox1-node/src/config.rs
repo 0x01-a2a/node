@@ -178,7 +178,14 @@ impl Config {
             None => Ok(None),
             Some(s) => {
                 let s = s.trim();
-                let bytes = if s.starts_with("0x") || s.chars().all(|c| c.is_ascii_hexdigit()) {
+                // Discriminate by prefix or length:
+                //   "0x..."  → explicit hex
+                //   64 chars → hex (32 bytes)
+                //   anything else → base58 (standard Solana pubkey, 43-44 chars)
+                // Length is more reliable than char-set inspection because a
+                // base58 address whose characters happen to all be 0-9/a-f
+                // would be wrongly decoded as hex if we used char checks.
+                let bytes = if s.starts_with("0x") || s.len() == 64 {
                     // Hex path: strip optional "0x" prefix.
                     hex::decode(s.trim_start_matches("0x"))
                         .map_err(|e| anyhow::anyhow!("invalid sati_mint hex: {e}"))?

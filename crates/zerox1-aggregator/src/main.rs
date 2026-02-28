@@ -3,6 +3,7 @@ mod store;
 mod capital_flow;
 
 use axum::{
+    extract::DefaultBodyLimit,
     routing::{get, post},
     Router,
 };
@@ -162,8 +163,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/agents/{agent_id}/propose-owner",     post(api::post_propose_owner))
         .route("/agents/{agent_id}/claim-owner",       post(api::post_claim_owner))
         .route("/agents/{agent_id}/owner",             get(api::get_agent_owner))
-        .route("/blobs",                               post(api::post_blob))
-        .route("/blobs/{cid}",                         get(api::get_blob))
+        // Blob routes carry a hard body cap so the tier check never has to
+        // buffer a multi-GB payload before rejecting it.  Max tier is 10 MB.
+        .route("/blobs",       post(api::post_blob).layer(DefaultBodyLimit::max(10 * 1024 * 1024)))
+        .route("/blobs/{cid}", get(api::get_blob))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state);
 

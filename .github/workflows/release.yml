@@ -104,7 +104,7 @@ jobs:
         run: cargo install cargo-ndk --locked --version "^3"
 
       - name: Build zerox1-node (Android ARM64)
-        run: cargo ndk --target aarch64-linux-android --platform 21 -- build --release -p zerox1-node
+        run: cargo ndk --target aarch64-linux-android --platform 24 -- build --release -p zerox1-node
         env:
           CARGO_TERM_COLOR: always
 

@@ -14,6 +14,10 @@ use crate::store::{
     ActivityEvent, AgentProfile, AgentRegistryEntry, CapabilityMatch, DisputeRecord, HostingNode,
     IngestEvent, NetworkStats, OwnerStatus, PendingMessage, ReputationStore,
 };
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tiny_keccak::{Hasher, Keccak};
+use ed25519_dalek::{VerifyingKey, Signature, Verifier};
 
 // ============================================================================
 // App state
@@ -36,6 +40,8 @@ pub struct AppState {
     pub http_client:    reqwest::Client,
     /// Broadcast channel for real-time activity events (GET /ws/activity).
     pub activity_tx:    broadcast::Sender<ActivityEvent>,
+    /// Path to store media blobs.
+    pub blob_dir:       Option<PathBuf>,
 }
 
 // ============================================================================
@@ -1049,4 +1055,145 @@ pub async fn get_agent_owner(
 ) -> impl IntoResponse {
     let status: OwnerStatus = state.store.get_owner(&agent_id);
     Json(serde_json::to_value(status).unwrap_or_default())
+}
+
+// ============================================================================
+// Blob Relay (Tiered Media Storage)
+// ============================================================================
+
+/// POST /blobs
+///
+/// Uploads a media blob.
+/// Required Headers:
+///   X-0x01-Agent-Id:  Hex-encoded 32-byte public key.
+///   X-0x01-Timestamp: Unix seconds.
+///   X-0x01-Signature: Ed25519 signature of the payload + timestamp.
+pub async fn post_blob(
+    State(state): State<AppState>,
+    headers:      HeaderMap,
+    body:         axum::body::Bytes,
+) -> impl IntoResponse {
+    let blob_dir = match state.blob_dir {
+        Some(ref d) => d,
+        None => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "blob storage disabled" }))).into_response(),
+    };
+
+    // 1. Extract and validate headers
+    let agent_id_hex = headers.get("X-0x01-Agent-Id").and_then(|h| h.to_str().ok()).unwrap_or("");
+    let timestamp_str = headers.get("X-0x01-Timestamp").and_then(|h| h.to_str().ok()).unwrap_or("");
+    let signature_hex = headers.get("X-0x01-Signature").and_then(|h| h.to_str().ok()).unwrap_or("");
+
+    if agent_id_hex.len() != 64 || timestamp_str.is_empty() || signature_hex.len() != 128 {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "missing or invalid X-0x01 headers" }))).into_response();
+    }
+
+    let timestamp = match timestamp_str.parse::<u64>() {
+        Ok(t) => t,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid timestamp" }))).into_response(),
+    };
+
+    // Clock skew check (+/- 30s)
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    if timestamp < now.saturating_sub(60) || timestamp > now + 60 {
+        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "timestamp out of sync" }))).into_response();
+    }
+
+    // 2. Verify Signature
+    let agent_id_bytes = match hex::decode(agent_id_hex) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid agent_id hex" }))).into_response(),
+    };
+    let sig_bytes = match hex::decode(signature_hex) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid signature hex" }))).into_response(),
+    };
+
+    let pubkey_bytes: [u8; 32] = match agent_id_bytes.as_slice().try_into() {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid public key length" }))).into_response(),
+    };
+    let pubkey = match VerifyingKey::from_bytes(&pubkey_bytes) {
+        Ok(k) => k,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid public key" }))).into_response(),
+    };
+
+    let sig_bytes: [u8; 64] = match sig_bytes.as_slice().try_into() {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid signature length" }))).into_response(),
+    };
+    let sig = Signature::from_bytes(&sig_bytes);
+
+    // Data to verify: body + timestamp (as LE bytes)
+    let mut data = body.to_vec();
+    data.extend_from_slice(&timestamp.to_le_bytes());
+    if pubkey.verify(&data, &sig).is_err() {
+        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "signature verification failed" }))).into_response();
+    }
+
+    // 3. Tier Check
+    let score = state.store.get_agent_reputation_score(agent_id_hex);
+    let is_claimed = state.store.is_agent_claimed(agent_id_hex);
+
+    let max_size = if is_claimed || score >= 100 {
+        10 * 1024 * 1024 // 10 MB
+    } else if score >= 50 {
+        2 * 1024 * 1024  // 2 MB
+    } else if score >= 10 {
+        512 * 1024       // 512 KB
+    } else {
+        0 // Tier 0: Disabled
+    };
+
+    if max_size == 0 {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": "reputation too low for blob storage" }))).into_response();
+    }
+    if body.len() > max_size {
+        return (StatusCode::PAYLOAD_TOO_LARGE, Json(json!({ "error": format!("blob too large for your tier (max {} bytes)", max_size) }))).into_response();
+    }
+
+    // 4. Store Blob
+    let mut hasher = Keccak::v256();
+    hasher.update(&body);
+    let mut hash = [0u8; 32];
+    hasher.finalize(&mut hash);
+    let cid = hex::encode(hash);
+
+    let file_path = blob_dir.join(&cid);
+    if let Err(e) = std::fs::write(&file_path, &body) {
+        tracing::error!("Failed to write blob {}: {}", cid, e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "failed to store blob" }))).into_response();
+    }
+
+    tracing::info!("Blob uploaded: cid={} from={} size={}", &cid[..8], &agent_id_hex[..8], body.len());
+    (StatusCode::CREATED, Json(json!({ "cid": cid }))).into_response()
+}
+
+/// GET /blobs/:cid
+pub async fn get_blob(
+    State(state): State<AppState>,
+    Path(cid):    Path<String>,
+) -> impl IntoResponse {
+    let blob_dir = match state.blob_dir {
+        Some(ref d) => d,
+        None => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "blob storage disabled" }))).into_response(),
+    };
+
+    // Sanitize CID (prevent path traversal)
+    if cid.len() != 64 || !cid.chars().all(|c| c.is_ascii_hexdigit()) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid cid" }))).into_response();
+    }
+
+    let file_path = blob_dir.join(&cid);
+    if !file_path.exists() {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "blob not found" }))).into_response();
+    }
+
+    match std::fs::read(file_path) {
+        Ok(data) => (
+            StatusCode::OK,
+            [("Content-Type", "application/octet-stream")],
+            data,
+        ).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "failed to read blob" }))).into_response(),
+    }
 }

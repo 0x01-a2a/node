@@ -26,3 +26,5 @@ solana-sdk = { workspace = true }
 solana-transaction-status = "2.1"
 petgraph   = "0.6"
 reqwest    = { workspace = true }
+ed25519-dalek = "2.1"
+rand = "0.8"

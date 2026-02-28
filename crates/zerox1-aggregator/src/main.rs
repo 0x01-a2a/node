@@ -6,7 +6,6 @@ use axum::{
     routing::{get, post},
     Router,
 };
-
 use clap::Parser;
 use tokio::sync::broadcast;
 
@@ -51,6 +50,11 @@ struct Config {
     /// (dev/local only — always set this in production).
     #[arg(long, env = "AGGREGATOR_HOSTING_SECRET")]
     hosting_secret: Option<String>,
+
+    /// Path to a directory for storing large media blobs.
+    /// If absent, blob uploads are disabled.
+    #[arg(long, env = "AGGREGATOR_BLOB_DIR")]
+    blob_dir: Option<std::path::PathBuf>,
 }
 
 #[tokio::main]
@@ -71,8 +75,8 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let store = match config.db_path {
-        Some(ref path) => ReputationStore::with_db(path)?,
+    let store = match config.db_path.as_ref() {
+        Some(path) => ReputationStore::with_db(path)?,
         None => {
             tracing::warn!(
                 "No --db-path set. Reputation data is in-memory only and \
@@ -102,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
         store,
         ingest_secret:  config.ingest_secret,
         hosting_secret: config.hosting_secret,
+        blob_dir:       config.blob_dir,
         fcm_server_key: config.fcm_server_key,
         http_client:    reqwest::Client::new(),
         activity_tx,
@@ -146,26 +151,19 @@ async fn main() -> anyhow::Result<()> {
         .route("/interactions/by/{agent_id}",          get(api::get_interactions_by))
         .route("/disputes/{agent_id}",                 get(api::get_disputes))
         .route("/registry",                            get(api::get_registry))
-        // ── Sleeping node / FCM push ────────────────────────────────────────
         .route("/fcm/register",                        post(api::fcm_register))
         .route("/fcm/sleep",                           post(api::fcm_sleep))
         .route("/agents/{agent_id}/sleeping",          get(api::get_sleep_status))
         .route("/agents/{agent_id}/pending",           get(api::get_pending).post(api::post_pending))
-        // ── Activity social feed ────────────────────────────────────────────
         .route("/activity",                            get(api::get_activity))
         .route("/ws/activity",                         get(api::ws_activity))
-        // ── Node hosting registry ───────────────────────────────────────────
         .route("/hosting/register",                    post(api::post_hosting_register))
         .route("/hosting/nodes",                       get(api::get_hosting_nodes))
-        // ── Agent ownership claims ──────────────────────────────────────────
-        // An agent proposes a human wallet as its owner. The human can then
-        // accept on-chain (via the agent-ownership Anchor program), then call
-        // POST /agents/:id/claim-owner to record acceptance in the aggregator.
-        // If the on-chain AgentOwnership PDA is verified, the profile is marked
-        // "claimed". The proposal is also tracked off-chain for "pending" status.
         .route("/agents/{agent_id}/propose-owner",     post(api::post_propose_owner))
         .route("/agents/{agent_id}/claim-owner",       post(api::post_claim_owner))
         .route("/agents/{agent_id}/owner",             get(api::get_agent_owner))
+        .route("/blobs",                               post(api::post_blob))
+        .route("/blobs/{cid}",                         get(api::get_blob))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state);
 

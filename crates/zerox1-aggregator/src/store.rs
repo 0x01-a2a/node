@@ -1646,6 +1646,16 @@ impl ReputationStore {
         })
     }
 
+    /// Return a reputation score for an agent, or 0 if unknown.
+    pub fn get_agent_reputation_score(&self, agent_id: &str) -> i64 {
+        self.inner.read().unwrap().agents.get(agent_id).map(|r| r.total_score).unwrap_or(0)
+    }
+
+    /// Return true if the agent has a claimed owner.
+    pub fn is_agent_claimed(&self, agent_id: &str) -> bool {
+        self.ownership_claimed.lock().unwrap().contains_key(agent_id)
+    }
+
     // ========================================================================
     // FCM / Sleeping node
     // ========================================================================

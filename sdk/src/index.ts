@@ -4,6 +4,7 @@ import * as os from 'os'
 import * as path from 'path'
 import { spawn, ChildProcess } from 'child_process'
 import WebSocket from 'ws'
+import * as ed from '@noble/ed25519'
 
 // ============================================================================
 // Public config / types
@@ -622,6 +623,76 @@ export class Zerox1Agent {
     })
 
     ws.on('error', () => { /* close event handles reconnect */ })
+  }
+
+  // ── Blobs (Media Relay) ───────────────────────────────────────────────────
+
+  /**
+   * Upload a media blob to the aggregator.
+   * Enforces reputation-based size limits:
+   *   - Claimed/Rep 100+: 10 MB
+   *   - Rep 50-99: 2 MB
+   *   - Rep 10-49: 512 KB
+   *
+   * Every upload is signed by the agent's keypair for authentication.
+   *
+   * @param data - Buffer or Uint8Array of the media.
+   * @param aggregatorUrl - Aggregator base URL.
+   * @returns Hex-encoded CID (Keccak-256 hash).
+   */
+  async uploadBlob(
+    data: Buffer | Uint8Array,
+    aggregatorUrl = 'https://api.0x01.world'
+  ): Promise<string> {
+    const timestamp = Math.floor(Date.now() / 1000)
+    const body = Buffer.from(data)
+
+    // Signing payload: body + timestamp (8-byte Little Endian)
+    const tsBuf = Buffer.alloc(8)
+    tsBuf.writeBigUInt64LE(BigInt(timestamp), 0)
+    const msg = Buffer.concat([body, tsBuf])
+
+    const secretKeyHex = fs.readFileSync(resolveKeypairPath(this._config.keypair), 'hex')
+    const secretKey = Buffer.from(secretKeyHex, 'hex').slice(0, 32)
+    const pubKey = await ed.getPublicKey(secretKey)
+    const signature = await ed.sign(msg, secretKey)
+
+    const res = await fetch(`${aggregatorUrl}/blobs`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-0x01-Agent-Id': Buffer.from(pubKey).toString('hex'),
+        'X-0x01-Timestamp': timestamp.toString(),
+        'X-0x01-Signature': Buffer.from(signature).toString('hex'),
+      },
+      body: body,
+    })
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
+      throw new Error(`uploadBlob failed: ${(err as { error?: string }).error ?? res.status}`)
+    }
+
+    const { cid } = await res.json() as { cid: string }
+    return cid
+  }
+
+  /**
+   * Download a media blob from the aggregator.
+   *
+   * @param cid - Hex-encoded CID.
+   * @param aggregatorUrl - Aggregator base URL.
+   */
+  async downloadBlob(
+    cid: string,
+    aggregatorUrl = 'https://api.0x01.world'
+  ): Promise<Buffer> {
+    const res = await fetch(`${aggregatorUrl}/blobs/${cid}`)
+    if (res.status === 404) throw new Error('Blob not found')
+    if (!res.ok) throw new Error(`downloadBlob failed: HTTP ${res.status}`)
+
+    const arrayBuffer = await res.arrayBuffer()
+    return Buffer.from(arrayBuffer)
   }
 }
 

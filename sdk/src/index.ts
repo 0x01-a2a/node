@@ -91,6 +91,32 @@ export interface SendFeedbackParams {
 }
 
 // ============================================================================
+// Hosting types
+// ============================================================================
+
+export interface HostingNode {
+  node_id: string
+  name: string
+  fee_bps: number
+  api_url: string
+  hosted_count: number
+  first_seen: number
+  last_seen: number
+}
+
+export interface HostedRegistration {
+  agent_id: string
+  token: string
+}
+
+export interface HostedAgentConfig {
+  /** Base URL of the host node, e.g. "https://host.example.com". */
+  hostApiUrl: string
+  /** Bearer token returned by registerHosted(). */
+  token: string
+}
+
+// ============================================================================
 // CBOR encoding for FEEDBACK payload
 //
 // FEEDBACK payloads must be CBOR-encoded. Receiving nodes run
@@ -228,6 +254,48 @@ export class Zerox1Agent {
     const agent = new Zerox1Agent()
     agent._config = config
     return agent
+  }
+
+  /**
+   * Fetch active hosting nodes from the 0x01 aggregator.
+   * These are nodes that offer to relay envelopes for
+   * lightweight/serverless agents that cannot run a full node.
+   */
+  static async listHostingNodes(
+    aggregatorUrl = 'https://api.0x01.world'
+  ): Promise<HostingNode[]> {
+    const res = await fetch(`${aggregatorUrl}/hosting/nodes`)
+    if (!res.ok) throw new Error(`Failed to fetch hosting nodes: HTTP ${res.status}`)
+    return res.json() as Promise<HostingNode[]>
+  }
+
+  /**
+   * Register a new hosted-agent session on a hosting node.
+   * The host generates a fresh Ed25519 sub-keypair; your
+   * agent_id is its public key. Keep the token secret.
+   *
+   * @param hostApiUrl - Base URL of the selected hosting node.
+   * @returns { agent_id, token } — persist both for reconnection.
+   */
+  static async registerHosted(hostApiUrl: string): Promise<HostedRegistration> {
+    const url = hostApiUrl.replace(/\/$/, '')
+    const res = await fetch(`${url}/hosted/register`, { method: 'POST' })
+    if (!res.ok) {
+      const body = await res.text()
+      throw new Error(`registerHosted failed (${res.status}): ${body}`)
+    }
+    return res.json() as Promise<HostedRegistration>
+  }
+
+  /**
+   * Create a hosted agent that delegates to an existing host node.
+   * No binary is spawned — the SDK connects to the host's WebSocket inbox
+   * and routes outbound sends through the host.
+   *
+   * @param config - { hostApiUrl, token } returned from registerHosted().
+   */
+  static createHosted(config: HostedAgentConfig): HostedAgent {
+    return new HostedAgent(config)
   }
 
   private _config!: Zerox1AgentConfig
@@ -478,5 +546,177 @@ export class Zerox1Agent {
     })
 
     ws.on('error', () => { /* close event handles reconnect */ })
+  }
+}
+
+// ============================================================================
+// HostedAgent — lightweight hosted-mode client
+// ============================================================================
+
+/**
+ * A hosted agent that delegates signing and routing to a host node.
+ * No binary is spawned. Inbound envelopes are streamed via WebSocket;
+ * outbound sends go through `POST /hosted/send` on the host.
+ *
+ * Obtain via `Zerox1Agent.createHosted({ hostApiUrl, token })`.
+ */
+export class HostedAgent {
+  private ws: WebSocket | null = null
+  private handlers: Map<string, Handler[]> = new Map()
+  private _reconnectDelay: number = 1000
+  private _running = false
+  private readonly baseUrl: string
+  private readonly token: string
+
+  constructor(config: HostedAgentConfig) {
+    this.baseUrl = config.hostApiUrl.replace(/\/$/, '')
+    this.token = config.token
+  }
+
+  /**
+   * Connect to the host node's inbox WebSocket.
+   * Resolves once the connection is open.
+   */
+  async start(): Promise<void> {
+    this._running = true
+    await this._connect()
+  }
+
+  /** Disconnect from the host node. */
+  disconnect(): void {
+    this._running = false
+    this.ws?.close()
+    this.ws = null
+  }
+
+  /**
+   * Register a handler for a message type.
+   * Use `'*'` to catch all inbound message types.
+   */
+  on(msgType: MsgType | '*', handler: Handler): this {
+    const key = msgType === '*' ? '__all__' : msgType
+    const list = this.handlers.get(key) ?? []
+    list.push(handler)
+    this.handlers.set(key, list)
+    return this
+  }
+
+  /**
+   * Send an envelope through the host node.
+   * The host signs it with this agent's sub-keypair and broadcasts via libp2p.
+   */
+  async send(params: SendParams): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/hosted/send`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.token}`,
+      },
+      body: JSON.stringify({
+        msg_type: params.msgType,
+        recipient: params.recipient ?? null,
+        conversation_id: params.conversationId,
+        payload_hex: Buffer.from(params.payload).toString('hex'),
+      }),
+    })
+    if (!res.ok && res.status !== 204) {
+      const body = await res.text()
+      throw new Error(`hosted send failed (${res.status}): ${body}`)
+    }
+  }
+
+  /**
+   * Send a FEEDBACK envelope with CBOR-encoded payload.
+   * Mirrors `Zerox1Agent.sendFeedback()`.
+   */
+  async sendFeedback(params: SendFeedbackParams): Promise<void> {
+    if (params.score < -100 || params.score > 100)
+      throw new RangeError(`score must be in [-100, 100], got ${params.score}`)
+
+    const outcomeMap = { negative: 0, neutral: 1, positive: 2 } as const
+    const roleMap = { participant: 0, notary: 1 } as const
+
+    const payload = encodeFeedbackCbor(
+      params.conversationId,
+      params.targetAgent,
+      params.score,
+      outcomeMap[params.outcome],
+      false,
+      roleMap[params.role],
+    )
+
+    return this.send({ msgType: 'FEEDBACK', conversationId: params.conversationId, payload })
+  }
+
+  /** Generate a random 16-byte conversation ID as hex. */
+  newConversationId(): string {
+    const bytes = new Uint8Array(16)
+    crypto.getRandomValues(bytes)
+    return Buffer.from(bytes).toString('hex')
+  }
+
+  // ── Internal ──────────────────────────────────────────────────────────────
+
+  private async _connect(): Promise<void> {
+    const wsUrl = `${this.baseUrl.replace(/^http/, 'ws')}/ws/hosted/inbox`
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(wsUrl, {
+        headers: { Authorization: `Bearer ${this.token}` },
+      })
+      this.ws = ws
+
+      ws.once('open', () => {
+        this._reconnectDelay = 1000
+        resolve()
+      })
+      ws.once('error', reject)
+
+      ws.on('message', (data) => {
+        try {
+          const raw = JSON.parse(data.toString())
+          const env: InboundEnvelope = {
+            msgType: raw.msg_type,
+            sender: raw.sender,
+            recipient: raw.recipient,
+            conversationId: raw.conversation_id,
+            slot: raw.slot,
+            nonce: raw.nonce,
+            payloadB64: raw.payload_b64,
+            feedback: raw.feedback ? {
+              conversationId: raw.feedback.conversation_id,
+              targetAgent: raw.feedback.target_agent,
+              score: raw.feedback.score,
+              outcome: raw.feedback.outcome,
+              isDispute: raw.feedback.is_dispute,
+              role: raw.feedback.role,
+            } : undefined,
+            notarizeBid: raw.notarize_bid ? {
+              bidType: raw.notarize_bid.bid_type,
+              conversationId: raw.notarize_bid.conversation_id,
+              opaqueB64: raw.notarize_bid.opaque_b64,
+            } : undefined,
+          }
+          this._dispatch(env)
+        } catch { /* malformed — ignore */ }
+      })
+
+      ws.on('close', () => {
+        if (this._running) {
+          setTimeout(() => {
+            this._reconnectDelay = 1000
+            this._connect().catch(() => { })
+          }, this._reconnectDelay)
+          this._reconnectDelay = Math.min(this._reconnectDelay * 2, 30_000)
+        }
+      })
+    })
+  }
+
+  private _dispatch(env: InboundEnvelope): void {
+    const specific = this.handlers.get(env.msgType) ?? []
+    const wildcard = this.handlers.get('__all__') ?? []
+    for (const h of [...specific, ...wildcard]) {
+      try { void h(env) } catch { /* handler errors are isolated */ }
+    }
   }
 }

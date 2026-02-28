@@ -116,6 +116,27 @@ pub struct Config {
     /// notification can wake the app when a PROPOSE arrives while offline.
     #[arg(long, env = "ZX01_FCM_TOKEN")]
     pub fcm_token: Option<String>,
+
+    /// Enable hosting mode.
+    /// When set, this node registers itself with the aggregator as a hosting
+    /// provider and accepts hosted-agent sessions via the /hosted/* API.
+    #[arg(long, env = "ZX01_HOSTING", default_value_t = false)]
+    pub hosting: bool,
+
+    /// Fee charged to hosted agents in basis points (1 bps = 0.01%).
+    /// Only meaningful when --hosting is set.
+    #[arg(long, env = "ZX01_HOSTING_FEE_BPS", default_value_t = 0)]
+    pub hosting_fee_bps: u32,
+
+    /// Public HTTP listen address for the hosted-agent API (e.g. "0.0.0.0:9091").
+    /// Defaults to --api-addr when --hosting is set.
+    #[arg(long, env = "ZX01_PUBLIC_API_ADDR")]
+    pub public_api_addr: Option<String>,
+
+    /// Public URL advertised in the aggregator so agents know how to reach this node.
+    /// Example: "https://host.example.com:9091"
+    #[arg(long, env = "ZX01_PUBLIC_API_URL")]
+    pub public_api_url: Option<String>,
 }
 
 impl Config {

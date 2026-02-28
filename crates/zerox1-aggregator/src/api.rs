@@ -11,8 +11,8 @@ use serde_json::json;
 use tokio::sync::broadcast;
 
 use crate::store::{
-    ActivityEvent, AgentProfile, AgentRegistryEntry, CapabilityMatch, DisputeRecord, IngestEvent,
-    NetworkStats, PendingMessage, ReputationStore,
+    ActivityEvent, AgentProfile, AgentRegistryEntry, CapabilityMatch, DisputeRecord, HostingNode,
+    IngestEvent, NetworkStats, PendingMessage, ReputationStore,
 };
 
 // ============================================================================
@@ -25,6 +25,9 @@ pub struct AppState {
     /// Shared secret for POST /ingest/envelope.
     /// None = unauthenticated (dev/local only).
     pub ingest_secret:  Option<String>,
+    /// Shared secret for POST /hosting/register.
+    /// None = unauthenticated (dev/local only); set in production.
+    pub hosting_secret: Option<String>,
     /// Firebase server key for sending FCM push notifications.
     /// Required for the sleeping node wake-push feature.
     /// Set via --fcm-server-key / FCM_SERVER_KEY env var.
@@ -827,4 +830,120 @@ async fn send_fcm_push(
             tracing::warn!("FCM push error for agent {agent_id}: {e}");
         }
     }
+}
+
+// ============================================================================
+// Hosting node registry
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct HostingRegisterBody {
+    node_id: String,
+    name:    String,
+    fee_bps: u32,
+    api_url: String,
+}
+
+/// Validate that a host `api_url` is safe to store and surface to mobile clients.
+///
+/// Requirements:
+///   - Parseable as an absolute URL
+///   - Scheme is `http` or `https`
+///   - No loopback / link-local / unspecified addresses (prevents SSRF when
+///     mobile probes the URL)
+///   - Length ≤ 256 bytes (prevents database bloat)
+fn validate_host_api_url(url: &str) -> Result<(), &'static str> {
+    if url.len() > 256 {
+        return Err("api_url exceeds 256 characters");
+    }
+
+    // Must be a parseable absolute URL with http or https scheme.
+    let parsed: reqwest::Url = url.parse().map_err(|_| "api_url is not a valid URL")?;
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => return Err("api_url scheme must be http or https"),
+    }
+
+    // Reject private / loopback / link-local hosts to prevent SSRF from
+    // mobile clients that blindly fetch the advertised URL.
+    if let Some(host) = parsed.host() {
+        let host_str = host.to_string();
+
+        // Loopback and unspecified.
+        if host_str == "localhost"
+            || host_str == "::1"
+            || host_str.starts_with("127.")
+            || host_str == "0.0.0.0"
+        {
+            return Err("api_url must not be a loopback address");
+        }
+
+        // Private RFC-1918 ranges (simple prefix checks).
+        if host_str.starts_with("10.")
+            || host_str.starts_with("192.168.")
+            || is_rfc1918_172(&host_str)
+        {
+            return Err("api_url must not be a private IP address");
+        }
+
+        // Link-local.
+        if host_str.starts_with("169.254.") || host_str.starts_with("fe80:") {
+            return Err("api_url must not be a link-local address");
+        }
+    } else {
+        return Err("api_url has no host");
+    }
+
+    Ok(())
+}
+
+fn is_rfc1918_172(host: &str) -> bool {
+    // 172.16.0.0/12 = 172.16.x.x – 172.31.x.x
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() < 2 || parts[0] != "172" { return false; }
+    if let Ok(second) = parts[1].parse::<u8>() {
+        return (16..=31).contains(&second);
+    }
+    false
+}
+
+/// POST /hosting/register — called by host nodes on startup and every 60s.
+///
+/// Requires `Authorization: Bearer <hosting_secret>` when `--hosting-secret`
+/// is configured on the aggregator. Validates `api_url` format to prevent
+/// SSRF vectors from reaching mobile clients.
+pub async fn post_hosting_register(
+    State(state): State<AppState>,
+    headers:      HeaderMap,
+    Json(body):   Json<HostingRegisterBody>,
+) -> impl IntoResponse {
+    // Bearer token auth (if configured).
+    if let Some(ref secret) = state.hosting_secret {
+        let provided = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .unwrap_or("");
+        if !ct_eq(provided, secret) {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+    }
+
+    // Validate api_url before persisting.
+    if let Err(e) = validate_host_api_url(&body.api_url) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e })),
+        ).into_response();
+    }
+
+    state.store.register_hosting_node(&body.node_id, &body.name, body.fee_bps, &body.api_url);
+    StatusCode::OK.into_response()
+}
+
+/// GET /hosting/nodes — returns hosting nodes seen within the last 120 seconds.
+pub async fn get_hosting_nodes(State(state): State<AppState>) -> impl IntoResponse {
+    let nodes: Vec<HostingNode> = state.store.list_hosting_nodes();
+    Json(nodes)
 }

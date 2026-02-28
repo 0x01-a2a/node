@@ -15,7 +15,7 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
+        Path, Query, State,
     },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
@@ -23,11 +23,13 @@ use axum::{
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use ed25519_dalek::SigningKey;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, RwLock};
 
 use zerox1_protocol::{
-    envelope::BROADCAST_RECIPIENT,
+    envelope::{Envelope, BROADCAST_RECIPIENT},
     message::MsgType,
     payload::{FeedbackPayload, NotarizeBidPayload},
 };
@@ -151,6 +153,56 @@ pub struct InboundEnvelope {
 }
 
 // ============================================================================
+// Hosted-agent session state
+// ============================================================================
+
+/// Hard cap on concurrent hosted sessions to prevent memory DoS.
+const MAX_HOSTED_SESSIONS: usize = 10_000;
+/// Sessions older than this are evicted and their tokens rejected.
+const SESSION_TTL_SECS: u64 = 7 * 24 * 3600;
+/// Maximum outbound sends per 60-second window per session.
+const MAX_SENDS_PER_MINUTE: u32 = 60;
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Active hosted-agent session — one per registered hosted agent.
+///
+/// On registration the host generates a fresh ed25519 sub-keypair.
+/// `agent_id = verifying_key.to_bytes()`. All outbound envelopes for this
+/// agent are signed with `signing_key` by the host.
+pub struct HostedSession {
+    /// 32-byte verifying key — used as the agent_id on the mesh.
+    pub agent_id:                [u8; 32],
+    pub signing_key:             SigningKey,
+    pub created_at:              u64,
+    pub nonce:                   u64,
+    /// Start of the current 60-second rate-limit window (unix seconds).
+    pub rate_window_start:       u64,
+    /// Number of sends in the current rate-limit window.
+    pub sends_in_window:         u32,
+}
+
+/// Request body for POST /hosted/send.
+#[derive(Deserialize)]
+pub struct HostedSendRequest {
+    pub msg_type:        String,
+    pub recipient:       Option<String>,
+    pub conversation_id: String,
+    pub payload_hex:     String,
+}
+
+/// Query parameters for GET /ws/hosted/inbox (token fallback only).
+#[derive(Deserialize)]
+pub struct HostedInboxQuery {
+    pub token: Option<String>,
+}
+
+// ============================================================================
 // Shared API state
 // ============================================================================
 
@@ -169,6 +221,14 @@ struct ApiInner {
     inbox_tx:    broadcast::Sender<InboundEnvelope>,
     /// Optional bearer token to authenticate mutating API endpoints.
     api_secret:  Option<String>,
+
+    // Hosted-agent state
+    /// token (hex-32) → HostedSession
+    hosted_sessions:    Arc<RwLock<HashMap<String, HostedSession>>>,
+    #[allow(dead_code)]
+    hosting_fee_bps:    u32,
+    /// Pre-signed envelopes from hosted-agent send handler → node loop.
+    hosted_outbound_tx: mpsc::Sender<Envelope>,
 }
 
 /// Cheaply cloneable shared state passed to all axum handlers.
@@ -178,12 +238,17 @@ pub struct ApiState(Arc<ApiInner>);
 impl ApiState {
     /// Create a new ApiState.
     ///
-    /// Returns `(state, outbound_rx)`. The caller (node) must hold onto
-    /// `outbound_rx` and drive it in the main event loop.
-    pub fn new(self_agent: [u8; 32], api_secret: Option<String>) -> (Self, mpsc::Receiver<OutboundRequest>) {
+    /// Returns `(state, outbound_rx, hosted_outbound_rx)`. The caller (node)
+    /// must hold onto both receivers and drive them in the main event loop.
+    pub fn new(
+        self_agent:      [u8; 32],
+        api_secret:      Option<String>,
+        hosting_fee_bps: u32,
+    ) -> (Self, mpsc::Receiver<OutboundRequest>, mpsc::Receiver<Envelope>) {
         let (event_tx, _)    = broadcast::channel(512);
         let (inbox_tx, _)    = broadcast::channel(256);
-        let (outbound_tx, outbound_rx) = mpsc::channel(64);
+        let (outbound_tx, outbound_rx)               = mpsc::channel(64);
+        let (hosted_outbound_tx, hosted_outbound_rx) = mpsc::channel(64);
 
         let state = Self(Arc::new(ApiInner {
             peers:      RwLock::new(HashMap::new()),
@@ -194,9 +259,12 @@ impl ApiState {
             outbound_tx,
             inbox_tx,
             api_secret,
+            hosted_sessions:    Arc::new(RwLock::new(HashMap::new())),
+            hosting_fee_bps,
+            hosted_outbound_tx,
         }));
 
-        (state, outbound_rx)
+        (state, outbound_rx, hosted_outbound_rx)
     }
 
     // ── Visualization update helpers ─────────────────────────────────────────
@@ -278,6 +346,12 @@ impl ApiState {
         self.0.outbound_tx.send(req).await
             .map_err(|_| "node loop unavailable".to_string())
     }
+
+    /// Queue a pre-signed hosted-agent envelope to the node loop for gossipsub broadcast.
+    pub async fn send_hosted_outbound(&self, env: Envelope) -> Result<(), String> {
+        self.0.hosted_outbound_tx.send(env).await
+            .map_err(|_| "node loop unavailable".to_string())
+    }
 }
 
 // ============================================================================
@@ -294,6 +368,11 @@ pub async fn serve(state: ApiState, addr: SocketAddr) {
         // Agent integration
         .route("/envelopes/send",         post(send_envelope))
         .route("/ws/inbox",               get(ws_inbox_handler))
+        // Hosted-agent API
+        .route("/hosted/ping",            get(hosted_ping))
+        .route("/hosted/register",        post(hosted_register))
+        .route("/hosted/send",            post(hosted_send))
+        .route("/ws/hosted/inbox",        get(ws_hosted_inbox_handler))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state);
 
@@ -515,6 +594,273 @@ async fn ws_inbox_task(mut socket: WebSocket, state: ApiState) {
 }
 
 // ============================================================================
+// Hosted-agent route handlers
+// ============================================================================
+
+/// GET /hosted/ping — no auth. Returns immediately; used by mobile for RTT probing.
+async fn hosted_ping() -> impl IntoResponse {
+    Json(serde_json::json!({ "ok": true }))
+}
+
+/// POST /hosted/register — open (no auth).
+///
+/// Generates a fresh ed25519 sub-keypair for the hosted agent.
+/// Returns `{ "agent_id": "<hex64>", "token": "<hex64>" }`.
+async fn hosted_register(State(state): State<ApiState>) -> impl IntoResponse {
+    let now = now_secs();
+
+    let mut sessions = state.0.hosted_sessions.write().await;
+
+    // Evict expired sessions before checking capacity.
+    sessions.retain(|_, s| now.saturating_sub(s.created_at) < SESSION_TTL_SECS);
+
+    if sessions.len() >= MAX_HOSTED_SESSIONS {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "host at capacity" })),
+        );
+    }
+
+    let signing_key = SigningKey::generate(&mut OsRng);
+    let agent_id    = signing_key.verifying_key().to_bytes();
+    let token       = hex::encode(rand::random::<[u8; 32]>());
+
+    let session = HostedSession {
+        agent_id,
+        signing_key,
+        created_at:        now,
+        nonce:             0,
+        rate_window_start: now,
+        sends_in_window:   0,
+    };
+    sessions.insert(token.clone(), session);
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "agent_id": hex::encode(agent_id),
+            "token":    token,
+        })),
+    )
+}
+
+/// POST /hosted/send — `Authorization: Bearer <token>`.
+///
+/// Signs an envelope using the session sub-keypair and forwards it to the
+/// node loop for gossipsub broadcast.
+async fn hosted_send(
+    State(state): State<ApiState>,
+    headers:      HeaderMap,
+    Json(req):    Json<HostedSendRequest>,
+) -> impl IntoResponse {
+    let token = match resolve_hosted_token(&headers) {
+        Some(t) => t,
+        None    => return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "missing Bearer token" })),
+        ),
+    };
+
+    // Parse msg_type.
+    let msg_type = match parse_msg_type(&req.msg_type) {
+        Some(t) => t,
+        None    => return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("unknown msg_type: {}", req.msg_type) })),
+        ),
+    };
+
+    // Parse recipient.
+    let recipient: [u8; 32] = if msg_type.is_broadcast()
+        || msg_type.is_notary_pubsub()
+        || msg_type.is_reputation_pubsub()
+    {
+        BROADCAST_RECIPIENT
+    } else {
+        match &req.recipient {
+            None => return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "recipient required for bilateral messages" })),
+            ),
+            Some(hex_str) => match hex::decode(hex_str) {
+                Ok(b) => match b.try_into() {
+                    Ok(arr) => arr,
+                    Err(_)  => return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": "recipient must be 32 bytes" })),
+                    ),
+                },
+                Err(_) => return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "recipient: invalid hex" })),
+                ),
+            },
+        }
+    };
+
+    // Parse conversation_id.
+    let conversation_id: [u8; 16] = match hex::decode(&req.conversation_id) {
+        Ok(b) => match b.try_into() {
+            Ok(arr) => arr,
+            Err(_)  => return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "conversation_id must be 16 bytes" })),
+            ),
+        },
+        Err(_) => return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "conversation_id: invalid hex" })),
+        ),
+    };
+
+    // Decode payload.
+    let payload = match hex::decode(&req.payload_hex) {
+        Ok(b)  => b,
+        Err(_) => return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "payload_hex: invalid hex" })),
+        ),
+    };
+
+    // Build pre-signed envelope using the session sub-keypair.
+    let env = {
+        let now = now_secs();
+        let mut sessions = state.0.hosted_sessions.write().await;
+        let session = match sessions.get_mut(&token) {
+            Some(s) => s,
+            None    => return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "invalid token" })),
+            ),
+        };
+
+        // Session TTL check.
+        if now.saturating_sub(session.created_at) >= SESSION_TTL_SECS {
+            sessions.remove(&token);
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "session expired" })),
+            );
+        }
+
+        // Rate limiting: sliding 60-second window.
+        if now.saturating_sub(session.rate_window_start) >= 60 {
+            session.rate_window_start = now;
+            session.sends_in_window   = 0;
+        }
+        session.sends_in_window += 1;
+        if session.sends_in_window > MAX_SENDS_PER_MINUTE {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({ "error": "rate limit exceeded" })),
+            );
+        }
+
+        session.nonce += 1;
+        Envelope::build(
+            msg_type,
+            session.agent_id,
+            recipient,
+            0,
+            session.nonce,
+            conversation_id,
+            payload,
+            &session.signing_key,
+        )
+    };
+
+    if state.send_hosted_outbound(env).await.is_err() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "node loop unavailable" })),
+        );
+    }
+
+    (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
+}
+
+/// GET /ws/hosted/inbox
+///
+/// Opens a WebSocket and streams inbound envelopes addressed to the hosted
+/// agent's agent_id.
+///
+/// Token is resolved with the following priority:
+///   1. `Authorization: Bearer <token>` header (preferred — never logged)
+///   2. `?token=<hex>` query param (deprecated — visible in server logs)
+async fn ws_hosted_inbox_handler(
+    ws:           WebSocketUpgrade,
+    headers:      HeaderMap,
+    Query(q):     Query<HostedInboxQuery>,
+    State(state): State<ApiState>,
+) -> impl IntoResponse {
+    let token = resolve_hosted_token(&headers)
+        .or_else(|| {
+            if q.token.is_some() {
+                tracing::warn!(
+                    "WS /ws/hosted/inbox: token passed via query param (deprecated). \
+                     Use Authorization: Bearer header instead."
+                );
+            }
+            q.token
+        });
+
+    match token {
+        Some(t) => ws.on_upgrade(|socket| ws_hosted_inbox_task(socket, state, t))
+            .into_response(),
+        None    => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "missing Bearer token" })),
+        ).into_response(),
+    }
+}
+
+async fn ws_hosted_inbox_task(mut socket: WebSocket, state: ApiState, token: String) {
+    // Resolve session to get agent_id for filtering; reject expired tokens.
+    let agent_id_hex = {
+        let sessions = state.0.hosted_sessions.read().await;
+        match sessions.get(&token) {
+            Some(s) => {
+                if now_secs().saturating_sub(s.created_at) >= SESSION_TTL_SECS {
+                    let _ = socket.send(Message::Text(
+                        r#"{"error":"session expired"}"#.into()
+                    )).await;
+                    return;
+                }
+                hex::encode(s.agent_id)
+            }
+            None    => {
+                let _ = socket.send(Message::Text(
+                    r#"{"error":"invalid token"}"#.into()
+                )).await;
+                return;
+            }
+        }
+    };
+
+    let mut rx = state.0.inbox_tx.subscribe();
+    loop {
+        match rx.recv().await {
+            Ok(env) => {
+                // Only forward envelopes addressed to this hosted agent.
+                if env.recipient != agent_id_hex {
+                    continue;
+                }
+                match serde_json::to_string(&env) {
+                    Ok(json) => {
+                        if socket.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => tracing::warn!("WS hosted inbox serialize error: {e}"),
+                }
+            }
+            Err(broadcast::error::RecvError::Closed)    => break,
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+        }
+    }
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
 
@@ -547,4 +893,13 @@ fn ct_eq(a: &str, b: &str) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+/// Extract the Bearer token from an `Authorization: Bearer <token>` header.
+fn resolve_hosted_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.to_string())
 }

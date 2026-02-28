@@ -675,6 +675,25 @@ CREATE TABLE IF NOT EXISTS activity_log (
 );
 CREATE INDEX IF NOT EXISTS idx_activity_log_ts ON activity_log(ts DESC);
 ",
+    // v4: Node hosting registry
+    "
+CREATE TABLE IF NOT EXISTS hosting_nodes (
+    node_id    TEXT    PRIMARY KEY,
+    name       TEXT    NOT NULL DEFAULT '',
+    fee_bps    INTEGER NOT NULL DEFAULT 0,
+    api_url    TEXT    NOT NULL DEFAULT '',
+    first_seen INTEGER NOT NULL,
+    last_seen  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS hosted_agents (
+    agent_id      TEXT    NOT NULL,
+    host_node_id  TEXT    NOT NULL,
+    registered_at INTEGER NOT NULL,
+    PRIMARY KEY (agent_id, host_node_id),
+    FOREIGN KEY (host_node_id) REFERENCES hosting_nodes(node_id) ON DELETE CASCADE
+);
+",
 ];
 
 struct Db(rusqlite::Connection);
@@ -684,8 +703,9 @@ impl Db {
         let mut conn = rusqlite::Connection::open(path)?;
         
         conn.execute_batch("
-            PRAGMA journal_mode = WAL;
-            PRAGMA synchronous  = NORMAL;
+            PRAGMA journal_mode   = WAL;
+            PRAGMA synchronous    = NORMAL;
+            PRAGMA foreign_keys   = ON;
             CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY);
         ")?;
 
@@ -1400,6 +1420,19 @@ pub struct NetworkStats {
     pub beacon_bpm:        u64,
     /// Unix timestamp (seconds) when the aggregator process started.
     pub started_at:        u64,
+}
+
+/// A hosting node entry returned by GET /hosting/nodes.
+#[derive(Debug, Clone, Serialize)]
+pub struct HostingNode {
+    pub node_id:      String,
+    pub name:         String,
+    pub fee_bps:      u32,
+    pub api_url:      String,
+    pub first_seen:   u64,
+    pub last_seen:    u64,
+    /// Live count of hosted agents on this node.
+    pub hosted_count: u32,
 }
 
 #[derive(Clone)]
@@ -2486,6 +2519,77 @@ impl ReputationStore {
             }
         }
         vec![]
+    }
+    // ── Hosting node registry ─────────────────────────────────────────────
+
+    /// Upsert a hosting node heartbeat.
+    ///
+    /// Sets `first_seen` only on INSERT; always updates `last_seen`.
+    pub fn register_hosting_node(&self, node_id: &str, name: &str, fee_bps: u32, api_url: &str) {
+        let now = now_secs() as i64;
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            let _ = conn.0.execute(
+                "INSERT INTO hosting_nodes (node_id, name, fee_bps, api_url, first_seen, last_seen)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+                 ON CONFLICT(node_id) DO UPDATE SET
+                     name      = excluded.name,
+                     fee_bps   = excluded.fee_bps,
+                     api_url   = excluded.api_url,
+                     last_seen = excluded.last_seen",
+                rusqlite::params![node_id, name, fee_bps as i64, api_url, now],
+            );
+        }
+    }
+
+    /// Return hosting nodes seen within the last 120 seconds, ordered by most recent.
+    pub fn list_hosting_nodes(&self) -> Vec<HostingNode> {
+        let cutoff = now_secs() as i64 - 120;
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            let mut stmt = match conn.0.prepare(
+                "SELECT hn.node_id, hn.name, hn.fee_bps, hn.api_url, hn.first_seen,
+                        hn.last_seen, COUNT(ha.agent_id) as hosted_count
+                 FROM hosting_nodes hn
+                 LEFT JOIN hosted_agents ha ON hn.node_id = ha.host_node_id
+                 WHERE hn.last_seen > ?1
+                 GROUP BY hn.node_id
+                 ORDER BY hn.last_seen DESC",
+            ) {
+                Ok(s)  => s,
+                Err(_) => return vec![],
+            };
+            let rows = stmt.query_map([cutoff], |row| {
+                Ok(HostingNode {
+                    node_id:      row.get(0)?,
+                    name:         row.get(1)?,
+                    fee_bps:      row.get::<_, i64>(2)? as u32,
+                    api_url:      row.get(3)?,
+                    first_seen:   row.get::<_, i64>(4)? as u64,
+                    last_seen:    row.get::<_, i64>(5)? as u64,
+                    hosted_count: row.get::<_, i64>(6)? as u32,
+                })
+            });
+            if let Ok(iter) = rows {
+                return iter.flatten().collect();
+            }
+        }
+        vec![]
+    }
+
+    /// Upsert a hosted-agent record.
+    #[allow(dead_code)]
+    pub fn register_hosted_agent(&self, agent_id: &str, host_node_id: &str) {
+        let now = now_secs() as i64;
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            let _ = conn.0.execute(
+                "INSERT INTO hosted_agents (agent_id, host_node_id, registered_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(agent_id, host_node_id) DO UPDATE SET registered_at = excluded.registered_at",
+                rusqlite::params![agent_id, host_node_id, now],
+            );
+        }
     }
 }  // end impl ReputationStore
 

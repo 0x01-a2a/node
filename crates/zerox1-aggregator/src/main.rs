@@ -44,6 +44,13 @@ struct Config {
     /// sleep-state tracking still work, but no pushes are sent).
     #[arg(long, env = "FCM_SERVER_KEY")]
     fcm_server_key: Option<String>,
+
+    /// Shared secret for POST /hosting/register.
+    /// Host nodes must include `Authorization: Bearer <secret>` in their
+    /// heartbeat requests. When absent, the endpoint is unauthenticated
+    /// (dev/local only — always set this in production).
+    #[arg(long, env = "AGGREGATOR_HOSTING_SECRET")]
+    hosting_secret: Option<String>,
 }
 
 #[tokio::main]
@@ -82,11 +89,19 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    if config.hosting_secret.is_none() {
+        tracing::warn!(
+            "No --hosting-secret set. POST /hosting/register is unauthenticated. \
+             Set AGGREGATOR_HOSTING_SECRET in production."
+        );
+    }
+
     let (activity_tx, _) = broadcast::channel::<ActivityEvent>(512);
 
     let state = AppState {
         store,
         ingest_secret:  config.ingest_secret,
+        hosting_secret: config.hosting_secret,
         fcm_server_key: config.fcm_server_key,
         http_client:    reqwest::Client::new(),
         activity_tx,
@@ -139,6 +154,9 @@ async fn main() -> anyhow::Result<()> {
         // ── Activity social feed ────────────────────────────────────────────
         .route("/activity",                            get(api::get_activity))
         .route("/ws/activity",                         get(api::ws_activity))
+        // ── Node hosting registry ───────────────────────────────────────────
+        .route("/hosting/register",                    post(api::post_hosting_register))
+        .route("/hosting/nodes",                       get(api::get_hosting_nodes))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state);
 

@@ -94,6 +94,8 @@ pub struct Zx01Node {
 
     /// Receives outbound envelope requests from the Agent API (POST /envelopes/send).
     outbound_rx: tokio::sync::mpsc::Receiver<OutboundRequest>,
+    /// Receives pre-signed envelopes from the hosted-agent API (POST /hosted/send).
+    hosted_outbound_rx: tokio::sync::mpsc::Receiver<zerox1_protocol::envelope::Envelope>,
 
     /// USDC mint pubkey — used for inactivity slash bounty payout.
     usdc_mint: Option<Pubkey>,
@@ -132,7 +134,11 @@ impl Zx01Node {
         let usdc_mint         = config.usdc_mint_pubkey().ok().flatten();
         let aggregator_url    = config.aggregator_url.clone();
         let aggregator_secret = config.aggregator_secret.clone();
-        let (api, outbound_rx) = ApiState::new(identity.agent_id, config.api_secret.clone());
+        let (api, outbound_rx, hosted_outbound_rx) = ApiState::new(
+            identity.agent_id,
+            config.api_secret.clone(),
+            config.hosting_fee_bps,
+        );
         let batch    = BatchAccumulator::new(epoch, 0);
         let logger   = EnvelopeLogger::new(log_dir, epoch);
 
@@ -166,6 +172,7 @@ impl Zx01Node {
             current_epoch: epoch,
             conversations: HashMap::new(),
             outbound_rx,
+            hosted_outbound_rx,
             usdc_mint,
             aggregator_url,
             aggregator_secret,
@@ -190,6 +197,49 @@ impl Zx01Node {
                     tokio::spawn(crate::api::serve(api, addr));
                 }
                 Err(e) => tracing::warn!("Invalid --api-addr '{addr_str}': {e}"),
+            }
+        }
+
+        // ── Hosting registration heartbeat ────────────────────────────────────
+        // When --hosting is set, advertise this node to the aggregator every 60s.
+        if self.config.hosting {
+            if let Some(ref agg_url) = self.config.aggregator_url.clone() {
+                let agg_url_log      = agg_url.clone();
+                let agg_url          = agg_url.clone();
+                let public_url       = self.config.public_api_url.clone().unwrap_or_default();
+                let node_id          = hex::encode(self.identity.agent_id);
+                let name             = self.config.agent_name.clone();
+                let fee_bps          = self.config.hosting_fee_bps;
+                let aggregator_secret = self.config.aggregator_secret.clone();
+
+                tokio::spawn(async move {
+                    let client = reqwest::Client::new();
+                    loop {
+                        let body = serde_json::json!({
+                            "node_id": node_id,
+                            "name":    name,
+                            "fee_bps": fee_bps,
+                            "api_url": public_url,
+                        });
+                        let mut req = client
+                            .post(format!("{agg_url}/hosting/register"))
+                            .json(&body);
+                        if let Some(ref secret) = aggregator_secret {
+                            req = req.header("Authorization", format!("Bearer {secret}"));
+                        }
+                        if let Err(e) = req.send().await {
+                            tracing::warn!("Hosting registration heartbeat failed: {e}");
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    }
+                });
+
+                tracing::info!("Hosting mode enabled — advertising to aggregator at {agg_url_log}");
+            } else {
+                tracing::warn!(
+                    "--hosting set but no --aggregator-url configured; \
+                     hosting registration heartbeat disabled."
+                );
             }
         }
 
@@ -257,6 +307,11 @@ impl Zx01Node {
                 }
                 Some(req) = self.outbound_rx.recv() => {
                     self.handle_outbound(swarm, req).await;
+                }
+                Some(env) = self.hosted_outbound_rx.recv() => {
+                    if let Err(e) = self.publish_envelope(swarm, &env) {
+                        tracing::warn!("Hosted outbound publish failed: {e}");
+                    }
                 }
                 _ = beacon_timer.tick() => {
                     self.send_beacon(swarm).await;

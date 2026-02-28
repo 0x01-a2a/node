@@ -92,16 +92,21 @@ jobs:
           key: cargo-android-arm64-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-android-arm64-
 
-      - name: Configure Android NDK linker
-        run: |
-          NDK="$ANDROID_NDK_LATEST_HOME"
-          LINKER="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
-          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$LINKER" >> "$GITHUB_ENV"
-          echo "CC_aarch64_linux_android=$LINKER" >> "$GITHUB_ENV"
+      - name: Cache cargo-ndk binary
+        id: cache-cargo-ndk
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-ndk
+          key: cargo-ndk-v3
+
+      - name: Install cargo-ndk
+        if: steps.cache-cargo-ndk.outputs.cache-hit != 'true'
+        run: cargo install cargo-ndk --locked --version "^3"
 
       - name: Build zerox1-node (Android ARM64)
-        run: cargo build --release -p zerox1-node --target aarch64-linux-android
+        run: cargo ndk --target aarch64-linux-android --platform 21 -- build --release -p zerox1-node
         env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
           CARGO_TERM_COLOR: always
 
       - name: Upload binary artifact

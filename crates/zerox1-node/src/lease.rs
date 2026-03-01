@@ -27,8 +27,6 @@ use zerox1_protocol::constants::GRACE_PERIOD_EPOCHS;
 
 use crate::constants;
 
-/// SPL Token program.
-
 /// Pay 7 epochs when renewing (one week).
 pub const RENEWAL_EPOCHS: u64 = 7;
 /// Trigger renewal when fewer than this many paid epochs remain.

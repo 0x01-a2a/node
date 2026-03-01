@@ -17,7 +17,7 @@ use solana_sdk::{
     transaction::Transaction,
 };
 
-use crate::{identity::AgentIdentity, kora::KoraClient, lease::get_ata, stake_lock::stake_lock_program_id};
+use crate::{identity::AgentIdentity, kora::KoraClient, lease::get_ata};
 
 // ============================================================================
 // Constants

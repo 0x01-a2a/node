@@ -80,6 +80,7 @@ fn anchor_discriminator(name: &str) -> [u8; 8] {
 // ============================================================================
 
 /// Call escrow `lock_payment` to initiate a payment to a provider.
+#[allow(clippy::too_many_arguments)]
 pub async fn lock_payment_onchain(
     rpc: &RpcClient,
     sk_bytes: [u8; 32],
@@ -223,6 +224,7 @@ pub struct ApprovePaymentAccounts<'a> {
     pub usdc: &'a Pubkey,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_lock_payment_ix(
     requester: &Pubkey,
     provider: &Pubkey,

@@ -78,7 +78,7 @@ impl Default for EntropyParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntropyVector {
     pub agent_id: [u8; 32],
-    pub epoch:    u64,
+    pub epoch: u64,
 
     /// Timing entropy in bits (inter-slot intervals, log-bucketed).
     /// `None` when fewer than `min_samples` messages were recorded.
@@ -111,9 +111,9 @@ pub struct EntropyVector {
 /// epoch — used for timing entropy (Ht).  If unavailable, pass an empty
 /// slice and Ht will be `None`.
 pub fn compute(
-    batch:         &BehaviorBatch,
+    batch: &BehaviorBatch,
     message_slots: &[u64],
-    params:        &EntropyParams,
+    params: &EntropyParams,
 ) -> EntropyVector {
     let ht = timing_entropy(message_slots, params.min_samples);
     let hb = bid_entropy(&batch.bid_values, params.min_samples);
@@ -124,7 +124,7 @@ pub fn compute(
 
     EntropyVector {
         agent_id: batch.agent_id,
-        epoch:    batch.epoch_number,
+        epoch: batch.epoch_number,
         ht,
         hb,
         hs,
@@ -197,13 +197,21 @@ fn weighted_anomaly(
     hb: Option<f64>,
     hs: Option<f64>,
     hv: Option<f64>,
-    p:  &EntropyParams,
+    p: &EntropyParams,
 ) -> f64 {
     let mut score = 0.0_f64;
-    if let Some(h) = ht { score += p.w_ht * (p.ht_threshold - h).max(0.0); }
-    if let Some(h) = hb { score += p.w_hb * (p.hb_threshold - h).max(0.0); }
-    if let Some(h) = hs { score += p.w_hs * (p.hs_threshold - h).max(0.0); }
-    if let Some(h) = hv { score += p.w_hv * (p.hv_threshold - h).max(0.0); }
+    if let Some(h) = ht {
+        score += p.w_ht * (p.ht_threshold - h).max(0.0);
+    }
+    if let Some(h) = hb {
+        score += p.w_hb * (p.hb_threshold - h).max(0.0);
+    }
+    if let Some(h) = hs {
+        score += p.w_hs * (p.hs_threshold - h).max(0.0);
+    }
+    if let Some(h) = hv {
+        score += p.w_hv * (p.hv_threshold - h).max(0.0);
+    }
     score
 }
 
@@ -219,7 +227,10 @@ fn shannon_entropy_bytes32(values: &[[u8; 32]]) -> f64 {
     }
     -counts
         .values()
-        .map(|&c| { let p = c as f64 / n; p * p.log2() })
+        .map(|&c| {
+            let p = c as f64 / n;
+            p * p.log2()
+        })
         .sum::<f64>()
 }
 
@@ -231,7 +242,10 @@ fn shannon_entropy_u32(values: &[u32]) -> f64 {
     }
     -counts
         .values()
-        .map(|&c| { let p = c as f64 / n; p * p.log2() })
+        .map(|&c| {
+            let p = c as f64 / n;
+            p * p.log2()
+        })
         .sum::<f64>()
 }
 
@@ -243,7 +257,10 @@ fn shannon_entropy_i32(values: &[i32]) -> f64 {
     }
     -counts
         .values()
-        .map(|&c| { let p = c as f64 / n; p * p.log2() })
+        .map(|&c| {
+            let p = c as f64 / n;
+            p * p.log2()
+        })
         .sum::<f64>()
 }
 
@@ -277,36 +294,36 @@ mod tests {
     use crate::batch::{FeedbackEvent, TaskSelection, TypedBid, VerifierAssignment};
 
     fn make_batch(
-        bids:       Vec<TypedBid>,
+        bids: Vec<TypedBid>,
         selections: Vec<TaskSelection>,
-        verifiers:  Vec<VerifierAssignment>,
+        verifiers: Vec<VerifierAssignment>,
     ) -> BehaviorBatch {
         BehaviorBatch {
-            agent_id:             [0u8; 32],
-            epoch_number:         1,
-            slot_start:           0,
-            slot_end:             1000,
-            message_count:        bids.len() as u32,
-            msg_type_counts:      [0u32; 16],
+            agent_id: [0u8; 32],
+            epoch_number: 1,
+            slot_start: 0,
+            slot_end: 1000,
+            message_count: bids.len() as u32,
+            msg_type_counts: [0u32; 16],
             unique_counterparties: 0,
-            tasks_completed:      0,
-            notarizations:        0,
-            disputes:             0,
-            bid_values:           bids,
-            task_selections:      selections,
-            verifier_ids:         verifiers,
-            feedback_events:      vec![FeedbackEvent {
-                conversation_id:      [0u8; 16],
-                from_agent:           [1u8; 32],
-                score:                80,
-                outcome:              2,
-                role:                 0,
-                slot:                 500,
+            tasks_completed: 0,
+            notarizations: 0,
+            disputes: 0,
+            bid_values: bids,
+            task_selections: selections,
+            verifier_ids: verifiers,
+            feedback_events: vec![FeedbackEvent {
+                conversation_id: [0u8; 16],
+                from_agent: [1u8; 32],
+                score: 80,
+                outcome: 2,
+                role: 0,
+                slot: 500,
                 sati_attestation_hash: [0u8; 32],
             }],
-            overflow:             false,
-            overflow_data_hash:   [0u8; 32],
-            log_merkle_root:      [0u8; 32],
+            overflow: false,
+            overflow_data_hash: [0u8; 32],
+            log_merkle_root: [0u8; 32],
         }
     }
 
@@ -316,7 +333,11 @@ mod tests {
     fn uniform_bytes32_has_max_entropy() {
         // 4 distinct agents → H = log2(4) = 2 bits
         let agents: Vec<[u8; 32]> = (0u8..4)
-            .map(|i| { let mut a = [0u8; 32]; a[0] = i; a })
+            .map(|i| {
+                let mut a = [0u8; 32];
+                a[0] = i;
+                a
+            })
             .collect();
         let h = shannon_entropy_bytes32(&agents);
         assert!((h - 2.0_f64).abs() < 1e-10, "h={h}");
@@ -343,10 +364,10 @@ mod tests {
 
     #[test]
     fn log2_bucket_i128_cases() {
-        assert_eq!(log2_bucket_i128(0),   -1);
-        assert_eq!(log2_bucket_i128(1),    0);
-        assert_eq!(log2_bucket_i128(-1),   0);
-        assert_eq!(log2_bucket_i128(4),    2);
+        assert_eq!(log2_bucket_i128(0), -1);
+        assert_eq!(log2_bucket_i128(1), 0);
+        assert_eq!(log2_bucket_i128(-1), 0);
+        assert_eq!(log2_bucket_i128(4), 2);
         assert_eq!(log2_bucket_i128(-128), 7); // |-128| = 128 = 2^7
     }
 
@@ -377,67 +398,95 @@ mod tests {
 
     #[test]
     fn regular_agent_has_high_anomaly() {
-        let cp  = [1u8; 32];
+        let cp = [1u8; 32];
         let ver = [2u8; 32];
 
-        let bids: Vec<TypedBid> = (0u8..8).map(|i| TypedBid {
-            conversation_id: [i; 16],
-            counterparty:    cp,
-            bid_value:       1_000_000,   // identical every time
-            slot:            i as u64 * 100,
-        }).collect();
+        let bids: Vec<TypedBid> = (0u8..8)
+            .map(|i| TypedBid {
+                conversation_id: [i; 16],
+                counterparty: cp,
+                bid_value: 1_000_000, // identical every time
+                slot: i as u64 * 100,
+            })
+            .collect();
 
-        let selections: Vec<TaskSelection> = (0u8..8).map(|i| TaskSelection {
-            conversation_id: [i; 16],
-            counterparty:    cp,           // always same agent
-            slot:            i as u64 * 100,
-        }).collect();
+        let selections: Vec<TaskSelection> = (0u8..8)
+            .map(|i| TaskSelection {
+                conversation_id: [i; 16],
+                counterparty: cp, // always same agent
+                slot: i as u64 * 100,
+            })
+            .collect();
 
-        let verifiers: Vec<VerifierAssignment> = (0u8..8).map(|i| VerifierAssignment {
-            conversation_id: [i; 16],
-            verifier_id:     ver,          // always same notary
-            slot:            i as u64 * 100,
-        }).collect();
+        let verifiers: Vec<VerifierAssignment> = (0u8..8)
+            .map(|i| VerifierAssignment {
+                conversation_id: [i; 16],
+                verifier_id: ver, // always same notary
+                slot: i as u64 * 100,
+            })
+            .collect();
 
-        let batch  = make_batch(bids, selections, verifiers);
+        let batch = make_batch(bids, selections, verifiers);
         let slots: Vec<u64> = (0u64..8).map(|i| i * 100).collect(); // regular spacing
-        let ev     = compute(&batch, &slots, &EntropyParams::default());
+        let ev = compute(&batch, &slots, &EntropyParams::default());
 
         assert_eq!(ev.ht, Some(0.0), "timing entropy should be 0");
         assert_eq!(ev.hb, Some(0.0), "bid entropy should be 0");
         assert_eq!(ev.hs, Some(0.0), "selection entropy should be 0");
         assert_eq!(ev.hv, Some(0.0), "verifier entropy should be 0");
-        assert!(ev.anomaly > 0.0, "anomaly should be positive, got {}", ev.anomaly);
+        assert!(
+            ev.anomaly > 0.0,
+            "anomaly should be positive, got {}",
+            ev.anomaly
+        );
     }
 
     #[test]
     fn diverse_agent_has_low_anomaly() {
         // Build bids across 8 distinct log-scale magnitudes.
-        let bids: Vec<TypedBid> = (0u8..8).map(|i| TypedBid {
-            conversation_id: [i; 16],
-            counterparty:    { let mut a = [0u8; 32]; a[0] = i; a },
-            bid_value:       1i128 << (i * 4), // very different magnitudes
-            slot:            i as u64,
-        }).collect();
+        let bids: Vec<TypedBid> = (0u8..8)
+            .map(|i| TypedBid {
+                conversation_id: [i; 16],
+                counterparty: {
+                    let mut a = [0u8; 32];
+                    a[0] = i;
+                    a
+                },
+                bid_value: 1i128 << (i * 4), // very different magnitudes
+                slot: i as u64,
+            })
+            .collect();
 
         // 8 distinct counterparties.
-        let selections: Vec<TaskSelection> = (0u8..8).map(|i| TaskSelection {
-            conversation_id: [i; 16],
-            counterparty:    { let mut a = [0u8; 32]; a[0] = i; a },
-            slot:            i as u64,
-        }).collect();
+        let selections: Vec<TaskSelection> = (0u8..8)
+            .map(|i| TaskSelection {
+                conversation_id: [i; 16],
+                counterparty: {
+                    let mut a = [0u8; 32];
+                    a[0] = i;
+                    a
+                },
+                slot: i as u64,
+            })
+            .collect();
 
         // 8 distinct verifiers.
-        let verifiers: Vec<VerifierAssignment> = (0u8..8).map(|i| VerifierAssignment {
-            conversation_id: [i; 16],
-            verifier_id:     { let mut a = [0u8; 32]; a[0] = i; a },
-            slot:            i as u64,
-        }).collect();
+        let verifiers: Vec<VerifierAssignment> = (0u8..8)
+            .map(|i| VerifierAssignment {
+                conversation_id: [i; 16],
+                verifier_id: {
+                    let mut a = [0u8; 32];
+                    a[0] = i;
+                    a
+                },
+                slot: i as u64,
+            })
+            .collect();
 
         let batch = make_batch(bids, selections, verifiers);
         // Very irregular slot spacing → high timing entropy.
         let slots: Vec<u64> = vec![0, 1, 3, 7, 15, 31, 63, 127];
-        let ev    = compute(&batch, &slots, &EntropyParams::default());
+        let ev = compute(&batch, &slots, &EntropyParams::default());
 
         // All H components should be at or above thresholds → near-zero anomaly.
         assert!(ev.anomaly < 0.1, "expected low anomaly, got {}", ev.anomaly);

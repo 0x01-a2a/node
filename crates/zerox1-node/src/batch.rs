@@ -37,21 +37,21 @@ pub fn now_micros() -> u64 {
 /// Accumulates per-epoch economic data for daily BehaviorBatch construction (doc 5, §8.2).
 pub struct BatchAccumulator {
     pub epoch_number: u64,
-    pub slot_start:   u64,
+    pub slot_start: u64,
 
     // Activity counters
-    pub message_count:   u32,
+    pub message_count: u32,
     pub msg_type_counts: [u32; 16],
     unique_counterparties: HashSet<[u8; 32]>,
-    pub tasks_completed: u32,   // VERDICT received
-    pub notarizations:   u32,   // VERDICT sent
-    pub disputes:        u32,
+    pub tasks_completed: u32, // VERDICT received
+    pub notarizations: u32,   // VERDICT sent
+    pub disputes: u32,
 
     // Economic arrays (challengeable)
-    pub bids:                 Vec<TypedBid>,
-    pub task_selections:      Vec<TaskSelection>,
+    pub bids: Vec<TypedBid>,
+    pub task_selections: Vec<TaskSelection>,
     pub verifier_assignments: Vec<VerifierAssignment>,
-    pub feedback_events:      Vec<FeedbackEvent>,
+    pub feedback_events: Vec<FeedbackEvent>,
 
     /// Solana slot of every message sent/received — used for timing entropy (Ht).
     pub message_slots: Vec<u64>,
@@ -123,8 +123,8 @@ impl BatchAccumulator {
     /// pass it to `zerox1_protocol::entropy::compute` for timing entropy (Ht).
     pub fn finalize(
         &mut self,
-        agent_id:    [u8; 32],
-        slot_end:    u64,
+        agent_id: [u8; 32],
+        slot_end: u64,
         leaf_hashes: &[[u8; 32]],
     ) -> (BehaviorBatch, Vec<u64>) {
         let log_merkle_root = if leaf_hashes.is_empty() {
@@ -135,21 +135,21 @@ impl BatchAccumulator {
 
         let mut batch = BehaviorBatch {
             agent_id,
-            epoch_number:          self.epoch_number,
-            slot_start:            self.slot_start,
+            epoch_number: self.epoch_number,
+            slot_start: self.slot_start,
             slot_end,
-            message_count:         self.message_count,
-            msg_type_counts:       self.msg_type_counts,
+            message_count: self.message_count,
+            msg_type_counts: self.msg_type_counts,
             unique_counterparties: self.unique_counterparties.len() as u32,
-            tasks_completed:       self.tasks_completed,
-            notarizations:         self.notarizations,
-            disputes:              self.disputes,
-            bid_values:            std::mem::take(&mut self.bids),
-            task_selections:       std::mem::take(&mut self.task_selections),
-            verifier_ids:          std::mem::take(&mut self.verifier_assignments),
-            feedback_events:       std::mem::take(&mut self.feedback_events),
-            overflow:              false,
-            overflow_data_hash:    [0u8; 32],
+            tasks_completed: self.tasks_completed,
+            notarizations: self.notarizations,
+            disputes: self.disputes,
+            bid_values: std::mem::take(&mut self.bids),
+            task_selections: std::mem::take(&mut self.task_selections),
+            verifier_ids: std::mem::take(&mut self.verifier_assignments),
+            feedback_events: std::mem::take(&mut self.feedback_events),
+            overflow: false,
+            overflow_data_hash: [0u8; 32],
             log_merkle_root,
         };
 

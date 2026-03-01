@@ -22,12 +22,16 @@ use solana_sdk::signature::{read_keypair_file, Keypair};
 
 #[derive(Parser, Debug)]
 #[command(
-    name  = "zerox1-challenger",
-    about = "Automated anomaly monitor — accumulates challenge evidence for high-anomaly agents",
+    name = "zerox1-challenger",
+    about = "Automated anomaly monitor — accumulates challenge evidence for high-anomaly agents"
 )]
 pub struct Cli {
     /// URL of the zerox1 aggregator API.
-    #[arg(long, default_value = "https://api.0x01.world", env = "ZX01_AGGREGATOR_URL")]
+    #[arg(
+        long,
+        default_value = "https://api.0x01.world",
+        env = "ZX01_AGGREGATOR_URL"
+    )]
     pub aggregator_url: String,
 
     /// Bearer token for the aggregator's ingest secret (read-only endpoints don't require it,
@@ -62,7 +66,11 @@ pub struct Cli {
     pub leaderboard_limit: usize,
 
     /// RPC URL for submitting challenge transactions.
-    #[arg(long, default_value = "https://api.devnet.solana.com", env = "ZX01_RPC_URL")]
+    #[arg(
+        long,
+        default_value = "https://api.devnet.solana.com",
+        env = "ZX01_RPC_URL"
+    )]
     pub rpc_url: String,
 
     /// Path to the challenger's Solana keypair file for paying gas and staking USDC.
@@ -101,15 +109,19 @@ async fn main() -> anyhow::Result<()> {
         cli.consecutive_epochs,
     );
 
-    let client  = reqwest::Client::new();
+    let client = reqwest::Client::new();
     let mut mon = monitor::AgentMonitor::new(cli.anomaly_threshold, cli.consecutive_epochs);
 
     let mut keypair_signer: Option<Keypair> = None;
     if cli.auto_submit {
         if let Some(ref path) = cli.keypair {
-            tracing::info!("Auto-submit enabled. Loading keypair from {}", path.display());
+            tracing::info!(
+                "Auto-submit enabled. Loading keypair from {}",
+                path.display()
+            );
             keypair_signer = Some(
-                read_keypair_file(path).map_err(|e| anyhow::anyhow!("Failed to read keypair: {}", e))?
+                read_keypair_file(path)
+                    .map_err(|e| anyhow::anyhow!("Failed to read keypair: {}", e))?,
             );
         } else {
             tracing::error!("--auto-submit requires --keypair path");
@@ -118,9 +130,17 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let rpc_client = RpcClient::new(cli.rpc_url.clone());
-    
+
     loop {
-        if let Err(e) = monitor::run_cycle(&cli, &client, &mut mon, &rpc_client, keypair_signer.as_ref()).await {
+        if let Err(e) = monitor::run_cycle(
+            &cli,
+            &client,
+            &mut mon,
+            &rpc_client,
+            keypair_signer.as_ref(),
+        )
+        .await
+        {
             tracing::warn!("Poll cycle failed: {e}");
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(cli.poll_interval_secs)).await;

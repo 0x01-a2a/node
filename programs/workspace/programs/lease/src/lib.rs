@@ -3,8 +3,7 @@ use anchor_spl::{
     associated_token::AssociatedToken,
     token::{self, Mint, Token, TokenAccount, Transfer},
     token_interface::{
-        Mint as MintInterface, TokenAccount as TokenAccountInterface,
-        TokenInterface,
+        Mint as MintInterface, TokenAccount as TokenAccountInterface, TokenInterface,
     },
 };
 
@@ -53,22 +52,22 @@ pub mod lease {
 
         let current_epoch = clock.unix_timestamp as u64 / EPOCH_LENGTH_SECS;
 
-        lease.version            = 1;
-        lease.agent_id           = args.agent_id;
-        lease.owner              = ctx.accounts.owner.key();
+        lease.version = 1;
+        lease.agent_id = args.agent_id;
+        lease.owner = ctx.accounts.owner.key();
         lease.paid_through_epoch = current_epoch + 1;
-        lease.last_paid_slot     = clock.slot;
-        lease.current_epoch      = current_epoch;
-        lease.in_grace_period    = false;
-        lease.deactivated        = false;
-        lease.bump               = ctx.bumps.lease_account;
+        lease.last_paid_slot = clock.slot;
+        lease.current_epoch = current_epoch;
+        lease.in_grace_period = false;
+        lease.deactivated = false;
+        lease.bump = ctx.bumps.lease_account;
 
         // Transfer 1 epoch of USDC from owner's ATA to protocol treasury.
         let cpi_ctx = CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
-                from:      ctx.accounts.owner_usdc.to_account_info(),
-                to:        ctx.accounts.treasury_usdc.to_account_info(),
+                from: ctx.accounts.owner_usdc.to_account_info(),
+                to: ctx.accounts.treasury_usdc.to_account_info(),
                 authority: ctx.accounts.owner.to_account_info(),
             },
         );
@@ -102,15 +101,15 @@ pub mod lease {
         let cpi_ctx = CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
-                from:      ctx.accounts.owner_usdc.to_account_info(),
-                to:        ctx.accounts.treasury_usdc.to_account_info(),
+                from: ctx.accounts.owner_usdc.to_account_info(),
+                to: ctx.accounts.treasury_usdc.to_account_info(),
                 authority: ctx.accounts.owner.to_account_info(),
             },
         );
         token::transfer(cpi_ctx, total_cost)?;
 
         lease.paid_through_epoch += args.n_epochs;
-        lease.last_paid_slot      = clock.slot;
+        lease.last_paid_slot = clock.slot;
 
         // Clear grace period if they paid back up.
         if lease.in_grace_period && lease.paid_through_epoch > lease.current_epoch {
@@ -120,8 +119,8 @@ pub mod lease {
         for i in 0..args.n_epochs {
             emit!(LeasePaid {
                 agent_id: lease.agent_id,
-                epoch:    lease.paid_through_epoch - args.n_epochs + i,
-                slot:     clock.slot,
+                epoch: lease.paid_through_epoch - args.n_epochs + i,
+                slot: clock.slot,
             });
         }
 
@@ -150,12 +149,18 @@ pub mod lease {
         let epochs_behind = current_epoch - lease.paid_through_epoch;
 
         if epochs_behind > GRACE_PERIOD_EPOCHS {
-            lease.deactivated     = true;
+            lease.deactivated = true;
             lease.in_grace_period = false;
-            emit!(LeaseExpired { agent_id: lease.agent_id, epoch: current_epoch });
+            emit!(LeaseExpired {
+                agent_id: lease.agent_id,
+                epoch: current_epoch
+            });
         } else if !lease.in_grace_period {
             lease.in_grace_period = true;
-            emit!(GracePeriodEntered { agent_id: lease.agent_id, epoch: current_epoch });
+            emit!(GracePeriodEntered {
+                agent_id: lease.agent_id,
+                epoch: current_epoch
+            });
         }
 
         Ok(())
@@ -225,10 +230,11 @@ pub struct InitLease<'info> {
 
     /// Token program for SATI NFTs (Token-2022).
     pub sati_token_program: Interface<'info, TokenInterface>,
-    pub usdc_mint:                Account<'info, Mint>,
-    pub token_program:            Program<'info, Token>,
+    #[account(address = USDC_MINT)]
+    pub usdc_mint: Account<'info, Mint>,
+    pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
-    pub system_program:           Program<'info, System>,
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
@@ -267,8 +273,8 @@ pub struct PayLease<'info> {
     pub treasury: UncheckedAccount<'info>,
 
     #[account(address = USDC_MINT)]
-    pub usdc_mint:                Account<'info, Mint>,
-    pub token_program:            Program<'info, Token>,
+    pub usdc_mint: Account<'info, Mint>,
+    pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
 }
 
@@ -292,15 +298,15 @@ pub struct TickLease<'info> {
 /// PDA: seeds = ["lease", agent_id]
 #[account]
 pub struct LeaseAccount {
-    pub version:            u8,
-    pub agent_id:           [u8; 32],
-    pub owner:              Pubkey,
+    pub version: u8,
+    pub agent_id: [u8; 32],
+    pub owner: Pubkey,
     pub paid_through_epoch: u64,
-    pub last_paid_slot:     u64,
-    pub current_epoch:      u64,
-    pub in_grace_period:    bool,
-    pub deactivated:        bool,
-    pub bump:               u8,
+    pub last_paid_slot: u64,
+    pub current_epoch: u64,
+    pub in_grace_period: bool,
+    pub deactivated: bool,
+    pub bump: u8,
 }
 
 impl LeaseAccount {
@@ -329,27 +335,27 @@ pub struct PayLeaseArgs {
 #[event]
 pub struct LeaseInitialized {
     pub agent_id: [u8; 32],
-    pub owner:    Pubkey,
-    pub slot:     u64,
+    pub owner: Pubkey,
+    pub slot: u64,
 }
 
 #[event]
 pub struct LeasePaid {
     pub agent_id: [u8; 32],
-    pub epoch:    u64,
-    pub slot:     u64,
+    pub epoch: u64,
+    pub slot: u64,
 }
 
 #[event]
 pub struct GracePeriodEntered {
     pub agent_id: [u8; 32],
-    pub epoch:    u64,
+    pub epoch: u64,
 }
 
 #[event]
 pub struct LeaseExpired {
     pub agent_id: [u8; 32],
-    pub epoch:    u64,
+    pub epoch: u64,
 }
 
 // ============================================================================

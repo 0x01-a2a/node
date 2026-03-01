@@ -1,12 +1,11 @@
-use std::io;
-use std::time::Duration;
 use async_trait::async_trait;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use libp2p::{
-    autonat, dcutr, gossipsub, identify, kad, mdns, noise, relay, request_response, tcp, yamux,
-    swarm::NetworkBehaviour,
-    StreamProtocol,
+    autonat, dcutr, gossipsub, identify, kad, mdns, noise, relay, request_response,
+    swarm::NetworkBehaviour, tcp, yamux, StreamProtocol,
 };
+use std::io;
+use std::time::Duration;
 use zerox1_protocol::constants::MAX_MESSAGE_SIZE;
 
 /// libp2p protocol string for bilateral 0x01 envelopes.
@@ -18,24 +17,24 @@ pub const BILATERAL_PROTOCOL: &str = "/0x01/bilateral/1.0.0";
 
 #[derive(NetworkBehaviour)]
 pub struct Zx01Behaviour {
-    pub gossipsub:        gossipsub::Behaviour,
-    pub kademlia:         kad::Behaviour<kad::store::MemoryStore>,
-    pub mdns:             mdns::tokio::Behaviour,
-    pub identify:         identify::Behaviour,
+    pub gossipsub: gossipsub::Behaviour,
+    pub kademlia: kad::Behaviour<kad::store::MemoryStore>,
+    pub mdns: mdns::tokio::Behaviour,
+    pub identify: identify::Behaviour,
     pub request_response: request_response::Behaviour<Zx01Codec>,
     /// Relay server — lets other nodes use this node as a relay.
     /// Active (max_reservations > 0) only when --relay-server is set.
     /// On regular nodes the limits are zeroed so no circuits are accepted.
-    pub relay_server:     relay::Behaviour,
+    pub relay_server: relay::Behaviour,
     /// Relay client — lets this node project its presence through a relay.
     /// Always active; used by mobile nodes to receive connections via relay.
-    pub relay_client:     relay::client::Behaviour,
+    pub relay_client: relay::client::Behaviour,
     /// Direct Connection Upgrade Through Relay — upgrades relay connections
     /// to direct connections when both peers are reachable via hole-punching.
-    pub dcutr:            dcutr::Behaviour,
+    pub dcutr: dcutr::Behaviour,
     /// AutoNAT — probes external reachability; helps classify the node as
     /// publicly reachable, behind NAT, or unknown.
-    pub autonat:          autonat::Behaviour,
+    pub autonat: autonat::Behaviour,
 }
 
 // ============================================================================
@@ -51,30 +50,48 @@ pub struct Zx01Codec;
 #[async_trait]
 impl request_response::Codec for Zx01Codec {
     type Protocol = StreamProtocol;
-    type Request  = Vec<u8>;
+    type Request = Vec<u8>;
     type Response = Vec<u8>;
 
-    async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T)
-        -> io::Result<Self::Request>
-    where T: AsyncRead + Unpin + Send {
+    async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T) -> io::Result<Self::Request>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
         read_framed(io, MAX_MESSAGE_SIZE).await
     }
 
-    async fn read_response<T>(&mut self, _: &Self::Protocol, io: &mut T)
-        -> io::Result<Self::Response>
-    where T: AsyncRead + Unpin + Send {
+    async fn read_response<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+    ) -> io::Result<Self::Response>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
         read_framed(io, 64).await
     }
 
-    async fn write_request<T>(&mut self, _: &Self::Protocol, io: &mut T, req: Self::Request)
-        -> io::Result<()>
-    where T: AsyncWrite + Unpin + Send {
+    async fn write_request<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+        req: Self::Request,
+    ) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
         write_framed(io, &req).await
     }
 
-    async fn write_response<T>(&mut self, _: &Self::Protocol, io: &mut T, res: Self::Response)
-        -> io::Result<()>
-    where T: AsyncWrite + Unpin + Send {
+    async fn write_response<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+        res: Self::Response,
+    ) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
         write_framed(io, &res).await
     }
 }
@@ -84,7 +101,10 @@ async fn read_framed<T: AsyncRead + Unpin>(io: &mut T, max: usize) -> io::Result
     io.read_exact(&mut len_buf).await?;
     let len = u32::from_le_bytes(len_buf) as usize;
     if len > max {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "frame exceeds limit"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "frame exceeds limit",
+        ));
     }
     let mut buf = vec![0u8; len];
     io.read_exact(&mut buf).await?;
@@ -115,7 +135,11 @@ pub fn build_swarm(
 ) -> anyhow::Result<libp2p::Swarm<Zx01Behaviour>> {
     let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
-        .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )?
         .with_quic()
         .with_dns()?
         .with_relay_client(noise::Config::new, yamux::Config::default)?
@@ -135,12 +159,10 @@ pub fn build_swarm(
             )
             .expect("gossipsub init");
 
-            let mut kademlia =
-                kad::Behaviour::new(peer_id, kad::store::MemoryStore::new(peer_id));
+            let mut kademlia = kad::Behaviour::new(peer_id, kad::store::MemoryStore::new(peer_id));
             kademlia.set_mode(Some(kad::Mode::Server));
 
-            let mdns =
-                mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)
+            let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync + 'static>)?;
 
             let identify = identify::Behaviour::new(identify::Config::new(
@@ -168,7 +190,7 @@ pub fn build_swarm(
             };
             let relay_server = relay::Behaviour::new(peer_id, relay_cfg);
 
-            let dcutr   = dcutr::Behaviour::new(peer_id);
+            let dcutr = dcutr::Behaviour::new(peer_id);
             let autonat = autonat::Behaviour::new(peer_id, autonat::Config::default());
 
             Ok(Zx01Behaviour {
@@ -206,7 +228,10 @@ pub fn build_swarm(
                 None
             }
         }) {
-            swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+            swarm
+                .behaviour_mut()
+                .kademlia
+                .add_address(&peer_id, addr.clone());
         }
     }
 
@@ -217,7 +242,7 @@ pub fn build_swarm(
     // TCP and UDP can share the same port number without conflict.
     if let Some(quic_addr) = to_quic_addr(&listen_addr) {
         match swarm.listen_on(quic_addr.clone()) {
-            Ok(_)  => tracing::info!("Also listening on QUIC: {quic_addr}"),
+            Ok(_) => tracing::info!("Also listening on QUIC: {quic_addr}"),
             Err(e) => tracing::warn!("QUIC listen failed for {quic_addr}: {e}"),
         }
     }
@@ -243,5 +268,9 @@ fn to_quic_addr(tcp_addr: &libp2p::Multiaddr) -> Option<libp2p::Multiaddr> {
             other => new_addr.push(other),
         }
     }
-    if found { Some(new_addr) } else { None }
+    if found {
+        Some(new_addr)
+    } else {
+        None
+    }
 }

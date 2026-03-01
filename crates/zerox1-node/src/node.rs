@@ -5,28 +5,30 @@ use std::time::Duration;
 
 use base64::Engine as _;
 
-use zerox1_sati_client::client::SatiClient;
-use ed25519_dalek::{VerifyingKey, Signer};
+use ed25519_dalek::{Signer, VerifyingKey};
 use futures::StreamExt;
 use libp2p::{
-    autonat, dcutr, gossipsub, identify, kad, mdns, relay, request_response,
-    swarm::SwarmEvent, PeerId, Swarm,
+    autonat, dcutr, gossipsub, identify, kad, mdns, relay, request_response, swarm::SwarmEvent,
+    PeerId, Swarm,
 };
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
+use zerox1_sati_client::client::SatiClient;
 
 use zerox1_protocol::{
     batch::{FeedbackEvent, TaskSelection, TypedBid, VerifierAssignment},
+    constants::{TOPIC_BROADCAST, TOPIC_NOTARY, TOPIC_REPUTATION},
     envelope::{Envelope, BROADCAST_RECIPIENT},
     message::MsgType,
     payload::FeedbackPayload,
-    constants::{TOPIC_BROADCAST, TOPIC_NOTARY, TOPIC_REPUTATION},
 };
 
 use solana_sdk::pubkey::Pubkey;
 
 use crate::{
-    api::{ApiEvent, ApiState, BatchSnapshot, OutboundRequest, PeerSnapshot, ReputationSnapshot,
-          SentConfirmation},
+    api::{
+        ApiEvent, ApiState, BatchSnapshot, OutboundRequest, PeerSnapshot, ReputationSnapshot,
+        SentConfirmation,
+    },
     batch::{current_epoch, now_micros, BatchAccumulator},
     config::Config,
     identity::AgentIdentity,
@@ -49,9 +51,9 @@ use crate::{
 // NOTARIZE_ASSIGN: [verifier_agent_id(32)][opaque...]
 // ============================================================================
 
-const BEACON_VK_OFFSET:                usize = 32;
-const BEACON_NAME_OFFSET:              usize = 64;
-const BID_VALUE_LEN:                   usize = 16;
+const BEACON_VK_OFFSET: usize = 32;
+const BEACON_NAME_OFFSET: usize = 64;
+const BID_VALUE_LEN: usize = 16;
 const NOTARIZE_ASSIGN_VERIFIER_OFFSET: usize = 32;
 
 /// Maximum bytes read from BEACON name field.
@@ -68,15 +70,15 @@ const MAX_PENDING_BROADCASTS: usize = 20;
 // ============================================================================
 
 pub struct Zx01Node {
-    pub config:      Config,
-    pub identity:    AgentIdentity,
+    pub config: Config,
+    pub identity: AgentIdentity,
     pub peer_states: PeerStateMap,
-    pub reputation:  ReputationTracker,
-    pub logger:      EnvelopeLogger,
-    pub batch:       BatchAccumulator,
+    pub reputation: ReputationTracker,
+    pub logger: EnvelopeLogger,
+    pub batch: BatchAccumulator,
 
     /// Nonblocking Solana RPC client (slot polling + batch submission).
-    rpc:  RpcClient,
+    rpc: RpcClient,
     /// SATI registration checker.
     sati: SatiClient,
     /// Kora paymaster client — present when --kora-url is configured.
@@ -89,8 +91,8 @@ pub struct Zx01Node {
     /// --api-addr is configured).
     api: ApiState,
 
-    nonce:         u64,
-    current_slot:  u64,
+    nonce: u64,
+    current_slot: u64,
     current_epoch: u64,
     conversations: HashMap<[u8; 16], PeerId>,
     conversation_lru: VecDeque<[u8; 16]>,
@@ -122,28 +124,32 @@ pub struct Zx01Node {
 }
 
 impl Zx01Node {
-    pub fn new(config: Config, identity: AgentIdentity, bootstrap_peers: Vec<libp2p::Multiaddr>) -> Self {
-        let epoch          = current_epoch();
-        let log_dir        = config.log_dir.clone();
-        let rpc            = RpcClient::new(config.rpc_url.clone());
-        let sati           = SatiClient::new(&config.rpc_url);
+    pub fn new(
+        config: Config,
+        identity: AgentIdentity,
+        bootstrap_peers: Vec<libp2p::Multiaddr>,
+    ) -> Self {
+        let epoch = current_epoch();
+        let log_dir = config.log_dir.clone();
+        let rpc = RpcClient::new(config.rpc_url.clone());
+        let sati = SatiClient::new(&config.rpc_url);
         // "none" disables Kora entirely; otherwise use the configured URL.
         let kora = if config.kora_url.eq_ignore_ascii_case("none") {
             None
         } else {
             Some(KoraClient::new(&config.kora_url))
         };
-        let dev_mode       = config.sati_mint.is_none();
-        let usdc_mint         = config.usdc_mint_pubkey().ok().flatten();
-        let aggregator_url    = validated_aggregator_url(config.aggregator_url.clone());
+        let dev_mode = config.sati_mint.is_none();
+        let usdc_mint = config.usdc_mint_pubkey().ok().flatten();
+        let aggregator_url = validated_aggregator_url(config.aggregator_url.clone());
         let aggregator_secret = config.aggregator_secret.clone();
         let (api, outbound_rx, hosted_outbound_rx) = ApiState::new(
             identity.agent_id,
             config.api_secret.clone(),
             config.hosting_fee_bps,
         );
-        let batch    = BatchAccumulator::new(epoch, 0);
-        let logger   = EnvelopeLogger::new(log_dir, epoch);
+        let batch = BatchAccumulator::new(epoch, 0);
+        let logger = EnvelopeLogger::new(log_dir, epoch);
 
         if dev_mode {
             tracing::warn!(
@@ -161,8 +167,8 @@ impl Zx01Node {
         Self {
             config,
             identity,
-            peer_states:   PeerStateMap::new(),
-            reputation:    ReputationTracker::new(),
+            peer_states: PeerStateMap::new(),
+            reputation: ReputationTracker::new(),
             logger,
             batch,
             rpc,
@@ -170,8 +176,8 @@ impl Zx01Node {
             kora,
             dev_mode,
             api,
-            nonce:         0,
-            current_slot:  0,
+            nonce: 0,
+            current_slot: 0,
             current_epoch: epoch,
             conversations: HashMap::new(),
             conversation_lru: VecDeque::new(),
@@ -182,7 +188,7 @@ impl Zx01Node {
             aggregator_secret,
             http_client: reqwest::Client::new(),
             rate_limiter: std::collections::HashMap::new(),
-            notary_pool:        HashMap::new(),
+            notary_pool: HashMap::new(),
             bootstrap_peers,
             pending_broadcasts: Vec::new(),
         }
@@ -208,14 +214,14 @@ impl Zx01Node {
         // When --hosting is set, advertise this node to the aggregator every 60s.
         if self.config.hosting {
             if let Some(ref agg_url) = self.aggregator_url.clone() {
-                let agg_url_log      = agg_url.clone();
-                let agg_url          = agg_url.clone();
-                let public_url       = self.config.public_api_url.clone().unwrap_or_default();
-                let node_id          = hex::encode(self.identity.agent_id);
-                let name             = self.config.agent_name.clone();
-                let fee_bps          = self.config.hosting_fee_bps;
+                let agg_url_log = agg_url.clone();
+                let agg_url = agg_url.clone();
+                let public_url = self.config.public_api_url.clone().unwrap_or_default();
+                let node_id = hex::encode(self.identity.agent_id);
+                let name = self.config.agent_name.clone();
+                let fee_bps = self.config.hosting_fee_bps;
                 let aggregator_secret = self.config.aggregator_secret.clone();
-                let signing_key       = self.identity.signing_key.clone();
+                let signing_key = self.identity.signing_key.clone();
 
                 tokio::spawn(async move {
                     let client = reqwest::Client::new();
@@ -239,7 +245,7 @@ impl Zx01Node {
                             .post(format!("{agg_url}/hosting/register"))
                             .header("X-Signature", hex::encode(signature.to_bytes()))
                             .body(body_bytes);
-                        
+
                         if let Some(ref secret) = aggregator_secret {
                             req = req.header("Authorization", format!("Bearer {secret}"));
                         }
@@ -266,39 +272,52 @@ impl Zx01Node {
         // ── FCM registration (phone-as-node) ─────────────────────────────────
         // If a Firebase device token is configured, register it with the
         // aggregator and pull any messages that arrived while sleeping.
-        if let (Some(ref fcm_token), Some(ref agg_url)) = (
-            self.config.fcm_token.clone(),
-            self.aggregator_url.clone(),
-        ) {
+        if let (Some(ref fcm_token), Some(ref agg_url)) =
+            (self.config.fcm_token.clone(), self.aggregator_url.clone())
+        {
             let agent_id_hex = hex::encode(self.identity.agent_id);
             // Register token.
             if let Err(e) = push_notary::register_fcm_token(
-                agg_url, &agent_id_hex, fcm_token, &self.identity.signing_key, &self.http_client,
-            ).await {
+                agg_url,
+                &agent_id_hex,
+                fcm_token,
+                &self.identity.signing_key,
+                &self.http_client,
+            )
+            .await
+            {
                 tracing::warn!("FCM token registration failed: {e}");
             } else {
                 tracing::info!("FCM token registered with aggregator.");
             }
             // Mark this node as awake.
             if let Err(e) = push_notary::set_sleep_mode(
-                agg_url, &agent_id_hex, false, &self.identity.signing_key, &self.http_client,
-            ).await {
+                agg_url,
+                &agent_id_hex,
+                false,
+                &self.identity.signing_key,
+                &self.http_client,
+            )
+            .await
+            {
                 tracing::warn!("FCM wake notification failed: {e}");
             }
             // Pull any messages held while sleeping.
             match push_notary::pull_pending_messages(
-                agg_url, &agent_id_hex, &self.identity.signing_key, &self.http_client,
-            ).await {
+                agg_url,
+                &agent_id_hex,
+                &self.identity.signing_key,
+                &self.http_client,
+            )
+            .await
+            {
                 Ok::<Vec<push_notary::PendingMessage>, _>(msgs) if !msgs.is_empty() => {
                     tracing::info!(
                         "{} pending message(s) retrieved from aggregator while sleeping.",
                         msgs.len()
                     );
                     for msg in &msgs {
-                        tracing::info!(
-                            "Pending [{}] from {} — {}",
-                            msg.msg_type, msg.from, msg.id
-                        );
+                        tracing::info!("Pending [{}] from {} — {}", msg.msg_type, msg.from, msg.id);
                     }
                 }
                 Ok(_) => {}
@@ -306,11 +325,11 @@ impl Zx01Node {
             }
         }
 
-        let mut beacon_timer    = tokio::time::interval(Duration::from_secs(30));
-        let mut epoch_timer     = tokio::time::interval(Duration::from_secs(30));
-        let mut slot_timer      = tokio::time::interval(Duration::from_millis(400));
+        let mut beacon_timer = tokio::time::interval(Duration::from_secs(30));
+        let mut epoch_timer = tokio::time::interval(Duration::from_secs(30));
+        let mut slot_timer = tokio::time::interval(Duration::from_millis(400));
         // Inactivity check: once per hour is sufficient; skip in dev mode.
-        let mut inactive_timer  = tokio::time::interval(Duration::from_secs(3_600));
+        let mut inactive_timer = tokio::time::interval(Duration::from_secs(3_600));
         // Reconnect check: if we have no peers, redial bootstrap nodes.
         let mut reconnect_timer = tokio::time::interval(Duration::from_secs(60));
 
@@ -436,11 +455,9 @@ impl Zx01Node {
     }
 
     async fn renew_own_lease(&mut self) {
-        if let Err(e) = lease::pay_lease_onchain(
-            &self.rpc,
-            &self.identity,
-            self.kora.as_ref(),
-        ).await {
+        if let Err(e) =
+            lease::pay_lease_onchain(&self.rpc, &self.identity, self.kora.as_ref()).await
+        {
             tracing::error!("Lease renewal failed: {e}");
         }
     }
@@ -509,7 +526,7 @@ impl Zx01Node {
     async fn poll_slot(&mut self) {
         match self.rpc.get_slot().await {
             Ok(slot) => self.current_slot = slot,
-            Err(e)   => tracing::trace!("Slot poll failed: {e}"),
+            Err(e) => tracing::trace!("Slot poll failed: {e}"),
         }
     }
 
@@ -527,18 +544,15 @@ impl Zx01Node {
             Ok(true) => {
                 self.peer_states.set_sati_status(agent_id, true);
                 self.api.send_event(ApiEvent::SatiStatus {
-                    agent_id:   hex::encode(agent_id),
+                    agent_id: hex::encode(agent_id),
                     registered: true,
                 });
-                tracing::info!(
-                    "SATI: agent {} ✓ registered",
-                    hex::encode(agent_id),
-                );
+                tracing::info!("SATI: agent {} ✓ registered", hex::encode(agent_id),);
             }
             Ok(false) => {
                 self.peer_states.set_sati_status(agent_id, false);
                 self.api.send_event(ApiEvent::SatiStatus {
-                    agent_id:   hex::encode(agent_id),
+                    agent_id: hex::encode(agent_id),
                     registered: false,
                 });
                 if self.dev_mode {
@@ -585,7 +599,9 @@ impl Zx01Node {
             SwarmEvent::NewListenAddr { address, .. } => {
                 tracing::info!("Listening on {address}");
             }
-            SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+            SwarmEvent::ConnectionEstablished {
+                peer_id, endpoint, ..
+            } => {
                 tracing::debug!("Connected to {peer_id} via {endpoint:?}");
             }
             SwarmEvent::ConnectionClosed { peer_id, .. } => {
@@ -612,7 +628,8 @@ impl Zx01Node {
                 message,
                 ..
             }) => {
-                self.handle_pubsub_message(swarm, propagation_source, message).await;
+                self.handle_pubsub_message(swarm, propagation_source, message)
+                    .await;
             }
             Zx01BehaviourEvent::Gossipsub(gossipsub::Event::Subscribed { peer_id, topic }) => {
                 tracing::debug!("{peer_id} subscribed to {topic}");
@@ -641,7 +658,10 @@ impl Zx01Node {
             Zx01BehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. }) => {
                 tracing::debug!("Identified {peer_id}: agent={}", info.agent_version);
                 for addr in &info.listen_addrs {
-                    swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+                    swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, addr.clone());
                 }
                 if let Ok(ed_pk) = info.public_key.try_into_ed25519() {
                     if let Ok(vk) = VerifyingKey::from_bytes(&ed_pk.to_bytes()) {
@@ -656,20 +676,27 @@ impl Zx01Node {
                 message,
                 ..
             }) => match message {
-                request_response::Message::Request { request, channel, .. } => {
-                    self.handle_bilateral_request(swarm, peer, request, channel).await;
+                request_response::Message::Request {
+                    request, channel, ..
+                } => {
+                    self.handle_bilateral_request(swarm, peer, request, channel)
+                        .await;
                 }
                 request_response::Message::Response { response, .. } => {
                     tracing::trace!("Bilateral ACK from {peer}: {:?}", response);
                 }
             },
             Zx01BehaviourEvent::RequestResponse(request_response::Event::OutboundFailure {
-                peer, error, ..
+                peer,
+                error,
+                ..
             }) => {
                 tracing::warn!("Bilateral outbound failure to {peer}: {error}");
             }
             Zx01BehaviourEvent::RequestResponse(request_response::Event::InboundFailure {
-                peer, error, ..
+                peer,
+                error,
+                ..
             }) => {
                 tracing::warn!("Bilateral inbound failure from {peer}: {error}");
             }
@@ -677,17 +704,21 @@ impl Zx01Node {
 
             // ── Relay server events (genesis nodes) ──────────────────────────
             Zx01BehaviourEvent::RelayServer(relay::Event::ReservationReqAccepted {
-                src_peer_id, ..
+                src_peer_id,
+                ..
             }) => {
                 tracing::info!("Relay: reservation accepted from {src_peer_id}");
             }
             Zx01BehaviourEvent::RelayServer(relay::Event::CircuitReqAccepted {
-                src_peer_id, dst_peer_id,
+                src_peer_id,
+                dst_peer_id,
             }) => {
                 tracing::debug!("Relay: circuit opened {src_peer_id} → {dst_peer_id}");
             }
             Zx01BehaviourEvent::RelayServer(relay::Event::CircuitClosed {
-                src_peer_id, dst_peer_id, ..
+                src_peer_id,
+                dst_peer_id,
+                ..
             }) => {
                 tracing::debug!("Relay: circuit closed {src_peer_id} → {dst_peer_id}");
             }
@@ -695,29 +726,35 @@ impl Zx01Node {
 
             // ── Relay client events (mobile / NAT-restricted nodes) ──────────
             Zx01BehaviourEvent::RelayClient(relay::client::Event::ReservationReqAccepted {
-                relay_peer_id, ..
+                relay_peer_id,
+                ..
             }) => {
                 tracing::info!("Circuit relay reservation accepted by {relay_peer_id}");
             }
             Zx01BehaviourEvent::RelayClient(relay::client::Event::OutboundCircuitEstablished {
-                relay_peer_id, ..
+                relay_peer_id,
+                ..
             }) => {
                 tracing::debug!("Relay circuit established via {relay_peer_id}");
             }
             Zx01BehaviourEvent::RelayClient(relay::client::Event::InboundCircuitEstablished {
-                src_peer_id, ..
+                src_peer_id,
+                ..
             }) => {
                 tracing::debug!("Inbound relay circuit from {src_peer_id}");
             }
 
             // ── dcutr — upgrades relay connections to direct connections ─────
             // dcutr::Event is a struct with remote_peer_id and result fields.
-            Zx01BehaviourEvent::Dcutr(dcutr::Event { remote_peer_id, result }) => {
-                match result {
-                    Ok(_)  => tracing::info!("dcutr: direct connection established with {remote_peer_id}"),
-                    Err(e) => tracing::debug!("dcutr: upgrade failed with {remote_peer_id}: {e}"),
+            Zx01BehaviourEvent::Dcutr(dcutr::Event {
+                remote_peer_id,
+                result,
+            }) => match result {
+                Ok(_) => {
+                    tracing::info!("dcutr: direct connection established with {remote_peer_id}")
                 }
-            }
+                Err(e) => tracing::debug!("dcutr: upgrade failed with {remote_peer_id}: {e}"),
+            },
 
             // ── AutoNAT — external reachability probe ────────────────────────
             Zx01BehaviourEvent::Autonat(autonat::Event::StatusChanged { old, new }) => {
@@ -733,9 +770,9 @@ impl Zx01Node {
 
     async fn handle_pubsub_message(
         &mut self,
-        _swarm:      &mut Swarm<Zx01Behaviour>,
+        _swarm: &mut Swarm<Zx01Behaviour>,
         source_peer: PeerId,
-        message:     gossipsub::Message,
+        message: gossipsub::Message,
     ) {
         // Drop if peer is flooding above the allowed rate.
         if !self.check_rate_limit(&source_peer) {
@@ -751,7 +788,7 @@ impl Zx01Node {
         }
 
         let env = match Envelope::from_cbor(&message.data) {
-            Ok(e)  => e,
+            Ok(e) => e,
             Err(e) => {
                 tracing::debug!("Pubsub CBOR decode failed from {source_peer}: {e}");
                 return;
@@ -826,7 +863,8 @@ impl Zx01Node {
         // Update peer state.
         self.peer_states.update_nonce(env.sender, env.nonce);
         self.peer_states.touch_epoch(env.sender, self.current_epoch);
-        self.reputation.record_activity(env.sender, self.current_epoch);
+        self.reputation
+            .record_activity(env.sender, self.current_epoch);
 
         // Log envelope.
         if let Err(e) = self.logger.log(&env) {
@@ -835,15 +873,16 @@ impl Zx01Node {
 
         // Emit visualization event.
         self.api.send_event(ApiEvent::Envelope {
-            sender:   hex::encode(env.sender),
+            sender: hex::encode(env.sender),
             msg_type: format!("{:?}", env.msg_type),
-            slot:     self.current_slot,
+            slot: self.current_slot,
         });
 
         // Push to agent inbox.
         self.api.push_inbound(&env, self.current_slot);
 
-        self.batch.record_message(env.msg_type, env.sender, self.current_slot);
+        self.batch
+            .record_message(env.msg_type, env.sender, self.current_slot);
 
         // Route.
         if topic_str == TOPIC_REPUTATION && env.msg_type == MsgType::Feedback {
@@ -855,9 +894,7 @@ impl Zx01Node {
                 hex::encode(env.conversation_id),
             );
             // Track as notary candidate (cap pool to prevent memory exhaustion).
-            if env.sender != self.identity.agent_id
-                && self.notary_pool.len() < MAX_NOTARY_POOL
-            {
+            if env.sender != self.identity.agent_id && self.notary_pool.len() < MAX_NOTARY_POOL {
                 self.notary_pool.insert(env.sender, source_peer);
             }
             self.push_to_aggregator(serde_json::json!({
@@ -878,7 +915,8 @@ impl Zx01Node {
                     if let Ok(text) = std::str::from_utf8(&env.payload) {
                         if let Ok(val) = serde_json::from_str::<serde_json::Value>(text) {
                             if let Some(arr) = val.get("capabilities").and_then(|v| v.as_array()) {
-                                let caps: Vec<String> = arr.iter()
+                                let caps: Vec<String> = arr
+                                    .iter()
                                     .filter_map(|c| c.as_str().map(|s| s.to_string()))
                                     .take(32)
                                     .collect();
@@ -909,9 +947,9 @@ impl Zx01Node {
 
     async fn handle_bilateral_request(
         &mut self,
-        swarm:   &mut Swarm<Zx01Behaviour>,
+        swarm: &mut Swarm<Zx01Behaviour>,
         peer_id: PeerId,
-        data:    Vec<u8>,
+        data: Vec<u8>,
         channel: request_response::ResponseChannel<Vec<u8>>,
     ) {
         // Rate limit check — ACK anyway to avoid hanging the sender's channel.
@@ -936,7 +974,7 @@ impl Zx01Node {
         }
 
         let env = match Envelope::from_cbor(&data) {
-            Ok(e)  => e,
+            Ok(e) => e,
             Err(e) => {
                 tracing::debug!("Bilateral CBOR decode failed from {peer_id}: {e}");
                 return;
@@ -946,10 +984,7 @@ impl Zx01Node {
         let vk = match self.peer_states.verifying_key(&env.sender).copied() {
             Some(vk) => vk,
             None => {
-                tracing::debug!(
-                    "No VK for bilateral sender {}",
-                    hex::encode(env.sender),
-                );
+                tracing::debug!("No VK for bilateral sender {}", hex::encode(env.sender),);
                 return;
             }
         };
@@ -983,13 +1018,15 @@ impl Zx01Node {
 
         self.peer_states.update_nonce(env.sender, env.nonce);
         self.peer_states.touch_epoch(env.sender, self.current_epoch);
-        self.reputation.record_activity(env.sender, self.current_epoch);
+        self.reputation
+            .record_activity(env.sender, self.current_epoch);
 
         if let Err(e) = self.logger.log(&env) {
             tracing::warn!("Logger error: {e}");
         }
 
-        self.batch.record_message(env.msg_type, env.sender, self.current_slot);
+        self.batch
+            .record_message(env.msg_type, env.sender, self.current_slot);
         self.track_conversation_peer(env.conversation_id, peer_id);
 
         // Push to agent inbox.
@@ -999,24 +1036,22 @@ impl Zx01Node {
             MsgType::Propose | MsgType::Counter => {
                 // Convention: first 16 bytes of payload = LE i128 bid amount.
                 let bid_value: i128 = if env.payload.len() >= BID_VALUE_LEN {
-                    i128::from_le_bytes(
-                        env.payload[..BID_VALUE_LEN].try_into().unwrap(),
-                    )
+                    i128::from_le_bytes(env.payload[..BID_VALUE_LEN].try_into().unwrap())
                 } else {
                     0
                 };
                 self.batch.add_bid(TypedBid {
                     conversation_id: env.conversation_id,
-                    counterparty:    env.sender,
+                    counterparty: env.sender,
                     bid_value,
-                    slot:            self.current_slot,
+                    slot: self.current_slot,
                 });
             }
             MsgType::Accept => {
                 self.batch.record_accept(TaskSelection {
                     conversation_id: env.conversation_id,
-                    counterparty:    env.sender,
-                    slot:            self.current_slot,
+                    counterparty: env.sender,
+                    slot: self.current_slot,
                 });
             }
             MsgType::NotarizeAssign => {
@@ -1025,8 +1060,8 @@ impl Zx01Node {
                     vid.copy_from_slice(&env.payload[..NOTARIZE_ASSIGN_VERIFIER_OFFSET]);
                     self.batch.record_notarize_assign(VerifierAssignment {
                         conversation_id: env.conversation_id,
-                        verifier_id:     vid,
-                        slot:            self.current_slot,
+                        verifier_id: vid,
+                        slot: self.current_slot,
                     });
                 } else {
                     tracing::debug!(
@@ -1092,7 +1127,8 @@ impl Zx01Node {
                 );
 
                 // Encode envelope to CBOR for Merkle proof support (GAP-07).
-                let raw_b64 = env.to_cbor()
+                let raw_b64 = env
+                    .to_cbor()
                     .ok()
                     .map(|b| base64::engine::general_purpose::STANDARD.encode(&b));
 
@@ -1113,16 +1149,16 @@ impl Zx01Node {
                 // Update reputation snapshot.
                 if let Some(rv) = self.reputation.get(&fb.target_agent) {
                     let snap = ReputationSnapshot {
-                        agent_id:          hex::encode(fb.target_agent),
-                        reliability:       rv.reliability_score,
-                        cooperation:       rv.cooperation_index,
-                        notary_accuracy:   rv.notary_accuracy,
-                        total_tasks:       rv.total_tasks,
-                        total_disputes:    rv.total_disputes,
+                        agent_id: hex::encode(fb.target_agent),
+                        reliability: rv.reliability_score,
+                        cooperation: rv.cooperation_index,
+                        notary_accuracy: rv.notary_accuracy,
+                        total_tasks: rv.total_tasks,
+                        total_disputes: rv.total_disputes,
                         last_active_epoch: rv.last_active_epoch,
                     };
                     self.api.send_event(ApiEvent::ReputationUpdate {
-                        agent_id:    hex::encode(fb.target_agent),
+                        agent_id: hex::encode(fb.target_agent),
                         reliability: rv.reliability_score,
                         cooperation: rv.cooperation_index,
                     });
@@ -1132,12 +1168,12 @@ impl Zx01Node {
                 }
                 if fb.target_agent == self.identity.agent_id {
                     self.batch.record_feedback(FeedbackEvent {
-                        conversation_id:       fb.conversation_id,
-                        from_agent:            env.sender,
-                        score:                 fb.score,
-                        outcome:               fb.outcome,
-                        role:                  fb.role,
-                        slot:                  self.current_slot,
+                        conversation_id: fb.conversation_id,
+                        from_agent: env.sender,
+                        score: fb.score,
+                        outcome: fb.outcome,
+                        role: fb.role,
+                        slot: self.current_slot,
                         sati_attestation_hash: [0u8; 32],
                     });
                 }
@@ -1179,15 +1215,15 @@ impl Zx01Node {
 
             // Update peer snapshot and emit event.
             let snap = PeerSnapshot {
-                agent_id:          hex::encode(env.sender),
-                peer_id:           Some(source_peer.to_string()),
-                sati_ok:           self.peer_states.sati_status(&env.sender),
-                lease_ok:          self.peer_states.lease_status(&env.sender),
+                agent_id: hex::encode(env.sender),
+                peer_id: Some(source_peer.to_string()),
+                sati_ok: self.peer_states.sati_status(&env.sender),
+                lease_ok: self.peer_states.lease_status(&env.sender),
                 last_active_epoch: self.peer_states.last_active_epoch(&env.sender),
             };
             self.api.send_event(ApiEvent::PeerRegistered {
                 agent_id: hex::encode(env.sender),
-                peer_id:  source_peer.to_string(),
+                peer_id: source_peer.to_string(),
             });
             let api = self.api.clone();
             let sender = env.sender;
@@ -1205,7 +1241,7 @@ impl Zx01Node {
                     .filter(|c| c.is_ascii_graphic() || *c == ' ')
                     .collect();
                 tracing::debug!("Agent name: {safe}");
-                
+
                 self.push_to_aggregator(serde_json::json!({
                     "msg_type": "BEACON",
                     "sender":   hex::encode(env.sender),
@@ -1222,10 +1258,10 @@ impl Zx01Node {
 
     pub fn build_envelope(
         &mut self,
-        msg_type:        MsgType,
-        recipient:       [u8; 32],
+        msg_type: MsgType,
+        recipient: [u8; 32],
         conversation_id: [u8; 16],
-        payload:         Vec<u8>,
+        payload: Vec<u8>,
     ) -> Envelope {
         self.nonce += 1;
         Envelope::build(
@@ -1243,7 +1279,7 @@ impl Zx01Node {
     pub fn publish_envelope(
         &self,
         swarm: &mut Swarm<Zx01Behaviour>,
-        env:   &Envelope,
+        env: &Envelope,
     ) -> anyhow::Result<()> {
         let topic_str = if env.msg_type.is_broadcast() {
             TOPIC_BROADCAST
@@ -1284,12 +1320,15 @@ impl Zx01Node {
 
     pub fn send_bilateral(
         &self,
-        swarm:   &mut Swarm<Zx01Behaviour>,
+        swarm: &mut Swarm<Zx01Behaviour>,
         peer_id: PeerId,
-        env:     &Envelope,
+        env: &Envelope,
     ) -> anyhow::Result<()> {
         let cbor = env.to_cbor()?;
-        swarm.behaviour_mut().request_response.send_request(&peer_id, cbor);
+        swarm
+            .behaviour_mut()
+            .request_response
+            .send_request(&peer_id, cbor);
         Ok(())
     }
 
@@ -1297,11 +1336,7 @@ impl Zx01Node {
     // Outbound request handler (from Agent API)
     // ========================================================================
 
-    async fn handle_outbound(
-        &mut self,
-        swarm: &mut Swarm<Zx01Behaviour>,
-        req:   OutboundRequest,
-    ) {
+    async fn handle_outbound(&mut self, swarm: &mut Swarm<Zx01Behaviour>, req: OutboundRequest) {
         let env = self.build_envelope(
             req.msg_type,
             req.recipient,
@@ -1310,7 +1345,7 @@ impl Zx01Node {
         );
 
         let payload_hash = hex::encode(env.payload_hash);
-        let nonce        = env.nonce;
+        let nonce = env.nonce;
 
         // Route: pubsub or bilateral.
         let result = if req.msg_type.is_broadcast()
@@ -1336,14 +1371,18 @@ impl Zx01Node {
                             req.msg_type,
                         );
                     }
-                    let _ = req.reply.send(Ok(SentConfirmation { nonce, payload_hash }));
+                    let _ = req.reply.send(Ok(SentConfirmation {
+                        nonce,
+                        payload_hash,
+                    }));
                     return;
                 }
                 Err(e) => Err(e.to_string()),
             }
         } else {
             match self.peer_states.peer_id_for_agent(&req.recipient) {
-                Some(peer_id) => self.send_bilateral(swarm, peer_id, &env)
+                Some(peer_id) => self
+                    .send_bilateral(swarm, peer_id, &env)
                     .map_err(|e| e.to_string()),
                 None => Err(format!(
                     "no known peer_id for agent {}",
@@ -1358,7 +1397,8 @@ impl Zx01Node {
                 if let Err(e) = self.logger.log(&env) {
                     tracing::warn!("Logger error on outbound: {e}");
                 }
-                self.batch.record_message(req.msg_type, self.identity.agent_id, self.current_slot);
+                self.batch
+                    .record_message(req.msg_type, self.identity.agent_id, self.current_slot);
                 tracing::debug!("Sent {} nonce={nonce}", req.msg_type);
 
                 // VERDICT with approve payload → trigger escrow approve_payment on-chain.
@@ -1368,13 +1408,13 @@ impl Zx01Node {
                     && env.payload[0] == 0x00
                 {
                     let mut requester = [0u8; 32];
-                    let mut provider  = [0u8; 32];
+                    let mut provider = [0u8; 32];
                     requester.copy_from_slice(&env.payload[1..33]);
                     provider.copy_from_slice(&env.payload[33..65]);
-                    let rpc_url  = self.config.rpc_url.clone();
+                    let rpc_url = self.config.rpc_url.clone();
                     let sk_bytes = self.identity.signing_key.to_bytes();
                     let vk_bytes = self.identity.verifying_key.to_bytes();
-                    let conv_id  = req.conversation_id;
+                    let conv_id = req.conversation_id;
                     // notary_bytes = our own vk (we are the notary sending this VERDICT).
                     let notary_bytes = vk_bytes;
                     tokio::spawn(async move {
@@ -1387,7 +1427,9 @@ impl Zx01Node {
                             provider,
                             conv_id,
                             notary_bytes,
-                        ).await {
+                        )
+                        .await
+                        {
                             tracing::warn!("Escrow approve_payment failed: {e}");
                         }
                     });
@@ -1402,7 +1444,10 @@ impl Zx01Node {
             Err(e) => tracing::warn!("Outbound send failed: {e}"),
         }
 
-        let _ = req.reply.send(result.map(|_| SentConfirmation { nonce, payload_hash }));
+        let _ = req.reply.send(result.map(|_| SentConfirmation {
+            nonce,
+            payload_hash,
+        }));
     }
 
     // ========================================================================
@@ -1413,13 +1458,11 @@ impl Zx01Node {
     ///
     /// Uses the first 8 bytes of conversation_id as a selection seed so different
     /// conversations pick different notaries — maximising verifier entropy (hv).
-    fn try_assign_notary(
-        &mut self,
-        swarm:           &mut Swarm<Zx01Behaviour>,
-        conversation_id: [u8; 16],
-    ) {
+    fn try_assign_notary(&mut self, swarm: &mut Swarm<Zx01Behaviour>, conversation_id: [u8; 16]) {
         // Build a snapshot excluding ourselves.
-        let candidates: Vec<([u8; 32], PeerId)> = self.notary_pool.iter()
+        let candidates: Vec<([u8; 32], PeerId)> = self
+            .notary_pool
+            .iter()
             .filter(|(agent_id, _)| **agent_id != self.identity.agent_id)
             .map(|(a, p)| (*a, *p))
             .collect();
@@ -1430,7 +1473,7 @@ impl Zx01Node {
 
         // Use conversation_id[0..8] as an index seed for diverse selection.
         let seed = u64::from_le_bytes(conversation_id[..8].try_into().unwrap());
-        let idx  = (seed as usize) % candidates.len();
+        let idx = (seed as usize) % candidates.len();
         let (notary_agent_id, notary_peer_id) = candidates[idx];
 
         // Payload: notary's agent_id (32 bytes), confirming who is being assigned.
@@ -1446,7 +1489,7 @@ impl Zx01Node {
                 self.batch.record_notarize_assign(VerifierAssignment {
                     conversation_id,
                     verifier_id: notary_agent_id,
-                    slot:        self.current_slot,
+                    slot: self.current_slot,
                 });
                 tracing::info!(
                     "NOTARIZE_ASSIGN → {} for conversation {}",
@@ -1471,12 +1514,7 @@ impl Zx01Node {
         payload.extend_from_slice(&self.identity.verifying_key.to_bytes());
         payload.extend_from_slice(self.config.agent_name.as_bytes());
 
-        let env = self.build_envelope(
-            MsgType::Beacon,
-            BROADCAST_RECIPIENT,
-            [0u8; 16],
-            payload,
-        );
+        let env = self.build_envelope(MsgType::Beacon, BROADCAST_RECIPIENT, [0u8; 16], payload);
 
         if let Err(e) = self.publish_envelope(swarm, &env) {
             tracing::warn!("BEACON publish failed: {e}");
@@ -1497,22 +1535,21 @@ impl Zx01Node {
 
         tracing::info!(
             "Epoch boundary: {} → {}. Finalising batch.",
-            self.current_epoch, new_epoch,
+            self.current_epoch,
+            new_epoch,
         );
 
         let leaves = match self.logger.advance_epoch(new_epoch) {
-            Ok(l)  => l,
+            Ok(l) => l,
             Err(e) => {
                 tracing::error!("Logger advance failed: {e}");
                 return;
             }
         };
 
-        let (batch, message_slots) = self.batch.finalize(
-            self.identity.agent_id,
-            self.current_slot,
-            &leaves,
-        );
+        let (batch, message_slots) =
+            self.batch
+                .finalize(self.identity.agent_id, self.current_slot, &leaves);
         let epoch = self.current_epoch;
 
         let batch_hash_hex = match batch.batch_hash() {
@@ -1532,17 +1569,17 @@ impl Zx01Node {
 
         // Push batch snapshot to visualization API.
         let batch_snap = BatchSnapshot {
-            agent_id:        hex::encode(self.identity.agent_id),
+            agent_id: hex::encode(self.identity.agent_id),
             epoch,
-            message_count:   batch.message_count,
+            message_count: batch.message_count,
             log_merkle_root: hex::encode(batch.log_merkle_root),
-            batch_hash:      batch_hash_hex.clone(),
+            batch_hash: batch_hash_hex.clone(),
         };
         self.api.push_batch(batch_snap).await;
         self.api.send_event(ApiEvent::BatchSubmitted {
             epoch,
             message_count: batch.message_count,
-            batch_hash:    batch_hash_hex,
+            batch_hash: batch_hash_hex,
         });
 
         // GAP-04: Compute verifier ID histogram and push to aggregator
@@ -1551,7 +1588,7 @@ impl Zx01Node {
             let vid = hex::encode(assignment.verifier_id);
             *verifier_histogram.entry(vid).or_insert(0) += 1;
         }
-        
+
         if !verifier_histogram.is_empty() {
             self.push_to_aggregator(serde_json::json!({
                 "msg_type":  "VERIFIER_HISTOGRAM",
@@ -1569,7 +1606,11 @@ impl Zx01Node {
         );
         tracing::info!(
             "Epoch {epoch} entropy: ht={:?} hb={:?} hs={:?} hv={:?} anomaly={:.4}",
-            ev.ht, ev.hb, ev.hs, ev.hv, ev.anomaly,
+            ev.ht,
+            ev.hb,
+            ev.hs,
+            ev.hv,
+            ev.anomaly,
         );
         self.push_to_aggregator(serde_json::json!({
             "msg_type":  "ENTROPY",
@@ -1602,7 +1643,9 @@ impl Zx01Node {
             &batch,
             epoch,
             self.kora.as_ref(),
-        ).await {
+        )
+        .await
+        {
             tracing::error!("Batch submission failed for epoch {epoch}: {e}");
         }
 
@@ -1625,9 +1668,7 @@ impl Zx01Node {
         let usdc_mint = match self.usdc_mint {
             Some(ref m) => *m,
             None => {
-                tracing::debug!(
-                    "Skipping inactivity check — no --usdc-mint configured."
-                );
+                tracing::debug!("Skipping inactivity check — no --usdc-mint configured.");
                 return;
             }
         };
@@ -1644,7 +1685,8 @@ impl Zx01Node {
             self.kora.as_ref(),
             &usdc_mint,
             &agents,
-        ).await;
+        )
+        .await;
     }
 
     // ========================================================================
@@ -1662,7 +1704,7 @@ impl Zx01Node {
     async fn check_sri_circuit_breaker(&self) -> bool {
         let url = match &self.aggregator_url {
             Some(u) => format!("{}/system/sri", u.trim_end_matches('/')),
-            None    => return false,
+            None => return false,
         };
         let client = self.http_client.clone();
         let secret = self.aggregator_secret.clone();
@@ -1675,10 +1717,11 @@ impl Zx01Node {
             let val: serde_json::Value = serde_json::from_str(&text)?;
             Ok::<bool, anyhow::Error>(
                 val.get("circuit_breaker_active")
-                   .and_then(|v| v.as_bool())
-                   .unwrap_or(false)
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             )
-        }.await;
+        }
+        .await;
         match result {
             Ok(active) => {
                 if active {
@@ -1696,7 +1739,7 @@ impl Zx01Node {
     fn push_to_aggregator(&self, payload: serde_json::Value) {
         let url = match &self.aggregator_url {
             Some(u) => format!("{}/ingest/envelope", u.trim_end_matches('/')),
-            None    => return,
+            None => return,
         };
         let client = self.http_client.clone();
         let secret = self.aggregator_secret.clone();
@@ -1803,11 +1846,10 @@ fn validated_aggregator_url(url: Option<String>) -> Option<String> {
             tracing::warn!("Ignoring aggregator URL; host '{host}' resolved to no addresses");
             return None;
         }
-        if addrs
-            .iter()
-            .any(|addr| is_private_or_local_ip(addr.ip()))
-        {
-            tracing::warn!("Ignoring aggregator URL with host resolving to local/private IPs: {raw}");
+        if addrs.iter().any(|addr| is_private_or_local_ip(addr.ip())) {
+            tracing::warn!(
+                "Ignoring aggregator URL with host resolving to local/private IPs: {raw}"
+            );
             return None;
         }
     }

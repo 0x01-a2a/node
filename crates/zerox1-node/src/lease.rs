@@ -42,7 +42,9 @@ pub const RENEWAL_EPOCHS: u64 = 7;
 pub const RENEWAL_THRESHOLD: u64 = 2;
 
 fn lease_program_id() -> Pubkey {
-    LEASE_PROGRAM_ID_STR.parse().expect("valid lease program ID")
+    LEASE_PROGRAM_ID_STR
+        .parse()
+        .expect("valid lease program ID")
 }
 
 fn treasury_pubkey() -> Pubkey {
@@ -54,11 +56,15 @@ fn usdc_mint() -> Pubkey {
 }
 
 fn spl_token_program() -> Pubkey {
-    SPL_TOKEN_PROGRAM_STR.parse().expect("valid SPL token program ID")
+    SPL_TOKEN_PROGRAM_STR
+        .parse()
+        .expect("valid SPL token program ID")
 }
 
 fn associated_token_program() -> Pubkey {
-    ASSOCIATED_TOKEN_PROGRAM_STR.parse().expect("valid ATA program ID")
+    ASSOCIATED_TOKEN_PROGRAM_STR
+        .parse()
+        .expect("valid ATA program ID")
 }
 
 /// Derive the Associated Token Address for (wallet, mint).
@@ -96,9 +102,9 @@ pub fn get_ata(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
 #[derive(Debug, Clone)]
 pub struct LeaseStatus {
     pub paid_through_epoch: u64,
-    pub current_epoch:      u64,
-    pub in_grace_period:    bool,
-    pub deactivated:        bool,
+    pub current_epoch: u64,
+    pub in_grace_period: bool,
+    pub deactivated: bool,
 }
 
 impl LeaseStatus {
@@ -114,8 +120,7 @@ impl LeaseStatus {
 
     /// True if renewal is needed soon (within RENEWAL_THRESHOLD epochs).
     pub fn needs_renewal(&self) -> bool {
-        !self.deactivated
-            && self.paid_through_epoch < self.current_epoch + RENEWAL_THRESHOLD
+        !self.deactivated && self.paid_through_epoch < self.current_epoch + RENEWAL_THRESHOLD
     }
 }
 
@@ -126,13 +131,11 @@ impl LeaseStatus {
 ///   `Ok(None)`         — account does not exist (agent has not called init_lease)
 ///   `Err(_)`           — RPC failure
 pub async fn get_lease_status(
-    rpc:      &RpcClient,
+    rpc: &RpcClient,
     agent_id: &[u8; 32],
 ) -> anyhow::Result<Option<LeaseStatus>> {
-    let (pda, _) = Pubkey::find_program_address(
-        &[b"lease", agent_id.as_ref()],
-        &lease_program_id(),
-    );
+    let (pda, _) =
+        Pubkey::find_program_address(&[b"lease", agent_id.as_ref()], &lease_program_id());
 
     // Use get_multiple_accounts so missing accounts return Option::None
     // instead of an error, avoiding fragile string matching on error messages.
@@ -154,9 +157,9 @@ pub async fn get_lease_status(
             }
             Ok(Some(LeaseStatus {
                 paid_through_epoch: u64::from_le_bytes(d[73..81].try_into().unwrap()),
-                current_epoch:      u64::from_le_bytes(d[89..97].try_into().unwrap()),
-                in_grace_period:    d[97] != 0,
-                deactivated:        d[98] != 0,
+                current_epoch: u64::from_le_bytes(d[89..97].try_into().unwrap()),
+                in_grace_period: d[97] != 0,
+                deactivated: d[98] != 0,
             }))
         }
     }
@@ -168,22 +171,19 @@ pub async fn get_lease_status(
 
 /// Build and submit an `init_lease` transaction.
 pub async fn init_lease_onchain(
-    rpc:      &RpcClient,
+    rpc: &RpcClient,
     identity: &AgentIdentity,
-    kora:     Option<&KoraClient>,
+    kora: Option<&KoraClient>,
 ) -> anyhow::Result<()> {
-    let program_id  = lease_program_id();
-    let usdc        = usdc_mint();
+    let program_id = lease_program_id();
+    let usdc = usdc_mint();
     let agent_pubkey = Pubkey::new_from_array(identity.verifying_key.to_bytes());
-    let agent_mint  = Pubkey::new_from_array(identity.agent_id);
+    let agent_mint = Pubkey::new_from_array(identity.agent_id);
 
-    let (lease_pda, _) = Pubkey::find_program_address(
-        &[b"lease", &identity.agent_id],
-        &program_id,
-    );
-    let owner_ata   = get_ata(&agent_pubkey, &usdc);
+    let (lease_pda, _) = Pubkey::find_program_address(&[b"lease", &identity.agent_id], &program_id);
+    let owner_ata = get_ata(&agent_pubkey, &usdc);
     let owner_sati_ata = get_ata(&agent_pubkey, &agent_mint);
-    
+
     let treasury = treasury_pubkey();
     let treasury_ata = get_ata(&treasury, &usdc);
 
@@ -194,8 +194,7 @@ pub async fn init_lease_onchain(
         let mut b = [0u8; 64];
         b[..32].copy_from_slice(&identity.signing_key.to_bytes());
         b[32..].copy_from_slice(&identity.verifying_key.to_bytes());
-        Keypair::try_from(b.as_slice())
-            .map_err(|e| anyhow::anyhow!("keypair conversion: {e}"))?
+        Keypair::try_from(b.as_slice()).map_err(|e| anyhow::anyhow!("keypair conversion: {e}"))?
     };
 
     if let Some(kora) = kora {
@@ -222,7 +221,8 @@ pub async fn init_lease_onchain(
         };
         tx.partial_sign(&[&solana_kp], recent_blockhash);
 
-        let tx_bytes = bincode::serialize(&tx).map_err(|e| anyhow::anyhow!("bincode serialize: {e}"))?;
+        let tx_bytes =
+            bincode::serialize(&tx).map_err(|e| anyhow::anyhow!("bincode serialize: {e}"))?;
         let tx_b64 = BASE64.encode(&tx_bytes);
 
         kora.sign_and_send(&tx_b64).await?;
@@ -250,7 +250,10 @@ pub async fn init_lease_onchain(
             recent_blockhash,
         );
 
-        let sig = rpc.send_and_confirm_transaction(&tx).await.map_err(|e| anyhow::anyhow!("init_lease: {e}"))?;
+        let sig = rpc
+            .send_and_confirm_transaction(&tx)
+            .await
+            .map_err(|e| anyhow::anyhow!("init_lease: {e}"))?;
 
         tracing::info!(tx = %sig, agent = %hex::encode(identity.agent_id), "Lease initialized directly (agent pays gas)");
     }
@@ -272,20 +275,17 @@ pub async fn init_lease_onchain(
 /// the instruction.  Kora pays the SOL transaction fee by being set as the message
 /// fee_payer, while the agent's key remains the sole instruction signer.
 pub async fn pay_lease_onchain(
-    rpc:      &RpcClient,
+    rpc: &RpcClient,
     identity: &AgentIdentity,
-    kora:     Option<&KoraClient>,
+    kora: Option<&KoraClient>,
 ) -> anyhow::Result<()> {
-    let program_id   = lease_program_id();
-    let usdc         = usdc_mint();
-    let treasury     = treasury_pubkey();
+    let program_id = lease_program_id();
+    let usdc = usdc_mint();
+    let treasury = treasury_pubkey();
     let agent_pubkey = Pubkey::new_from_array(identity.verifying_key.to_bytes());
 
-    let (lease_pda, _) = Pubkey::find_program_address(
-        &[b"lease", &identity.agent_id],
-        &program_id,
-    );
-    let owner_ata    = get_ata(&agent_pubkey, &usdc);
+    let (lease_pda, _) = Pubkey::find_program_address(&[b"lease", &identity.agent_id], &program_id);
+    let owner_ata = get_ata(&agent_pubkey, &usdc);
     let treasury_ata = get_ata(&treasury, &usdc);
 
     let recent_blockhash = rpc.get_latest_blockhash().await?;
@@ -295,8 +295,7 @@ pub async fn pay_lease_onchain(
         let mut b = [0u8; 64];
         b[..32].copy_from_slice(&identity.signing_key.to_bytes());
         b[32..].copy_from_slice(&identity.verifying_key.to_bytes());
-        Keypair::try_from(b.as_slice())
-            .map_err(|e| anyhow::anyhow!("keypair conversion: {e}"))?
+        Keypair::try_from(b.as_slice()).map_err(|e| anyhow::anyhow!("keypair conversion: {e}"))?
     };
 
     let ix = build_pay_lease_ix(
@@ -323,8 +322,8 @@ pub async fn pay_lease_onchain(
         };
         tx.partial_sign(&[&solana_kp], recent_blockhash);
 
-        let tx_bytes = bincode::serialize(&tx)
-            .map_err(|e| anyhow::anyhow!("bincode serialize: {e}"))?;
+        let tx_bytes =
+            bincode::serialize(&tx).map_err(|e| anyhow::anyhow!("bincode serialize: {e}"))?;
         let tx_b64 = BASE64.encode(&tx_bytes);
 
         kora.sign_and_send(&tx_b64).await?;
@@ -377,17 +376,17 @@ fn anchor_account_discriminator(name: &str) -> [u8; 8] {
 
 #[allow(clippy::too_many_arguments)]
 fn build_init_lease_ix(
-    payer:            &Pubkey,
-    owner:            &Pubkey,
-    owner_usdc:       &Pubkey,
-    agent_mint:       &Pubkey,
+    payer: &Pubkey,
+    owner: &Pubkey,
+    owner_usdc: &Pubkey,
+    agent_mint: &Pubkey,
     owner_sati_token: &Pubkey,
-    lease_account:    &Pubkey,
-    treasury_usdc:    &Pubkey,
-    treasury:         &Pubkey,
-    usdc_mint:        &Pubkey,
-    program_id:       &Pubkey,
-    agent_id:         [u8; 32],
+    lease_account: &Pubkey,
+    treasury_usdc: &Pubkey,
+    treasury: &Pubkey,
+    usdc_mint: &Pubkey,
+    program_id: &Pubkey,
+    agent_id: [u8; 32],
 ) -> Instruction {
     let mut data = Vec::with_capacity(40);
     data.extend_from_slice(&anchor_discriminator("init_lease"));
@@ -428,14 +427,14 @@ fn build_init_lease_ix(
 /// Args: discriminator(8) + Borsh(PayLeaseArgs { n_epochs: u64 }) = 16 bytes.
 #[allow(clippy::too_many_arguments)]
 fn build_pay_lease_ix(
-    owner:         &Pubkey,
-    owner_ata:     &Pubkey,
-    lease_pda:     &Pubkey,
+    owner: &Pubkey,
+    owner_ata: &Pubkey,
+    lease_pda: &Pubkey,
     treasury_usdc: &Pubkey,
-    treasury:      &Pubkey,
-    usdc_mint:     &Pubkey,
-    program_id:    &Pubkey,
-    n_epochs:      u64,
+    treasury: &Pubkey,
+    usdc_mint: &Pubkey,
+    program_id: &Pubkey,
+    n_epochs: u64,
 ) -> Instruction {
     let mut data = Vec::with_capacity(16);
     data.extend_from_slice(&anchor_discriminator("pay_lease"));

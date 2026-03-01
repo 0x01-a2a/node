@@ -24,15 +24,15 @@ use std::net::IpAddr;
 #[allow(dead_code)] // fields consumed by app layer / SDK, not by node internals
 pub struct PendingMessage {
     /// Unique message ID (nanoscecond hex timestamp on the aggregator).
-    pub id:       String,
+    pub id: String,
     /// Hex-encoded agent_id of the sender.
-    pub from:     String,
+    pub from: String,
     /// Protocol message type, e.g. "PROPOSE".
     pub msg_type: String,
     /// Base64-encoded raw CBOR envelope bytes.
-    pub payload:  String,
+    pub payload: String,
     /// Unix timestamp (seconds) when the aggregator received it.
-    pub ts:       u64,
+    pub ts: u64,
 }
 
 // ============================================================================
@@ -44,19 +44,19 @@ pub struct PendingMessage {
 /// Requirement: Must be signed by the agent (HIGH-7).
 pub async fn register_fcm_token(
     aggregator_url: &str,
-    agent_id_hex:   &str,
-    fcm_token:      &str,
-    signing_key:    &SigningKey,
-    client:         &reqwest::Client,
+    agent_id_hex: &str,
+    fcm_token: &str,
+    signing_key: &SigningKey,
+    client: &reqwest::Client,
 ) -> anyhow::Result<()> {
     let base = validated_aggregator_url(aggregator_url).await?;
-    let url  = format!("{base}/fcm/register");
+    let url = format!("{base}/fcm/register");
     let body = serde_json::json!({
         "agent_id":  agent_id_hex,
         "fcm_token": fcm_token,
     });
     let body_bytes = serde_json::to_vec(&body)?;
-    let signature  = signing_key.sign(&body_bytes);
+    let signature = signing_key.sign(&body_bytes);
 
     let resp = client
         .post(&url)
@@ -79,19 +79,19 @@ pub async fn register_fcm_token(
 /// Requirement: Must be signed by the agent (HIGH-7).
 pub async fn set_sleep_mode(
     aggregator_url: &str,
-    agent_id_hex:   &str,
-    sleeping:       bool,
-    signing_key:    &SigningKey,
-    client:         &reqwest::Client,
+    agent_id_hex: &str,
+    sleeping: bool,
+    signing_key: &SigningKey,
+    client: &reqwest::Client,
 ) -> anyhow::Result<()> {
     let base = validated_aggregator_url(aggregator_url).await?;
-    let url  = format!("{base}/fcm/sleep");
+    let url = format!("{base}/fcm/sleep");
     let body = serde_json::json!({
         "agent_id": agent_id_hex,
         "sleeping": sleeping,
     });
     let body_bytes = serde_json::to_vec(&body)?;
-    let signature  = signing_key.sign(&body_bytes);
+    let signature = signing_key.sign(&body_bytes);
 
     let resp = client
         .post(&url)
@@ -114,13 +114,13 @@ pub async fn set_sleep_mode(
 /// Requirement: Must be signed by the agent (HIGH-8).
 pub async fn pull_pending_messages(
     aggregator_url: &str,
-    agent_id_hex:   &str,
-    signing_key:    &SigningKey,
-    client:         &reqwest::Client,
+    agent_id_hex: &str,
+    signing_key: &SigningKey,
+    client: &reqwest::Client,
 ) -> anyhow::Result<Vec<PendingMessage>> {
     let base = validated_aggregator_url(aggregator_url).await?;
-    let url  = format!("{base}/agents/{agent_id_hex}/pending");
-    
+    let url = format!("{base}/agents/{agent_id_hex}/pending");
+
     // For GET /pending, we sign the path "agents/{id}/pending"
     let msg = format!("agents/{agent_id_hex}/pending");
     let signature = signing_key.sign(msg.as_bytes());

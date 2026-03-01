@@ -25,27 +25,27 @@ use crate::{identity::AgentIdentity, kora::KoraClient, lease::get_ata};
 // Constants — must match stake-lock program
 // ============================================================================
 
-const STAKE_LOCK_PROGRAM_ID_STR: &str  = "Dvf1qPzzvW1BkSUogRMaAvxZpXrmeTqYutTCBKpzHB1A";
+const STAKE_LOCK_PROGRAM_ID_STR: &str = "Dvf1qPzzvW1BkSUogRMaAvxZpXrmeTqYutTCBKpzHB1A";
 const BEHAVIOR_LOG_PROGRAM_ID_STR: &str = "35DAMPQVu6wsmMEGv67URFAGgyauEYD73egd74uiX1sM";
 
 /// SPL Token program.
-const SPL_TOKEN_STR:        &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+const SPL_TOKEN_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 /// SPL Associated Token Account program.
-const SPL_ATA_PROGRAM_STR:  &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1brs";
+const SPL_ATA_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1brs";
 
 // AgentBatchRegistry raw layout (under BehaviorLog).
 // 8 (disc) + 32 (agent_id) + 8 (next_epoch) + 1 (bump) = 49 bytes
 const REGISTRY_NEXT_EPOCH_OFFSET: usize = 40;
-const REGISTRY_MIN_LEN:           usize = 49;
+const REGISTRY_MIN_LEN: usize = 49;
 
 // StakeLockAccount: inactive_slashed bool is the last byte at offset 99
 // Layout: 8+32+32+8+8+1+8+1+1+1 = 100 bytes
 const STAKE_INACTIVE_SLASHED_OFFSET: usize = 99;
-const STAKE_ACCOUNT_MIN_LEN:         usize = 100;
+const STAKE_ACCOUNT_MIN_LEN: usize = 100;
 
 // Protocol constants (must match stake-lock program)
-const GENESIS_TIMESTAMP:       i64 = 1_750_000_000;
-const EPOCH_SECONDS:           u64 = 86_400;
+const GENESIS_TIMESTAMP: i64 = 1_750_000_000;
+const EPOCH_SECONDS: u64 = 86_400;
 const INACTIVITY_GRACE_EPOCHS: u64 = 3;
 
 // ============================================================================
@@ -57,11 +57,11 @@ const INACTIVITY_GRACE_EPOCHS: u64 = 3;
 /// Skips agents that are already slashed or within the grace period.
 /// Fire-and-forget per agent — individual failures are logged and skipped.
 pub async fn check_and_slash_inactive(
-    rpc:       &RpcClient,
-    identity:  &AgentIdentity,
-    kora:      Option<&KoraClient>,
+    rpc: &RpcClient,
+    identity: &AgentIdentity,
+    kora: Option<&KoraClient>,
     usdc_mint: &Pubkey,
-    agents:    &[[u8; 32]],
+    agents: &[[u8; 32]],
 ) {
     let unix_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -88,24 +88,18 @@ pub async fn check_and_slash_inactive(
             &[b"agent_registry", agent_id.as_ref()],
             &behavior_log_program,
         );
-        let (stake_pda, _) = Pubkey::find_program_address(
-            &[b"stake", agent_id.as_ref()],
-            &stake_lock_program,
-        );
-        let (vault_authority_pda, _) = Pubkey::find_program_address(
-            &[b"stake_vault", agent_id.as_ref()],
-            &stake_lock_program,
-        );
+        let (stake_pda, _) =
+            Pubkey::find_program_address(&[b"stake", agent_id.as_ref()], &stake_lock_program);
+        let (vault_authority_pda, _) =
+            Pubkey::find_program_address(&[b"stake_vault", agent_id.as_ref()], &stake_lock_program);
 
         // Check registry: read next_epoch.
         let next_epoch = match rpc.get_account(&registry_pda).await {
-            Ok(acc) if acc.data.len() >= REGISTRY_MIN_LEN => {
-                u64::from_le_bytes(
-                    acc.data[REGISTRY_NEXT_EPOCH_OFFSET..REGISTRY_NEXT_EPOCH_OFFSET + 8]
-                        .try_into()
-                        .unwrap_or([0u8; 8]),
-                )
-            }
+            Ok(acc) if acc.data.len() >= REGISTRY_MIN_LEN => u64::from_le_bytes(
+                acc.data[REGISTRY_NEXT_EPOCH_OFFSET..REGISTRY_NEXT_EPOCH_OFFSET + 8]
+                    .try_into()
+                    .unwrap_or([0u8; 8]),
+            ),
             Ok(_) => 0, // account exists but too short or no data — treat as never submitted
             Err(_) => 0, // no registry account — agent never submitted
         };
@@ -129,7 +123,7 @@ pub async fn check_and_slash_inactive(
 
         // Bounty goes to this node's USDC ATA.
         let node_pubkey = solana_sdk::pubkey::Pubkey::from(identity.verifying_key.to_bytes());
-        let caller_ata  = get_ata(&node_pubkey, usdc_mint);
+        let caller_ata = get_ata(&node_pubkey, usdc_mint);
 
         // Derive vault ATA (source of slash funds).
         let vault_ata = get_ata(&vault_authority_pda, usdc_mint);
@@ -146,7 +140,9 @@ pub async fn check_and_slash_inactive(
             &vault_ata,
             &registry_pda,
             &stake_lock_program,
-        ).await {
+        )
+        .await
+        {
             tracing::warn!(
                 agent = %hex::encode(agent_id),
                 "slash_inactive failed: {e}",
@@ -167,17 +163,17 @@ pub async fn check_and_slash_inactive(
 
 #[allow(clippy::too_many_arguments)]
 async fn submit_slash_inactive(
-    rpc:                  &RpcClient,
-    identity:             &AgentIdentity,
-    kora:                 Option<&KoraClient>,
-    usdc_mint:            &Pubkey,
-    caller_pubkey:        &Pubkey,
-    caller_ata:           &Pubkey,
-    stake_account:        &Pubkey,
-    vault_authority:      &Pubkey,
-    vault_ata:            &Pubkey,
-    agent_registry:       &Pubkey,
-    stake_lock_program:   &Pubkey,
+    rpc: &RpcClient,
+    identity: &AgentIdentity,
+    kora: Option<&KoraClient>,
+    usdc_mint: &Pubkey,
+    caller_pubkey: &Pubkey,
+    caller_ata: &Pubkey,
+    stake_account: &Pubkey,
+    vault_authority: &Pubkey,
+    vault_ata: &Pubkey,
+    agent_registry: &Pubkey,
+    stake_lock_program: &Pubkey,
 ) -> anyhow::Result<()> {
     let ix = build_slash_inactive_ix(
         caller_pubkey,
@@ -193,22 +189,21 @@ async fn submit_slash_inactive(
     let recent_blockhash = rpc.get_latest_blockhash().await?;
 
     if let Some(kora) = kora {
-        let fee_payer = kora.get_fee_payer().await
+        let fee_payer = kora
+            .get_fee_payer()
+            .await
             .map_err(|e| anyhow::anyhow!("Kora get_fee_payer: {e}"))?;
 
-        let message = Message::new_with_blockhash(
-            &[ix],
-            Some(&fee_payer),
-            &recent_blockhash,
-        );
+        let message = Message::new_with_blockhash(&[ix], Some(&fee_payer), &recent_blockhash);
         let tx = Transaction {
             signatures: vec![Signature::default(); message.header.num_required_signatures as usize],
             message,
         };
-        let tx_bytes = bincode::serialize(&tx)
-            .map_err(|e| anyhow::anyhow!("bincode serialize: {e}"))?;
+        let tx_bytes =
+            bincode::serialize(&tx).map_err(|e| anyhow::anyhow!("bincode serialize: {e}"))?;
         let tx_b64 = BASE64.encode(&tx_bytes);
-        kora.sign_and_send(&tx_b64).await
+        kora.sign_and_send(&tx_b64)
+            .await
             .map_err(|e| anyhow::anyhow!("Kora sign_and_send: {e}"))?;
     } else {
         let vk_bytes = identity.verifying_key.to_bytes();
@@ -225,7 +220,8 @@ async fn submit_slash_inactive(
             &[&solana_kp],
             recent_blockhash,
         );
-        rpc.send_and_confirm_transaction(&tx).await
+        rpc.send_and_confirm_transaction(&tx)
+            .await
             .map_err(|e| anyhow::anyhow!("send_and_confirm: {e}"))?;
     }
 
@@ -248,14 +244,14 @@ async fn submit_slash_inactive(
 /// Instruction data: 8-byte Anchor discriminator, no args.
 #[allow(clippy::too_many_arguments)]
 fn build_slash_inactive_ix(
-    caller:              &Pubkey,
-    caller_usdc:         &Pubkey,
-    stake_account:       &Pubkey,
-    vault_authority:     &Pubkey,
-    vault_ata:           &Pubkey,
-    agent_registry:      &Pubkey,
-    usdc_mint:           &Pubkey,
-    stake_lock_program:  &Pubkey,
+    caller: &Pubkey,
+    caller_usdc: &Pubkey,
+    stake_account: &Pubkey,
+    vault_authority: &Pubkey,
+    vault_ata: &Pubkey,
+    agent_registry: &Pubkey,
+    usdc_mint: &Pubkey,
+    stake_lock_program: &Pubkey,
 ) -> Instruction {
     let mut data = Vec::with_capacity(8);
     data.extend_from_slice(&anchor_discriminator("slash_inactive"));
@@ -287,11 +283,15 @@ fn anchor_discriminator(name: &str) -> [u8; 8] {
 }
 
 fn stake_lock_program_id() -> Pubkey {
-    STAKE_LOCK_PROGRAM_ID_STR.parse().expect("static program ID")
+    STAKE_LOCK_PROGRAM_ID_STR
+        .parse()
+        .expect("static program ID")
 }
 
 fn behavior_log_program_id() -> Pubkey {
-    BEHAVIOR_LOG_PROGRAM_ID_STR.parse().expect("static program ID")
+    BEHAVIOR_LOG_PROGRAM_ID_STR
+        .parse()
+        .expect("static program ID")
 }
 
 fn spl_token_program() -> Pubkey {

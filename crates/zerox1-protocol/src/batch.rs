@@ -1,9 +1,5 @@
+use crate::{constants::MAX_BATCH_ENTRIES, error::ProtocolError, hash::keccak256};
 use ciborium::value::Value;
-use crate::{
-    constants::MAX_BATCH_ENTRIES,
-    error::ProtocolError,
-    hash::keccak256,
-};
 
 // ============================================================================
 // Economic array types (doc 5, §8.3)
@@ -104,9 +100,9 @@ pub struct BehaviorBatch {
     pub disputes: u32,
 
     // --- Self-reported economic arrays (challengeable) ----------------------
-    pub bid_values:      Vec<TypedBid>,
+    pub bid_values: Vec<TypedBid>,
     pub task_selections: Vec<TaskSelection>,
-    pub verifier_ids:    Vec<VerifierAssignment>,
+    pub verifier_ids: Vec<VerifierAssignment>,
     pub feedback_events: Vec<FeedbackEvent>,
 
     // --- Overflow handling --------------------------------------------------
@@ -125,25 +121,58 @@ impl BehaviorBatch {
     /// Encode to canonical CBOR bytes for on-chain submission / signing.
     pub fn to_cbor(&self) -> Result<Vec<u8>, ProtocolError> {
         let value = Value::Map(vec![
-            (sv("agent_id"),               Value::Bytes(self.agent_id.to_vec())),
-            (sv("epoch_number"),           Value::Integer(self.epoch_number.into())),
-            (sv("slot_start"),             Value::Integer(self.slot_start.into())),
-            (sv("slot_end"),               Value::Integer(self.slot_end.into())),
-            (sv("message_count"),          Value::Integer(self.message_count.into())),
-            (sv("msg_type_counts"),        Value::Array(
-                self.msg_type_counts.iter().map(|&c| Value::Integer(c.into())).collect()
-            )),
-            (sv("unique_counterparties"),  Value::Integer(self.unique_counterparties.into())),
-            (sv("tasks_completed"),        Value::Integer(self.tasks_completed.into())),
-            (sv("notarizations"),          Value::Integer(self.notarizations.into())),
-            (sv("disputes"),               Value::Integer(self.disputes.into())),
-            (sv("bid_values"),             encode_typed_bids(&self.bid_values)),
-            (sv("task_selections"),        encode_task_selections(&self.task_selections)),
-            (sv("verifier_ids"),           encode_verifier_assignments(&self.verifier_ids)),
-            (sv("feedback_events"),        encode_feedback_events(&self.feedback_events)),
-            (sv("overflow"),               Value::Bool(self.overflow)),
-            (sv("overflow_data_hash"),     Value::Bytes(self.overflow_data_hash.to_vec())),
-            (sv("log_merkle_root"),        Value::Bytes(self.log_merkle_root.to_vec())),
+            (sv("agent_id"), Value::Bytes(self.agent_id.to_vec())),
+            (sv("epoch_number"), Value::Integer(self.epoch_number.into())),
+            (sv("slot_start"), Value::Integer(self.slot_start.into())),
+            (sv("slot_end"), Value::Integer(self.slot_end.into())),
+            (
+                sv("message_count"),
+                Value::Integer(self.message_count.into()),
+            ),
+            (
+                sv("msg_type_counts"),
+                Value::Array(
+                    self.msg_type_counts
+                        .iter()
+                        .map(|&c| Value::Integer(c.into()))
+                        .collect(),
+                ),
+            ),
+            (
+                sv("unique_counterparties"),
+                Value::Integer(self.unique_counterparties.into()),
+            ),
+            (
+                sv("tasks_completed"),
+                Value::Integer(self.tasks_completed.into()),
+            ),
+            (
+                sv("notarizations"),
+                Value::Integer(self.notarizations.into()),
+            ),
+            (sv("disputes"), Value::Integer(self.disputes.into())),
+            (sv("bid_values"), encode_typed_bids(&self.bid_values)),
+            (
+                sv("task_selections"),
+                encode_task_selections(&self.task_selections),
+            ),
+            (
+                sv("verifier_ids"),
+                encode_verifier_assignments(&self.verifier_ids),
+            ),
+            (
+                sv("feedback_events"),
+                encode_feedback_events(&self.feedback_events),
+            ),
+            (sv("overflow"), Value::Bool(self.overflow)),
+            (
+                sv("overflow_data_hash"),
+                Value::Bytes(self.overflow_data_hash.to_vec()),
+            ),
+            (
+                sv("log_merkle_root"),
+                Value::Bytes(self.log_merkle_root.to_vec()),
+            ),
         ]);
 
         let mut buf = Vec::new();
@@ -170,9 +199,9 @@ impl BehaviorBatch {
         let mut buf = Vec::new();
 
         let bids_val = encode_typed_bids(bids);
-        let sel_val  = encode_task_selections(selections);
-        let ver_val  = encode_verifier_assignments(verifiers);
-        let fb_val   = encode_feedback_events(feedback);
+        let sel_val = encode_task_selections(selections);
+        let ver_val = encode_verifier_assignments(verifiers);
+        let fb_val = encode_feedback_events(feedback);
 
         for v in [bids_val, sel_val, ver_val, fb_val] {
             // Writing to Vec<u8> is infallible.
@@ -187,9 +216,9 @@ impl BehaviorBatch {
     ///
     /// Call this on the fully-populated batch before finalizing.
     pub fn apply_overflow_cap(&mut self) {
-        let overflows = self.bid_values.len()      > MAX_BATCH_ENTRIES
+        let overflows = self.bid_values.len() > MAX_BATCH_ENTRIES
             || self.task_selections.len() > MAX_BATCH_ENTRIES
-            || self.verifier_ids.len()    > MAX_BATCH_ENTRIES
+            || self.verifier_ids.len() > MAX_BATCH_ENTRIES
             || self.feedback_events.len() > MAX_BATCH_ENTRIES;
 
         if overflows {
@@ -218,40 +247,67 @@ fn sv(s: &str) -> Value {
 }
 
 fn encode_typed_bids(bids: &[TypedBid]) -> Value {
-    Value::Array(bids.iter().map(|b| Value::Array(vec![
-        Value::Bytes(b.conversation_id.to_vec()),
-        Value::Bytes(b.counterparty.to_vec()),
-        Value::Integer(ciborium::value::Integer::try_from(b.bid_value).unwrap_or(0.into())),
-        Value::Integer(b.slot.into()),
-    ])).collect())
+    Value::Array(
+        bids.iter()
+            .map(|b| {
+                Value::Array(vec![
+                    Value::Bytes(b.conversation_id.to_vec()),
+                    Value::Bytes(b.counterparty.to_vec()),
+                    Value::Integer(
+                        ciborium::value::Integer::try_from(b.bid_value).unwrap_or(0.into()),
+                    ),
+                    Value::Integer(b.slot.into()),
+                ])
+            })
+            .collect(),
+    )
 }
 
 fn encode_task_selections(sel: &[TaskSelection]) -> Value {
-    Value::Array(sel.iter().map(|s| Value::Array(vec![
-        Value::Bytes(s.conversation_id.to_vec()),
-        Value::Bytes(s.counterparty.to_vec()),
-        Value::Integer(s.slot.into()),
-    ])).collect())
+    Value::Array(
+        sel.iter()
+            .map(|s| {
+                Value::Array(vec![
+                    Value::Bytes(s.conversation_id.to_vec()),
+                    Value::Bytes(s.counterparty.to_vec()),
+                    Value::Integer(s.slot.into()),
+                ])
+            })
+            .collect(),
+    )
 }
 
 fn encode_verifier_assignments(ver: &[VerifierAssignment]) -> Value {
-    Value::Array(ver.iter().map(|v| Value::Array(vec![
-        Value::Bytes(v.conversation_id.to_vec()),
-        Value::Bytes(v.verifier_id.to_vec()),
-        Value::Integer(v.slot.into()),
-    ])).collect())
+    Value::Array(
+        ver.iter()
+            .map(|v| {
+                Value::Array(vec![
+                    Value::Bytes(v.conversation_id.to_vec()),
+                    Value::Bytes(v.verifier_id.to_vec()),
+                    Value::Integer(v.slot.into()),
+                ])
+            })
+            .collect(),
+    )
 }
 
 fn encode_feedback_events(events: &[FeedbackEvent]) -> Value {
-    Value::Array(events.iter().map(|e| Value::Array(vec![
-        Value::Bytes(e.conversation_id.to_vec()),
-        Value::Bytes(e.from_agent.to_vec()),
-        Value::Integer((e.score as i64).into()),
-        Value::Integer(e.outcome.into()),
-        Value::Integer(e.role.into()),
-        Value::Integer(e.slot.into()),
-        Value::Bytes(e.sati_attestation_hash.to_vec()),
-    ])).collect())
+    Value::Array(
+        events
+            .iter()
+            .map(|e| {
+                Value::Array(vec![
+                    Value::Bytes(e.conversation_id.to_vec()),
+                    Value::Bytes(e.from_agent.to_vec()),
+                    Value::Integer((e.score as i64).into()),
+                    Value::Integer(e.outcome.into()),
+                    Value::Integer(e.role.into()),
+                    Value::Integer(e.slot.into()),
+                    Value::Bytes(e.sati_attestation_hash.to_vec()),
+                ])
+            })
+            .collect(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +323,7 @@ mod tests {
             agent_id: [1u8; 32],
             epoch_number: 0,
             slot_start: 1_000,
-            slot_end:   1_200,
+            slot_end: 1_200,
             message_count: 5,
             msg_type_counts: [0u32; 16],
             unique_counterparties: 2,

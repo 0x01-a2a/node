@@ -160,8 +160,7 @@ impl Config {
         match &self.usdc_mint {
             None => Ok(None),
             Some(s) => Ok(Some(
-                Pubkey::from_str(s)
-                    .map_err(|e| anyhow::anyhow!("invalid usdc_mint: {e}"))?,
+                Pubkey::from_str(s).map_err(|e| anyhow::anyhow!("invalid usdc_mint: {e}"))?,
             )),
         }
     }
@@ -195,9 +194,9 @@ impl Config {
                         .into_vec()
                         .map_err(|e| anyhow::anyhow!("invalid sati_mint base58: {e}"))?
                 };
-                let arr: [u8; 32] = bytes
-                    .try_into()
-                    .map_err(|_| anyhow::anyhow!("sati_mint must be 32 bytes (got a wrong-length address)"))?;
+                let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+                    anyhow::anyhow!("sati_mint must be 32 bytes (got a wrong-length address)")
+                })?;
                 Ok(Some(arr))
             }
         }

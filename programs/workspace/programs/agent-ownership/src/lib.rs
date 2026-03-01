@@ -1,7 +1,6 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{
-    Mint as MintInterface, TokenAccount as TokenAccountInterface,
-    TokenInterface,
+    Mint as MintInterface, TokenAccount as TokenAccountInterface, TokenInterface,
 };
 
 declare_id!("9GYVDTgc345bBa2k7j9a15aJSeKjzC75eyxdL3XCYVS9");
@@ -37,7 +36,10 @@ pub mod agent_ownership {
         agent_id: [u8; 32],
         proposed_owner: Pubkey,
     ) -> Result<()> {
-        require!(proposed_owner != Pubkey::default(), OwnershipError::ZeroAddress);
+        require!(
+            proposed_owner != Pubkey::default(),
+            OwnershipError::ZeroAddress
+        );
 
         // Reject if already claimed — AgentOwnership PDA exists (non-zero lamports).
         require!(
@@ -54,12 +56,12 @@ pub mod agent_ownership {
             );
         }
 
-        invite.version        = 1;
-        invite.agent_id       = agent_id;
+        invite.version = 1;
+        invite.agent_id = agent_id;
         invite.proposed_owner = proposed_owner;
-        invite.proposer       = ctx.accounts.proposer.key();
-        invite.proposed_at    = Clock::get()?.unix_timestamp;
-        invite.bump           = ctx.bumps.claim_invitation;
+        invite.proposer = ctx.accounts.proposer.key();
+        invite.proposed_at = Clock::get()?.unix_timestamp;
+        invite.bump = ctx.bumps.claim_invitation;
 
         emit!(OwnershipProposed {
             agent_id,
@@ -83,15 +85,15 @@ pub mod agent_ownership {
         );
 
         let ownership = &mut ctx.accounts.agent_ownership;
-        ownership.version    = 1;
-        ownership.agent_id   = invite.agent_id;
-        ownership.owner      = ctx.accounts.owner.key();
+        ownership.version = 1;
+        ownership.agent_id = invite.agent_id;
+        ownership.owner = ctx.accounts.owner.key();
         ownership.claimed_at = Clock::get()?.unix_timestamp;
-        ownership.bump       = ctx.bumps.agent_ownership;
+        ownership.bump = ctx.bumps.agent_ownership;
 
         emit!(OwnershipClaimed {
-            agent_id:   invite.agent_id,
-            owner:      ctx.accounts.owner.key(),
+            agent_id: invite.agent_id,
+            owner: ctx.accounts.owner.key(),
             claimed_at: ownership.claimed_at,
         });
 
@@ -183,16 +185,16 @@ pub struct AcceptClaim<'info> {
 /// PDA: seeds = ["claim_invite", agent_id]
 #[account]
 pub struct ClaimInvitation {
-    pub version:        u8,
+    pub version: u8,
     /// 0x01 agent ID = SATI mint address (32 bytes).
-    pub agent_id:       [u8; 32],
+    pub agent_id: [u8; 32],
     /// Human wallet being invited to claim ownership.
     pub proposed_owner: Pubkey,
     /// Wallet that submitted the proposal (agent key, operator, etc.).
-    pub proposer:       Pubkey,
+    pub proposer: Pubkey,
     /// Unix timestamp of the proposal.
-    pub proposed_at:    i64,
-    pub bump:           u8,
+    pub proposed_at: i64,
+    pub bump: u8,
 }
 
 impl ClaimInvitation {
@@ -204,14 +206,14 @@ impl ClaimInvitation {
 /// PDA: seeds = ["agent_owner", agent_id]
 #[account]
 pub struct AgentOwnership {
-    pub version:    u8,
+    pub version: u8,
     /// 0x01 agent ID = SATI mint address (32 bytes).
-    pub agent_id:   [u8; 32],
+    pub agent_id: [u8; 32],
     /// Human wallet that accepted the claim.
-    pub owner:      Pubkey,
+    pub owner: Pubkey,
     /// Unix timestamp of acceptance.
     pub claimed_at: i64,
-    pub bump:       u8,
+    pub bump: u8,
 }
 
 impl AgentOwnership {
@@ -225,15 +227,15 @@ impl AgentOwnership {
 
 #[event]
 pub struct OwnershipProposed {
-    pub agent_id:       [u8; 32],
+    pub agent_id: [u8; 32],
     pub proposed_owner: Pubkey,
-    pub proposer:       Pubkey,
+    pub proposer: Pubkey,
 }
 
 #[event]
 pub struct OwnershipClaimed {
-    pub agent_id:   [u8; 32],
-    pub owner:      Pubkey,
+    pub agent_id: [u8; 32],
+    pub owner: Pubkey,
     pub claimed_at: i64,
 }
 

@@ -1,8 +1,8 @@
 mod api;
 mod batch;
 mod challenge;
-mod escrow;
 mod config;
+mod escrow;
 mod identity;
 mod inactive;
 mod kora;
@@ -13,8 +13,8 @@ mod node;
 mod peer_state;
 mod push_notary;
 mod reputation;
-mod submit;
 mod stake_lock;
+mod submit;
 
 use clap::Parser;
 

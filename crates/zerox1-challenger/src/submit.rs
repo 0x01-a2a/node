@@ -1,5 +1,7 @@
 use anyhow::Context;
 use solana_client::nonblocking::rpc_client::RpcClient;
+#[allow(deprecated)]
+use solana_sdk::system_program;
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     message::Message,
@@ -7,20 +9,18 @@ use solana_sdk::{
     signature::{Keypair, Signer},
     transaction::Transaction,
 };
-#[allow(deprecated)]
-use solana_sdk::system_program;
 
 use sha2::Digest;
 use zerox1_protocol::hash::keccak256;
 
 // Program IDs
-const CHALLENGE_PROGRAM_ID: &str     = "7FoisCiS1gyUx7osQkCLk4A1zNKGq37yHpVhL2BFgk1Y";
-const BEHAVIOR_LOG_PROGRAM_ID: &str  = "35DAMPQVu6wsmMEGv67URFAGgyauEYD73egd74uiX1sM";
-const USDC_MINT: &str                = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"; // Devnet USDC
+const CHALLENGE_PROGRAM_ID: &str = "7FoisCiS1gyUx7osQkCLk4A1zNKGq37yHpVhL2BFgk1Y";
+const BEHAVIOR_LOG_PROGRAM_ID: &str = "35DAMPQVu6wsmMEGv67URFAGgyauEYD73egd74uiX1sM";
+const USDC_MINT: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"; // Devnet USDC
 
-const SPL_TOKEN_PROGRAM_ID: &str     = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-const SPL_ATA_PROGRAM_ID: &str       = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bJo";
-const TREASURY_PUBKEY: &str          = "qw4hzfV7UUXTrNh3hiS9Q8KSPMXWUusNoyFKLvtcMMX";
+const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+const SPL_ATA_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bJo";
+const TREASURY_PUBKEY: &str = "qw4hzfV7UUXTrNh3hiS9Q8KSPMXWUusNoyFKLvtcMMX";
 
 fn challenge_program_id() -> Pubkey {
     CHALLENGE_PROGRAM_ID.parse().unwrap()
@@ -71,7 +71,11 @@ pub fn generate_merkle_proof(leaf_index: usize, leaves: &[[u8; 32]]) -> Vec<[u8;
     let mut idx = leaf_index;
 
     while layer.len() > 1 {
-        let sibling_idx = if idx.is_multiple_of(2) { idx + 1 } else { idx - 1 };
+        let sibling_idx = if idx.is_multiple_of(2) {
+            idx + 1
+        } else {
+            idx - 1
+        };
         proof.push(layer[sibling_idx]);
 
         let mut next = Vec::with_capacity(layer.len() / 2);
@@ -90,13 +94,13 @@ pub fn generate_merkle_proof(leaf_index: usize, leaves: &[[u8; 32]]) -> Vec<[u8;
 
 /// Anchor's `submit_challenge` args (Borsh layout)
 fn build_submit_challenge_ix(
-    payer:           &Pubkey,
-    challenger:      &Pubkey,
-    agent_id:        &[u8; 32],
-    epoch_number:    u64,
-    leaf_index:      u64,
-    entry:           &[u8],
-    merkle_proof:    &[[u8; 32]],
+    payer: &Pubkey,
+    challenger: &Pubkey,
+    agent_id: &[u8; 32],
+    epoch_number: u64,
+    leaf_index: u64,
+    entry: &[u8],
+    merkle_proof: &[[u8; 32]],
 ) -> Instruction {
     let mut data = Vec::new();
     data.extend_from_slice(&anchor_discriminator("submit_challenge"));
@@ -117,7 +121,7 @@ fn build_submit_challenge_ix(
     data.extend_from_slice(&leaf_index.to_le_bytes());
 
     let prog_id = challenge_program_id();
-    
+
     // Derived pdas
     let (batch_pda, _) = Pubkey::find_program_address(
         &[b"batch", agent_id, &epoch_number.to_le_bytes()],
@@ -129,10 +133,8 @@ fn build_submit_challenge_ix(
         &prog_id,
     );
 
-    let (challenge_vault_authority, _) = Pubkey::find_program_address(
-        &[b"challenge_vault", challenge_account.as_ref()],
-        &prog_id,
-    );
+    let (challenge_vault_authority, _) =
+        Pubkey::find_program_address(&[b"challenge_vault", challenge_account.as_ref()], &prog_id);
 
     let challenge_vault = get_associated_token_address(&challenge_vault_authority, &usdc_mint());
     let challenger_usdc = get_associated_token_address(challenger, &usdc_mint());
@@ -157,16 +159,15 @@ fn build_submit_challenge_ix(
 }
 
 pub async fn submit_challenge_onchain(
-    rpc:          &RpcClient,
-    signer:       &Keypair,
+    rpc: &RpcClient,
+    signer: &Keypair,
     agent_id_hex: &str,
-    epoch:        u64,
-    leaf_index:   usize,
-    entry:        &[u8],
+    epoch: u64,
+    leaf_index: usize,
+    entry: &[u8],
     merkle_proof: &[[u8; 32]],
 ) -> anyhow::Result<()> {
-    let agent_id_bytes = hex::decode(agent_id_hex)
-        .context("hex decode agent_id")?;
+    let agent_id_bytes = hex::decode(agent_id_hex).context("hex decode agent_id")?;
     let mut agent_id = [0u8; 32];
     agent_id.copy_from_slice(&agent_id_bytes);
 
@@ -184,21 +185,23 @@ pub async fn submit_challenge_onchain(
     let message = Message::new(&[ix], Some(&signer.pubkey()));
     let tx = Transaction::new(&[signer], message, recent_blockhash);
 
-    let sig = rpc.send_and_confirm_transaction(&tx).await
+    let sig = rpc
+        .send_and_confirm_transaction(&tx)
+        .await
         .context("send_and_confirm_transaction challenge")?;
-    
+
     tracing::info!("Challenge submitted! TX: {}", sig);
     Ok(())
 }
 
 /// Build the `resolve_challenge` instruction (Borsh layout).
 fn build_resolve_challenge_ix(
-    resolver:      &Pubkey,
-    challenger:    &Pubkey,
-    agent_id:      &[u8; 32],
-    epoch:         u64,
-    entry:         &[u8],
-    merkle_proof:  &[[u8; 32]],
+    resolver: &Pubkey,
+    challenger: &Pubkey,
+    agent_id: &[u8; 32],
+    epoch: u64,
+    entry: &[u8],
+    merkle_proof: &[[u8; 32]],
 ) -> Instruction {
     let mut data = Vec::new();
     data.extend_from_slice(&anchor_discriminator("resolve_challenge"));
@@ -223,15 +226,13 @@ fn build_resolve_challenge_ix(
         &[b"challenge", batch_pda.as_ref(), challenger.as_ref()],
         &prog_id,
     );
-    let (challenge_vault_authority, _) = Pubkey::find_program_address(
-        &[b"challenge_vault", challenge_account.as_ref()],
-        &prog_id,
-    );
+    let (challenge_vault_authority, _) =
+        Pubkey::find_program_address(&[b"challenge_vault", challenge_account.as_ref()], &prog_id);
 
-    let challenge_vault  = get_associated_token_address(&challenge_vault_authority, &usdc_mint());
-    let challenger_usdc  = get_associated_token_address(challenger, &usdc_mint());
-    let treasury_key     = treasury();
-    let treasury_usdc    = get_associated_token_address(&treasury_key, &usdc_mint());
+    let challenge_vault = get_associated_token_address(&challenge_vault_authority, &usdc_mint());
+    let challenger_usdc = get_associated_token_address(challenger, &usdc_mint());
+    let treasury_key = treasury();
+    let treasury_usdc = get_associated_token_address(&treasury_key, &usdc_mint());
 
     Instruction {
         program_id: prog_id,
@@ -252,11 +253,11 @@ fn build_resolve_challenge_ix(
 }
 
 pub async fn resolve_challenge_onchain(
-    rpc:          &RpcClient,
-    signer:       &Keypair,
+    rpc: &RpcClient,
+    signer: &Keypair,
     agent_id_hex: &str,
-    epoch:        u64,
-    entry:        &[u8],
+    epoch: u64,
+    entry: &[u8],
     merkle_proof: &[[u8; 32]],
 ) -> anyhow::Result<()> {
     let agent_id_bytes = hex::decode(agent_id_hex).context("hex decode agent_id")?;
@@ -276,7 +277,9 @@ pub async fn resolve_challenge_onchain(
     let message = Message::new(&[ix], Some(&signer.pubkey()));
     let tx = Transaction::new(&[signer], message, recent_blockhash);
 
-    let sig = rpc.send_and_confirm_transaction(&tx).await
+    let sig = rpc
+        .send_and_confirm_transaction(&tx)
+        .await
         .context("send_and_confirm_transaction resolve_challenge")?;
 
     tracing::info!("Challenge resolved! TX: {}", sig);

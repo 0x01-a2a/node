@@ -1,5 +1,5 @@
-use ciborium::value::Value;
 use crate::error::ProtocolError;
+use ciborium::value::Value;
 
 // ============================================================================
 // NOTARIZE_BID payload (doc 5, §5.4)
@@ -22,7 +22,7 @@ pub struct NotarizeBidPayload {
 
 impl NotarizeBidPayload {
     pub const BID_TYPE_REQUEST: u8 = 0x00;
-    pub const BID_TYPE_OFFER: u8   = 0x01;
+    pub const BID_TYPE_OFFER: u8 = 0x01;
 
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(1 + 16 + self.opaque.len());
@@ -48,7 +48,11 @@ impl NotarizeBidPayload {
         }
         let conversation_id: [u8; 16] = bytes[1..17].try_into().unwrap();
         let opaque = bytes[17..].to_vec();
-        Ok(Self { bid_type, conversation_id, opaque })
+        Ok(Self {
+            bid_type,
+            conversation_id,
+            opaque,
+        })
     }
 }
 
@@ -79,11 +83,11 @@ pub struct FeedbackPayload {
 
 impl FeedbackPayload {
     pub const OUTCOME_NEGATIVE: u8 = 0;
-    pub const OUTCOME_NEUTRAL:  u8 = 1;
+    pub const OUTCOME_NEUTRAL: u8 = 1;
     pub const OUTCOME_POSITIVE: u8 = 2;
 
     pub const ROLE_PARTICIPANT: u8 = 0;
-    pub const ROLE_NOTARY:      u8 = 1;
+    pub const ROLE_NOTARY: u8 = 1;
 
     pub fn encode(&self) -> Vec<u8> {
         // CBOR array encoding for canonical serialization.
@@ -103,12 +107,11 @@ impl FeedbackPayload {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
-        let value: Value = ciborium::from_reader(bytes).map_err(|e| {
-            ProtocolError::PayloadParseError {
+        let value: Value =
+            ciborium::from_reader(bytes).map_err(|e| ProtocolError::PayloadParseError {
                 msg_type: 0x0B,
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
 
         let arr = match value {
             Value::Array(a) if a.len() == 6 => a,
@@ -127,11 +130,11 @@ impl FeedbackPayload {
         };
 
         let conversation_id = bytes16_from_value(&arr[0], 0x0B)?;
-        let target_agent    = bytes32_from_value(&arr[1], 0x0B)?;
-        let score           = i8_from_value(&arr[2], 0x0B)?;
-        let outcome         = u8_from_value(&arr[3], 0x0B)?;
-        let is_dispute      = bool_from_value(&arr[4], 0x0B)?;
-        let role            = u8_from_value(&arr[5], 0x0B)?;
+        let target_agent = bytes32_from_value(&arr[1], 0x0B)?;
+        let score = i8_from_value(&arr[2], 0x0B)?;
+        let outcome = u8_from_value(&arr[3], 0x0B)?;
+        let is_dispute = bool_from_value(&arr[4], 0x0B)?;
+        let role = u8_from_value(&arr[5], 0x0B)?;
 
         if outcome > 2 {
             return Err(ProtocolError::PayloadParseError {
@@ -152,7 +155,14 @@ impl FeedbackPayload {
             });
         }
 
-        Ok(Self { conversation_id, target_agent, score, outcome, is_dispute, role })
+        Ok(Self {
+            conversation_id,
+            target_agent,
+            score,
+            outcome,
+            is_dispute,
+            role,
+        })
     }
 }
 
@@ -169,7 +179,10 @@ fn u8_from_value(v: &Value, msg_type: u16) -> Result<u8, ProtocolError> {
                 reason: "u8 overflow".into(),
             })
         }
-        _ => Err(ProtocolError::PayloadParseError { msg_type, reason: "expected integer".into() }),
+        _ => Err(ProtocolError::PayloadParseError {
+            msg_type,
+            reason: "expected integer".into(),
+        }),
     }
 }
 
@@ -182,21 +195,30 @@ fn i8_from_value(v: &Value, msg_type: u16) -> Result<i8, ProtocolError> {
                 reason: "i8 overflow".into(),
             })
         }
-        _ => Err(ProtocolError::PayloadParseError { msg_type, reason: "expected integer".into() }),
+        _ => Err(ProtocolError::PayloadParseError {
+            msg_type,
+            reason: "expected integer".into(),
+        }),
     }
 }
 
 fn bool_from_value(v: &Value, msg_type: u16) -> Result<bool, ProtocolError> {
     match v {
         Value::Bool(b) => Ok(*b),
-        _ => Err(ProtocolError::PayloadParseError { msg_type, reason: "expected bool".into() }),
+        _ => Err(ProtocolError::PayloadParseError {
+            msg_type,
+            reason: "expected bool".into(),
+        }),
     }
 }
 
 fn bytes_from_value(v: &Value, msg_type: u16) -> Result<Vec<u8>, ProtocolError> {
     match v {
         Value::Bytes(b) => Ok(b.clone()),
-        _ => Err(ProtocolError::PayloadParseError { msg_type, reason: "expected bytes".into() }),
+        _ => Err(ProtocolError::PayloadParseError {
+            msg_type,
+            reason: "expected bytes".into(),
+        }),
     }
 }
 

@@ -5,31 +5,31 @@ use crate::error::ProtocolError;
 #[repr(u16)]
 pub enum MsgType {
     /// Broadcast: "I exist, here's what I offer"
-    Advertise      = 0x01,
+    Advertise = 0x01,
     /// Broadcast: "Who can do X?"
-    Discover       = 0x02,
+    Discover = 0x02,
     /// Bilateral: "Here's a deal"
-    Propose        = 0x03,
+    Propose = 0x03,
     /// Bilateral: "Here's a modified deal"
-    Counter        = 0x04,
+    Counter = 0x04,
     /// Bilateral: "Deal confirmed"
-    Accept         = 0x05,
+    Accept = 0x05,
     /// Bilateral: "No deal"
-    Reject         = 0x06,
+    Reject = 0x06,
     /// Bilateral: "Here's the work product"
-    Deliver        = 0x07,
+    Deliver = 0x07,
     /// Pubsub (notary topic): "I want to notarize this task"
-    NotarizeBid    = 0x08,
+    NotarizeBid = 0x08,
     /// Bilateral: "You're the notary"
     NotarizeAssign = 0x09,
     /// Bilateral: "Notary judgment on completion"
-    Verdict        = 0x0A,
+    Verdict = 0x0A,
     /// Pubsub (reputation topic): "Rating of counterparty or notary"
-    Feedback       = 0x0B,
+    Feedback = 0x0B,
     /// Bilateral: "I challenge this verdict"
-    Dispute        = 0x0C,
+    Dispute = 0x0C,
     /// Broadcast: "I'm alive" (heartbeat)
-    Beacon         = 0x0D,
+    Beacon = 0x0D,
 }
 
 impl MsgType {
@@ -85,19 +85,19 @@ impl MsgType {
 impl std::fmt::Display for MsgType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
-            Self::Advertise      => "ADVERTISE",
-            Self::Discover       => "DISCOVER",
-            Self::Propose        => "PROPOSE",
-            Self::Counter        => "COUNTER",
-            Self::Accept         => "ACCEPT",
-            Self::Reject         => "REJECT",
-            Self::Deliver        => "DELIVER",
-            Self::NotarizeBid    => "NOTARIZE_BID",
+            Self::Advertise => "ADVERTISE",
+            Self::Discover => "DISCOVER",
+            Self::Propose => "PROPOSE",
+            Self::Counter => "COUNTER",
+            Self::Accept => "ACCEPT",
+            Self::Reject => "REJECT",
+            Self::Deliver => "DELIVER",
+            Self::NotarizeBid => "NOTARIZE_BID",
             Self::NotarizeAssign => "NOTARIZE_ASSIGN",
-            Self::Verdict        => "VERDICT",
-            Self::Feedback       => "FEEDBACK",
-            Self::Dispute        => "DISPUTE",
-            Self::Beacon         => "BEACON",
+            Self::Verdict => "VERDICT",
+            Self::Feedback => "FEEDBACK",
+            Self::Dispute => "DISPUTE",
+            Self::Beacon => "BEACON",
         };
         write!(f, "{}", name)
     }

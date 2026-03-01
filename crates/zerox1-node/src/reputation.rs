@@ -11,28 +11,31 @@ use zerox1_protocol::constants::{
 #[derive(Debug, Clone, Default)]
 pub struct ReputationVector {
     #[allow(dead_code)]
-    pub agent_id:          [u8; 32],
+    pub agent_id: [u8; 32],
     /// Reliability / task completion quality.
     pub reliability_score: i64,
     /// Cooperation / counterparty satisfaction.
     pub cooperation_index: i64,
     /// Accuracy of notary judgments.
-    pub notary_accuracy:   i64,
-    pub total_tasks:       u32,
-    pub total_notarized:   u32,
-    pub total_disputes:    u32,
+    pub notary_accuracy: i64,
+    pub total_tasks: u32,
+    pub total_notarized: u32,
+    pub total_disputes: u32,
     pub last_active_epoch: u64,
 }
 
 /// Gossip-based real-time reputation tracker (doc 5, §7.3).
 pub struct ReputationTracker {
-    scores:        HashMap<[u8; 32], ReputationVector>,
+    scores: HashMap<[u8; 32], ReputationVector>,
     current_epoch: u64,
 }
 
 impl ReputationTracker {
     pub fn new() -> Self {
-        Self { scores: HashMap::new(), current_epoch: 0 }
+        Self {
+            scores: HashMap::new(),
+            current_epoch: 0,
+        }
     }
 
     pub fn get(&self, agent_id: &[u8; 32]) -> Option<&ReputationVector> {
@@ -46,17 +49,14 @@ impl ReputationTracker {
 
     /// Apply a FEEDBACK message to the gossip scores.
     /// `role` = 0 (participant), 1 (notary).
-    pub fn apply_feedback(
-        &mut self,
-        target:    [u8; 32],
-        score:     i8,
-        role:      u8,
-        epoch:     u64,
-    ) {
-        let entry = self.scores.entry(target).or_insert_with(|| ReputationVector {
-            agent_id: target,
-            ..Default::default()
-        });
+    pub fn apply_feedback(&mut self, target: [u8; 32], score: i8, role: u8, epoch: u64) {
+        let entry = self
+            .scores
+            .entry(target)
+            .or_insert_with(|| ReputationVector {
+                agent_id: target,
+                ..Default::default()
+            });
 
         entry.last_active_epoch = entry.last_active_epoch.max(epoch);
 
@@ -78,14 +78,21 @@ impl ReputationTracker {
     pub fn record_dispute(&mut self, agent_id: [u8; 32]) {
         self.scores
             .entry(agent_id)
-            .or_insert_with(|| ReputationVector { agent_id, ..Default::default() })
+            .or_insert_with(|| ReputationVector {
+                agent_id,
+                ..Default::default()
+            })
             .total_disputes += 1;
     }
 
     pub fn record_activity(&mut self, agent_id: [u8; 32], epoch: u64) {
-        let e = self.scores
+        let e = self
+            .scores
             .entry(agent_id)
-            .or_insert_with(|| ReputationVector { agent_id, ..Default::default() });
+            .or_insert_with(|| ReputationVector {
+                agent_id,
+                ..Default::default()
+            });
         if epoch > e.last_active_epoch {
             e.last_active_epoch = epoch;
         }

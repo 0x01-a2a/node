@@ -1,9 +1,9 @@
-use ed25519_dalek::{Signature, SigningKey, VerifyingKey, Signer, Verifier};
 use ciborium::value::Value;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
-    constants::{PROTOCOL_VERSION, MAX_MESSAGE_SIZE, TIMESTAMP_TOLERANCE_SECS},
+    constants::{MAX_MESSAGE_SIZE, PROTOCOL_VERSION, TIMESTAMP_TOLERANCE_SECS},
     error::ProtocolError,
     hash::keccak256,
     message::MsgType,
@@ -138,8 +138,8 @@ impl Envelope {
 
     /// Decode from canonical CBOR bytes.
     pub fn from_cbor(data: &[u8]) -> Result<Self, ProtocolError> {
-        let value: Value = ciborium::from_reader(data)
-            .map_err(|e| ProtocolError::CborDecode(e.to_string()))?;
+        let value: Value =
+            ciborium::from_reader(data).map_err(|e| ProtocolError::CborDecode(e.to_string()))?;
 
         let arr = match value {
             Value::Array(a) => a,
@@ -147,23 +147,24 @@ impl Envelope {
         };
 
         if arr.len() != 12 {
-            return Err(ProtocolError::CborDecode(
-                format!("expected 12 fields, got {}", arr.len()),
-            ));
+            return Err(ProtocolError::CborDecode(format!(
+                "expected 12 fields, got {}",
+                arr.len()
+            )));
         }
 
-        let version   = u8_from_value(&arr[0])?;
-        let msg_type  = MsgType::from_u16(u16_from_value(&arr[1])?)?;
-        let sender    = bytes32_from_value(&arr[2])?;
+        let version = u8_from_value(&arr[0])?;
+        let msg_type = MsgType::from_u16(u16_from_value(&arr[1])?)?;
+        let sender = bytes32_from_value(&arr[2])?;
         let recipient = bytes32_from_value(&arr[3])?;
         let timestamp = u64_from_value(&arr[4])?;
         let block_ref = u64_from_value(&arr[5])?;
-        let nonce     = u64_from_value(&arr[6])?;
+        let nonce = u64_from_value(&arr[6])?;
         let conversation_id = bytes16_from_value(&arr[7])?;
-        let payload_hash    = bytes32_from_value(&arr[8])?;
-        let payload_len     = u32_from_value(&arr[9])?;
-        let payload         = bytes_from_value(&arr[10])?;
-        let signature       = bytes64_from_value(&arr[11])?;
+        let payload_hash = bytes32_from_value(&arr[8])?;
+        let payload_len = u32_from_value(&arr[9])?;
+        let payload = bytes_from_value(&arr[10])?;
+        let signature = bytes64_from_value(&arr[11])?;
 
         Ok(Self {
             version,
@@ -264,7 +265,8 @@ fn u8_from_value(v: &Value) -> Result<u8, ProtocolError> {
     match v {
         Value::Integer(i) => {
             let n: i128 = (*i).into();
-            n.try_into().map_err(|_| ProtocolError::CborDecode("u8 overflow".into()))
+            n.try_into()
+                .map_err(|_| ProtocolError::CborDecode("u8 overflow".into()))
         }
         _ => Err(ProtocolError::CborDecode("expected integer".into())),
     }
@@ -274,7 +276,8 @@ fn u16_from_value(v: &Value) -> Result<u16, ProtocolError> {
     match v {
         Value::Integer(i) => {
             let n: i128 = (*i).into();
-            n.try_into().map_err(|_| ProtocolError::CborDecode("u16 overflow".into()))
+            n.try_into()
+                .map_err(|_| ProtocolError::CborDecode("u16 overflow".into()))
         }
         _ => Err(ProtocolError::CborDecode("expected integer".into())),
     }
@@ -284,7 +287,8 @@ fn u32_from_value(v: &Value) -> Result<u32, ProtocolError> {
     match v {
         Value::Integer(i) => {
             let n: i128 = (*i).into();
-            n.try_into().map_err(|_| ProtocolError::CborDecode("u32 overflow".into()))
+            n.try_into()
+                .map_err(|_| ProtocolError::CborDecode("u32 overflow".into()))
         }
         _ => Err(ProtocolError::CborDecode("expected integer".into())),
     }
@@ -294,7 +298,8 @@ fn u64_from_value(v: &Value) -> Result<u64, ProtocolError> {
     match v {
         Value::Integer(i) => {
             let n: i128 = (*i).into();
-            n.try_into().map_err(|_| ProtocolError::CborDecode("u64 overflow".into()))
+            n.try_into()
+                .map_err(|_| ProtocolError::CborDecode("u64 overflow".into()))
         }
         _ => Err(ProtocolError::CborDecode("expected integer".into())),
     }
@@ -309,17 +314,20 @@ fn bytes_from_value(v: &Value) -> Result<Vec<u8>, ProtocolError> {
 
 fn bytes16_from_value(v: &Value) -> Result<[u8; 16], ProtocolError> {
     let b = bytes_from_value(v)?;
-    b.try_into().map_err(|_| ProtocolError::CborDecode("expected 16-byte field".into()))
+    b.try_into()
+        .map_err(|_| ProtocolError::CborDecode("expected 16-byte field".into()))
 }
 
 fn bytes32_from_value(v: &Value) -> Result<[u8; 32], ProtocolError> {
     let b = bytes_from_value(v)?;
-    b.try_into().map_err(|_| ProtocolError::CborDecode("expected 32-byte field".into()))
+    b.try_into()
+        .map_err(|_| ProtocolError::CborDecode("expected 32-byte field".into()))
 }
 
 fn bytes64_from_value(v: &Value) -> Result<[u8; 64], ProtocolError> {
     let b = bytes_from_value(v)?;
-    b.try_into().map_err(|_| ProtocolError::CborDecode("expected 64-byte field".into()))
+    b.try_into()
+        .map_err(|_| ProtocolError::CborDecode("expected 64-byte field".into()))
 }
 
 // ---------------------------------------------------------------------------

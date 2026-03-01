@@ -40,31 +40,31 @@ use zerox1_protocol::{
 
 #[derive(Clone, Serialize)]
 pub struct PeerSnapshot {
-    pub agent_id:          String,
-    pub peer_id:           Option<String>,
-    pub sati_ok:           Option<bool>,
-    pub lease_ok:          Option<bool>,
+    pub agent_id: String,
+    pub peer_id: Option<String>,
+    pub sati_ok: Option<bool>,
+    pub lease_ok: Option<bool>,
     pub last_active_epoch: u64,
 }
 
 #[derive(Clone, Serialize)]
 pub struct ReputationSnapshot {
-    pub agent_id:          String,
-    pub reliability:       i64,
-    pub cooperation:       i64,
-    pub notary_accuracy:   i64,
-    pub total_tasks:       u32,
-    pub total_disputes:    u32,
+    pub agent_id: String,
+    pub reliability: i64,
+    pub cooperation: i64,
+    pub notary_accuracy: i64,
+    pub total_tasks: u32,
+    pub total_disputes: u32,
     pub last_active_epoch: u64,
 }
 
 #[derive(Clone, Serialize)]
 pub struct BatchSnapshot {
-    pub agent_id:        String,
-    pub epoch:           u64,
-    pub message_count:   u32,
+    pub agent_id: String,
+    pub epoch: u64,
+    pub message_count: u32,
     pub log_merkle_root: String,
-    pub batch_hash:      String,
+    pub batch_hash: String,
 }
 
 // ============================================================================
@@ -75,30 +75,30 @@ pub struct BatchSnapshot {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ApiEvent {
     Envelope {
-        sender:   String,
+        sender: String,
         msg_type: String,
-        slot:     u64,
+        slot: u64,
     },
     PeerRegistered {
         agent_id: String,
-        peer_id:  String,
+        peer_id: String,
     },
     ReputationUpdate {
-        agent_id:    String,
+        agent_id: String,
         reliability: i64,
         cooperation: i64,
     },
     BatchSubmitted {
-        epoch:         u64,
+        epoch: u64,
         message_count: u32,
-        batch_hash:    String,
+        batch_hash: String,
     },
     LeaseStatus {
         agent_id: String,
-        active:   bool,
+        active: bool,
     },
     SatiStatus {
-        agent_id:   String,
+        agent_id: String,
         registered: bool,
     },
 }
@@ -123,33 +123,33 @@ pub struct SendEnvelopeRequest {
 /// Response body for POST /envelopes/send.
 #[derive(Serialize)]
 pub struct SentConfirmation {
-    pub nonce:        u64,
+    pub nonce: u64,
     pub payload_hash: String, // hex keccak256
 }
 
 /// Outbound request queued by POST /envelopes/send, consumed by the node loop.
 pub struct OutboundRequest {
-    pub msg_type:        MsgType,
-    pub recipient:       [u8; 32],
+    pub msg_type: MsgType,
+    pub recipient: [u8; 32],
     pub conversation_id: [u8; 16],
-    pub payload:         Vec<u8>,
-    pub reply:           tokio::sync::oneshot::Sender<Result<SentConfirmation, String>>,
+    pub payload: Vec<u8>,
+    pub reply: tokio::sync::oneshot::Sender<Result<SentConfirmation, String>>,
 }
 
 /// Inbound envelope pushed from the node loop to /ws/inbox subscribers.
 #[derive(Clone, Serialize)]
 pub struct InboundEnvelope {
-    pub msg_type:        String,
-    pub sender:          String, // hex
-    pub recipient:       String, // hex
+    pub msg_type: String,
+    pub sender: String,          // hex
+    pub recipient: String,       // hex
     pub conversation_id: String, // hex
-    pub slot:            u64,
-    pub nonce:           u64,
-    pub payload_b64:     String,
+    pub slot: u64,
+    pub nonce: u64,
+    pub payload_b64: String,
     /// Decoded FEEDBACK payload fields (only present for FEEDBACK messages).
-    pub feedback:        Option<serde_json::Value>,
+    pub feedback: Option<serde_json::Value>,
     /// Decoded NOTARIZE_BID payload fields (only present for NOTARIZE_BID messages).
-    pub notarize_bid:    Option<serde_json::Value>,
+    pub notarize_bid: Option<serde_json::Value>,
 }
 
 // ============================================================================
@@ -167,7 +167,7 @@ const MAX_API_SENDS_PER_MINUTE: u32 = 120;
 
 struct RateLimitWindow {
     window_start: u64,
-    count:        u32,
+    count: u32,
 }
 
 fn now_secs() -> u64 {
@@ -184,23 +184,23 @@ fn now_secs() -> u64 {
 /// agent are signed with `signing_key` by the host.
 pub struct HostedSession {
     /// 32-byte verifying key — used as the agent_id on the mesh.
-    pub agent_id:                [u8; 32],
-    pub signing_key:             SigningKey,
-    pub created_at:              u64,
-    pub nonce:                   u64,
+    pub agent_id: [u8; 32],
+    pub signing_key: SigningKey,
+    pub created_at: u64,
+    pub nonce: u64,
     /// Start of the current 60-second rate-limit window (unix seconds).
-    pub rate_window_start:       u64,
+    pub rate_window_start: u64,
     /// Number of sends in the current rate-limit window.
-    pub sends_in_window:         u32,
+    pub sends_in_window: u32,
 }
 
 /// Request body for POST /hosted/send.
 #[derive(Deserialize)]
 pub struct HostedSendRequest {
-    pub msg_type:        String,
-    pub recipient:       Option<String>,
+    pub msg_type: String,
+    pub recipient: Option<String>,
     pub conversation_id: String,
-    pub payload_hex:     String,
+    pub payload_hex: String,
 }
 
 /// Query parameters for GET /ws/hosted/inbox (token fallback only).
@@ -215,29 +215,29 @@ pub struct HostedInboxQuery {
 
 struct ApiInner {
     // Visualization state
-    peers:      RwLock<HashMap<[u8; 32], PeerSnapshot>>,
+    peers: RwLock<HashMap<[u8; 32], PeerSnapshot>>,
     reputation: RwLock<HashMap<[u8; 32], ReputationSnapshot>>,
-    batches:    RwLock<Vec<BatchSnapshot>>,
-    event_tx:   broadcast::Sender<ApiEvent>,
+    batches: RwLock<Vec<BatchSnapshot>>,
+    event_tx: broadcast::Sender<ApiEvent>,
     self_agent: [u8; 32],
 
     // Agent integration channels
     /// Outbound requests from HTTP handlers to the node loop.
     outbound_tx: mpsc::Sender<OutboundRequest>,
     /// Inbound envelopes from node loop to /ws/inbox subscribers.
-    inbox_tx:    broadcast::Sender<InboundEnvelope>,
+    inbox_tx: broadcast::Sender<InboundEnvelope>,
     /// Optional bearer token to authenticate mutating API endpoints.
-    api_secret:  Option<String>,
+    api_secret: Option<String>,
 
     // Hosted-agent state
     /// token (hex-32) → HostedSession
-    hosted_sessions:    Arc<RwLock<HashMap<String, HostedSession>>>,
+    hosted_sessions: Arc<RwLock<HashMap<String, HostedSession>>>,
     #[allow(dead_code)]
-    hosting_fee_bps:    u32,
+    hosting_fee_bps: u32,
     /// Pre-signed envelopes from hosted-agent send handler → node loop.
     hosted_outbound_tx: mpsc::Sender<Envelope>,
     /// Global rate limit window for `/envelopes/send`.
-    send_rate_limit:    Mutex<RateLimitWindow>,
+    send_rate_limit: Mutex<RateLimitWindow>,
 }
 
 /// Cheaply cloneable shared state passed to all axum handlers.
@@ -250,30 +250,34 @@ impl ApiState {
     /// Returns `(state, outbound_rx, hosted_outbound_rx)`. The caller (node)
     /// must hold onto both receivers and drive them in the main event loop.
     pub fn new(
-        self_agent:      [u8; 32],
-        api_secret:      Option<String>,
+        self_agent: [u8; 32],
+        api_secret: Option<String>,
         hosting_fee_bps: u32,
-    ) -> (Self, mpsc::Receiver<OutboundRequest>, mpsc::Receiver<Envelope>) {
-        let (event_tx, _)    = broadcast::channel(512);
-        let (inbox_tx, _)    = broadcast::channel(256);
-        let (outbound_tx, outbound_rx)               = mpsc::channel(64);
+    ) -> (
+        Self,
+        mpsc::Receiver<OutboundRequest>,
+        mpsc::Receiver<Envelope>,
+    ) {
+        let (event_tx, _) = broadcast::channel(512);
+        let (inbox_tx, _) = broadcast::channel(256);
+        let (outbound_tx, outbound_rx) = mpsc::channel(64);
         let (hosted_outbound_tx, hosted_outbound_rx) = mpsc::channel(64);
 
         let state = Self(Arc::new(ApiInner {
-            peers:      RwLock::new(HashMap::new()),
+            peers: RwLock::new(HashMap::new()),
             reputation: RwLock::new(HashMap::new()),
-            batches:    RwLock::new(Vec::new()),
+            batches: RwLock::new(Vec::new()),
             event_tx,
             self_agent,
             outbound_tx,
             inbox_tx,
             api_secret,
-            hosted_sessions:    Arc::new(RwLock::new(HashMap::new())),
+            hosted_sessions: Arc::new(RwLock::new(HashMap::new())),
             hosting_fee_bps,
             hosted_outbound_tx,
             send_rate_limit: Mutex::new(RateLimitWindow {
                 window_start: now_secs(),
-                count:        0,
+                count: 0,
             }),
         }));
 
@@ -338,13 +342,13 @@ impl ApiState {
         };
 
         let inbound = InboundEnvelope {
-            msg_type:        format!("{}", env.msg_type),
-            sender:          hex::encode(env.sender),
-            recipient:       hex::encode(env.recipient),
+            msg_type: format!("{}", env.msg_type),
+            sender: hex::encode(env.sender),
+            recipient: hex::encode(env.recipient),
             conversation_id: hex::encode(env.conversation_id),
             slot,
-            nonce:           env.nonce,
-            payload_b64:     B64.encode(&env.payload),
+            nonce: env.nonce,
+            payload_b64: B64.encode(&env.payload),
             feedback,
             notarize_bid,
         };
@@ -356,13 +360,19 @@ impl ApiState {
     ///
     /// Called by the POST /envelopes/send handler.
     pub async fn send_outbound(&self, req: OutboundRequest) -> Result<(), String> {
-        self.0.outbound_tx.send(req).await
+        self.0
+            .outbound_tx
+            .send(req)
+            .await
             .map_err(|_| "node loop unavailable".to_string())
     }
 
     /// Queue a pre-signed hosted-agent envelope to the node loop for gossipsub broadcast.
     pub async fn send_hosted_outbound(&self, env: Envelope) -> Result<(), String> {
-        self.0.hosted_outbound_tx.send(env).await
+        self.0
+            .hosted_outbound_tx
+            .send(env)
+            .await
             .map_err(|_| "node loop unavailable".to_string())
     }
 }
@@ -374,25 +384,27 @@ impl ApiState {
 pub async fn serve(state: ApiState, addr: SocketAddr) {
     let router = Router::new()
         // Visualization
-        .route("/ws/events",              get(ws_events_handler))
-        .route("/peers",                  get(get_peers))
-        .route("/reputation/{agent_id}",    get(get_reputation))
+        .route("/ws/events", get(ws_events_handler))
+        .route("/peers", get(get_peers))
+        .route("/reputation/{agent_id}", get(get_reputation))
         .route("/batch/{agent_id}/{epoch}", get(get_batch))
         // Agent integration
-        .route("/envelopes/send",         post(send_envelope))
-        .route("/ws/inbox",               get(ws_inbox_handler))
+        .route("/envelopes/send", post(send_envelope))
+        .route("/ws/inbox", get(ws_inbox_handler))
         // Hosted-agent API
-        .route("/hosted/ping",            get(hosted_ping))
-        .route("/hosted/register",        post(hosted_register))
-        .route("/hosted/send",            post(hosted_send))
-        .route("/ws/hosted/inbox",        get(ws_hosted_inbox_handler))
+        .route("/hosted/ping", get(hosted_ping))
+        .route("/hosted/register", post(hosted_register))
+        .route("/hosted/send", post(hosted_send))
+        .route("/ws/hosted/inbox", get(ws_hosted_inbox_handler))
         .layer(
             // INFO-2: Local API — only allow loopback origins (zeroclaw, React Native).
             tower_http::cors::CorsLayer::new()
                 .allow_origin([
-                    "http://127.0.0.1".parse::<axum::http::HeaderValue>()
+                    "http://127.0.0.1"
+                        .parse::<axum::http::HeaderValue>()
                         .expect("hardcoded CORS origin '127.0.0.1' failed to parse"),
-                    "http://localhost".parse::<axum::http::HeaderValue>()
+                    "http://localhost"
+                        .parse::<axum::http::HeaderValue>()
                         .expect("hardcoded CORS origin 'localhost' failed to parse"),
                 ])
                 .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
@@ -416,8 +428,8 @@ pub async fn serve(state: ApiState, addr: SocketAddr) {
 // ============================================================================
 
 async fn ws_events_handler(
-    ws:           WebSocketUpgrade,
-    headers:      HeaderMap,
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
     State(state): State<ApiState>,
 ) -> impl IntoResponse {
@@ -428,7 +440,7 @@ async fn ws_events_handler(
             .and_then(|s| s.strip_prefix("Bearer "))
             .or_else(|| params.get("token").map(|s| s.as_str()))
             .unwrap_or("");
-        
+
         if !ct_eq(provided, secret.as_str()) {
             return StatusCode::UNAUTHORIZED.into_response();
         }
@@ -448,16 +460,13 @@ async fn ws_events_task(mut socket: WebSocket, state: ApiState) {
                 }
                 Err(e) => tracing::warn!("WS events serialize error: {e}"),
             },
-            Err(broadcast::error::RecvError::Closed)    => break,
+            Err(broadcast::error::RecvError::Closed) => break,
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
         }
     }
 }
 
-async fn get_peers(
-    headers: HeaderMap,
-    State(state): State<ApiState>,
-) -> Response {
+async fn get_peers(headers: HeaderMap, State(state): State<ApiState>) -> Response {
     if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
         return resp;
     }
@@ -468,8 +477,8 @@ async fn get_peers(
 
 async fn get_reputation(
     Path(agent_id_hex): Path<String>,
-    headers:            HeaderMap,
-    State(state):       State<ApiState>,
+    headers: HeaderMap,
+    State(state): State<ApiState>,
 ) -> Response {
     if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
         return resp;
@@ -483,15 +492,16 @@ async fn get_reputation(
     let rep = state.0.reputation.read().await;
     match rep.get(&arr) {
         Some(snap) => Json(serde_json::to_value(snap).unwrap_or_default()).into_response(),
-        None => Json(serde_json::json!({ "agent_id": agent_id_hex, "score": null }))
-            .into_response(),
+        None => {
+            Json(serde_json::json!({ "agent_id": agent_id_hex, "score": null })).into_response()
+        }
     }
 }
 
 async fn get_batch(
     Path((agent_id_hex, epoch)): Path<(String, u64)>,
-    headers:                     HeaderMap,
-    State(state):                State<ApiState>,
+    headers: HeaderMap,
+    State(state): State<ApiState>,
 ) -> Response {
     if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
         return resp;
@@ -500,7 +510,8 @@ async fn get_batch(
     if agent_id_hex != self_hex {
         return Json(serde_json::json!({
             "error": "batch history is only available for this node's own agent_id"
-        })).into_response();
+        }))
+        .into_response();
     }
     let batches = state.0.batches.read().await;
     match batches.iter().find(|b| b.epoch == epoch) {
@@ -515,8 +526,8 @@ async fn get_batch(
 
 async fn send_envelope(
     State(state): State<ApiState>,
-    headers:      HeaderMap,
-    Json(req):    Json<SendEnvelopeRequest>,
+    headers: HeaderMap,
+    Json(req): Json<SendEnvelopeRequest>,
 ) -> impl IntoResponse {
     // Authenticate outbound transmission requests.
     if let Some(ref secret) = state.0.api_secret {
@@ -553,10 +564,12 @@ async fn send_envelope(
     // Parse msg_type.
     let msg_type = match parse_msg_type(&req.msg_type) {
         Some(t) => t,
-        None    => return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": format!("unknown msg_type: {}", req.msg_type) })),
-        ),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("unknown msg_type: {}", req.msg_type) })),
+            )
+        }
     };
 
     // Parse recipient.
@@ -567,22 +580,30 @@ async fn send_envelope(
         BROADCAST_RECIPIENT
     } else {
         match &req.recipient {
-            None => return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "recipient required for bilateral messages" })),
-            ),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(
+                        serde_json::json!({ "error": "recipient required for bilateral messages" }),
+                    ),
+                )
+            }
             Some(hex_str) => match hex::decode(hex_str) {
                 Ok(b) => match b.try_into() {
                     Ok(arr) => arr,
-                    Err(_)  => return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({ "error": "recipient must be 32 bytes" })),
-                    ),
+                    Err(_) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({ "error": "recipient must be 32 bytes" })),
+                        )
+                    }
                 },
-                Err(_) => return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "error": "recipient: invalid hex" })),
-                ),
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": "recipient: invalid hex" })),
+                    )
+                }
             },
         }
     };
@@ -591,29 +612,41 @@ async fn send_envelope(
     let conversation_id: [u8; 16] = match hex::decode(&req.conversation_id) {
         Ok(b) => match b.try_into() {
             Ok(arr) => arr,
-            Err(_)  => return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "conversation_id must be 16 bytes" })),
-            ),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "conversation_id must be 16 bytes" })),
+                )
+            }
         },
-        Err(_) => return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "conversation_id: invalid hex" })),
-        ),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "conversation_id: invalid hex" })),
+            )
+        }
     };
 
     // Decode payload.
     let payload = match B64.decode(&req.payload_b64) {
-        Ok(b)  => b,
-        Err(_) => return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "payload_b64: invalid base64" })),
-        ),
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "payload_b64: invalid base64" })),
+            )
+        }
     };
 
     // Send to node loop via oneshot.
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let outbound = OutboundRequest { msg_type, recipient, conversation_id, payload, reply: reply_tx };
+    let outbound = OutboundRequest {
+        msg_type,
+        recipient,
+        conversation_id,
+        payload,
+        reply: reply_tx,
+    };
 
     if state.send_outbound(outbound).await.is_err() {
         return (
@@ -639,8 +672,8 @@ async fn send_envelope(
 }
 
 async fn ws_inbox_handler(
-    ws:           WebSocketUpgrade,
-    headers:      HeaderMap,
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
     State(state): State<ApiState>,
 ) -> impl IntoResponse {
@@ -651,7 +684,7 @@ async fn ws_inbox_handler(
             .and_then(|s| s.strip_prefix("Bearer "))
             .or_else(|| params.get("token").map(|s| s.as_str()))
             .unwrap_or("");
-        
+
         if !ct_eq(provided, secret.as_str()) {
             return StatusCode::UNAUTHORIZED.into_response();
         }
@@ -671,7 +704,7 @@ async fn ws_inbox_task(mut socket: WebSocket, state: ApiState) {
                 }
                 Err(e) => tracing::warn!("WS inbox serialize error: {e}"),
             },
-            Err(broadcast::error::RecvError::Closed)    => break,
+            Err(broadcast::error::RecvError::Closed) => break,
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
         }
     }
@@ -712,16 +745,16 @@ async fn hosted_register(State(state): State<ApiState>) -> impl IntoResponse {
     }
 
     let signing_key = SigningKey::generate(&mut OsRng);
-    let agent_id    = signing_key.verifying_key().to_bytes();
-    let token       = hex::encode(rand::random::<[u8; 32]>());
+    let agent_id = signing_key.verifying_key().to_bytes();
+    let token = hex::encode(rand::random::<[u8; 32]>());
 
     let session = HostedSession {
         agent_id,
         signing_key,
-        created_at:        now,
-        nonce:             0,
+        created_at: now,
+        nonce: 0,
         rate_window_start: now,
-        sends_in_window:   0,
+        sends_in_window: 0,
     };
     sessions.insert(token.clone(), session);
 
@@ -740,24 +773,28 @@ async fn hosted_register(State(state): State<ApiState>) -> impl IntoResponse {
 /// node loop for gossipsub broadcast.
 async fn hosted_send(
     State(state): State<ApiState>,
-    headers:      HeaderMap,
-    Json(req):    Json<HostedSendRequest>,
+    headers: HeaderMap,
+    Json(req): Json<HostedSendRequest>,
 ) -> impl IntoResponse {
     let token = match resolve_hosted_token(&headers) {
         Some(t) => t,
-        None    => return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({ "error": "missing Bearer token" })),
-        ),
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "missing Bearer token" })),
+            )
+        }
     };
 
     // Parse msg_type.
     let msg_type = match parse_msg_type(&req.msg_type) {
         Some(t) => t,
-        None    => return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": format!("unknown msg_type: {}", req.msg_type) })),
-        ),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("unknown msg_type: {}", req.msg_type) })),
+            )
+        }
     };
 
     // Parse recipient.
@@ -768,22 +805,30 @@ async fn hosted_send(
         BROADCAST_RECIPIENT
     } else {
         match &req.recipient {
-            None => return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "recipient required for bilateral messages" })),
-            ),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(
+                        serde_json::json!({ "error": "recipient required for bilateral messages" }),
+                    ),
+                )
+            }
             Some(hex_str) => match hex::decode(hex_str) {
                 Ok(b) => match b.try_into() {
                     Ok(arr) => arr,
-                    Err(_)  => return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({ "error": "recipient must be 32 bytes" })),
-                    ),
+                    Err(_) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({ "error": "recipient must be 32 bytes" })),
+                        )
+                    }
                 },
-                Err(_) => return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "error": "recipient: invalid hex" })),
-                ),
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": "recipient: invalid hex" })),
+                    )
+                }
             },
         }
     };
@@ -792,24 +837,30 @@ async fn hosted_send(
     let conversation_id: [u8; 16] = match hex::decode(&req.conversation_id) {
         Ok(b) => match b.try_into() {
             Ok(arr) => arr,
-            Err(_)  => return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "conversation_id must be 16 bytes" })),
-            ),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "conversation_id must be 16 bytes" })),
+                )
+            }
         },
-        Err(_) => return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "conversation_id: invalid hex" })),
-        ),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "conversation_id: invalid hex" })),
+            )
+        }
     };
 
     // Decode payload.
     let payload = match hex::decode(&req.payload_hex) {
-        Ok(b)  => b,
-        Err(_) => return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "payload_hex: invalid hex" })),
-        ),
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "payload_hex: invalid hex" })),
+            )
+        }
     };
 
     // Build pre-signed envelope using the session sub-keypair.
@@ -818,10 +869,12 @@ async fn hosted_send(
         let mut sessions = state.0.hosted_sessions.write().await;
         let session = match sessions.get_mut(&token) {
             Some(s) => s,
-            None    => return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({ "error": "invalid token" })),
-            ),
+            None => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({ "error": "invalid token" })),
+                )
+            }
         };
 
         // Session TTL check.
@@ -836,7 +889,7 @@ async fn hosted_send(
         // Rate limiting: sliding 60-second window.
         if now.saturating_sub(session.rate_window_start) >= 60 {
             session.rate_window_start = now;
-            session.sends_in_window   = 0;
+            session.sends_in_window = 0;
         }
         session.sends_in_window += 1;
         if session.sends_in_window > MAX_SENDS_PER_MINUTE {
@@ -878,29 +931,30 @@ async fn hosted_send(
 ///   1. `Authorization: Bearer <token>` header (preferred — never logged)
 ///   2. `?token=<hex>` query param (deprecated — visible in server logs)
 async fn ws_hosted_inbox_handler(
-    ws:           WebSocketUpgrade,
-    headers:      HeaderMap,
-    Query(q):     Query<HostedInboxQuery>,
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    Query(q): Query<HostedInboxQuery>,
     State(state): State<ApiState>,
 ) -> impl IntoResponse {
-    let token = resolve_hosted_token(&headers)
-        .or_else(|| {
-            if q.token.is_some() {
-                tracing::warn!(
-                    "WS /ws/hosted/inbox: token passed via query param (deprecated). \
+    let token = resolve_hosted_token(&headers).or_else(|| {
+        if q.token.is_some() {
+            tracing::warn!(
+                "WS /ws/hosted/inbox: token passed via query param (deprecated). \
                      Use Authorization: Bearer header instead."
-                );
-            }
-            q.token
-        });
+            );
+        }
+        q.token
+    });
 
     match token {
-        Some(t) => ws.on_upgrade(|socket| ws_hosted_inbox_task(socket, state, t))
+        Some(t) => ws
+            .on_upgrade(|socket| ws_hosted_inbox_task(socket, state, t))
             .into_response(),
-        None    => (
+        None => (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "missing Bearer token" })),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -911,17 +965,17 @@ async fn ws_hosted_inbox_task(mut socket: WebSocket, state: ApiState, token: Str
         match sessions.get(&token) {
             Some(s) => {
                 if now_secs().saturating_sub(s.created_at) >= SESSION_TTL_SECS {
-                    let _ = socket.send(Message::Text(
-                        r#"{"error":"session expired"}"#.into()
-                    )).await;
+                    let _ = socket
+                        .send(Message::Text(r#"{"error":"session expired"}"#.into()))
+                        .await;
                     return;
                 }
                 hex::encode(s.agent_id)
             }
-            None    => {
-                let _ = socket.send(Message::Text(
-                    r#"{"error":"invalid token"}"#.into()
-                )).await;
+            None => {
+                let _ = socket
+                    .send(Message::Text(r#"{"error":"invalid token"}"#.into()))
+                    .await;
                 return;
             }
         }
@@ -935,9 +989,9 @@ async fn ws_hosted_inbox_task(mut socket: WebSocket, state: ApiState, token: Str
             match sessions.get(&token) {
                 Some(s) if now_secs().saturating_sub(s.created_at) < SESSION_TTL_SECS => {}
                 _ => {
-                    let _ = socket.send(Message::Text(
-                        r#"{"error":"session expired"}"#.into()
-                    )).await;
+                    let _ = socket
+                        .send(Message::Text(r#"{"error":"session expired"}"#.into()))
+                        .await;
                     break;
                 }
             }
@@ -957,7 +1011,7 @@ async fn ws_hosted_inbox_task(mut socket: WebSocket, state: ApiState, token: Str
                     Err(e) => tracing::warn!("WS hosted inbox serialize error: {e}"),
                 }
             }
-            Err(broadcast::error::RecvError::Closed)    => break,
+            Err(broadcast::error::RecvError::Closed) => break,
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
         }
     }
@@ -969,19 +1023,19 @@ async fn ws_hosted_inbox_task(mut socket: WebSocket, state: ApiState, token: Str
 
 fn parse_msg_type(s: &str) -> Option<MsgType> {
     match s.to_uppercase().as_str() {
-        "ADVERTISE"       => Some(MsgType::Advertise),
-        "DISCOVER"        => Some(MsgType::Discover),
-        "PROPOSE"         => Some(MsgType::Propose),
-        "COUNTER"         => Some(MsgType::Counter),
-        "ACCEPT"          => Some(MsgType::Accept),
-        "REJECT"          => Some(MsgType::Reject),
-        "DELIVER"         => Some(MsgType::Deliver),
-        "NOTARIZE_BID"    => Some(MsgType::NotarizeBid),
+        "ADVERTISE" => Some(MsgType::Advertise),
+        "DISCOVER" => Some(MsgType::Discover),
+        "PROPOSE" => Some(MsgType::Propose),
+        "COUNTER" => Some(MsgType::Counter),
+        "ACCEPT" => Some(MsgType::Accept),
+        "REJECT" => Some(MsgType::Reject),
+        "DELIVER" => Some(MsgType::Deliver),
+        "NOTARIZE_BID" => Some(MsgType::NotarizeBid),
         "NOTARIZE_ASSIGN" => Some(MsgType::NotarizeAssign),
-        "VERDICT"         => Some(MsgType::Verdict),
-        "FEEDBACK"        => Some(MsgType::Feedback),
-        "DISPUTE"         => Some(MsgType::Dispute),
-        _                 => None,
+        "VERDICT" => Some(MsgType::Verdict),
+        "FEEDBACK" => Some(MsgType::Feedback),
+        "DISPUTE" => Some(MsgType::Dispute),
+        _ => None,
     }
 }
 
@@ -1006,10 +1060,13 @@ fn require_api_secret_or_unauthorized(state: &ApiState, headers: &HeaderMap) -> 
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         if !ct_eq(provided, &expected) {
-            return Some((
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({ "error": "unauthorized" })),
-            ).into_response());
+            return Some(
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({ "error": "unauthorized" })),
+                )
+                    .into_response(),
+            );
         }
     }
     None

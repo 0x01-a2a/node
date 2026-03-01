@@ -14,10 +14,10 @@ use crate::store::{
     ActivityEvent, AgentProfile, AgentRegistryEntry, CapabilityMatch, DisputeRecord, HostingNode,
     IngestEvent, NetworkStats, OwnerStatus, PendingMessage, ReputationStore,
 };
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tiny_keccak::{Hasher, Keccak};
-use ed25519_dalek::{VerifyingKey, Signature, Verifier};
 
 // ============================================================================
 // App state
@@ -25,10 +25,10 @@ use ed25519_dalek::{VerifyingKey, Signature, Verifier};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub store:          ReputationStore,
+    pub store: ReputationStore,
     /// Shared secret for POST /ingest/envelope.
     /// None = unauthenticated (dev/local only).
-    pub ingest_secret:  Option<String>,
+    pub ingest_secret: Option<String>,
     /// Shared secret for POST /hosting/register.
     /// None = unauthenticated (dev/local only); set in production.
     pub hosting_secret: Option<String>,
@@ -37,11 +37,11 @@ pub struct AppState {
     /// Set via --fcm-server-key / FCM_SERVER_KEY env var.
     pub fcm_server_key: Option<String>,
     /// Shared HTTP client for FCM push calls.
-    pub http_client:    reqwest::Client,
+    pub http_client: reqwest::Client,
     /// Broadcast channel for real-time activity events (GET /ws/activity).
-    pub activity_tx:    broadcast::Sender<ActivityEvent>,
+    pub activity_tx: broadcast::Sender<ActivityEvent>,
     /// Path to store media blobs.
-    pub blob_dir:       Option<PathBuf>,
+    pub blob_dir: Option<PathBuf>,
 }
 
 // ============================================================================
@@ -106,8 +106,8 @@ pub async fn get_network_stats(State(state): State<AppState>) -> impl IntoRespon
 
 pub async fn ingest_envelope(
     State(state): State<AppState>,
-    headers:      HeaderMap,
-    Json(event):  Json<IngestEvent>,
+    headers: HeaderMap,
+    Json(event): Json<IngestEvent>,
 ) -> impl IntoResponse {
     // Authenticate ingest requests when a secret is configured.
     if let Some(ref secret) = state.ingest_secret {
@@ -120,7 +120,8 @@ pub async fn ingest_envelope(
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "error": "unauthorized" })),
-            ).into_response();
+            )
+                .into_response();
         }
     }
     tracing::debug!("Ingest: received event: {:?}", event);
@@ -140,10 +141,11 @@ pub async fn get_reputation(
 ) -> impl IntoResponse {
     match state.store.get(&agent_id) {
         Some(rep) => Json(rep).into_response(),
-        None      => (
+        None => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "agent not found" })),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -157,10 +159,12 @@ pub struct LeaderboardParams {
     limit: usize,
 }
 
-fn default_limit() -> usize { 50 }
+fn default_limit() -> usize {
+    50
+}
 
 pub async fn get_leaderboard(
-    State(state):  State<AppState>,
+    State(state): State<AppState>,
     Query(params): Query<LeaderboardParams>,
 ) -> impl IntoResponse {
     let limit = params.limit.min(200);
@@ -171,21 +175,25 @@ pub async fn get_leaderboard(
 #[derive(Deserialize)]
 pub struct AgentsParams {
     #[serde(default = "default_limit")]
-    limit:  usize,
+    limit: usize,
     #[serde(default = "default_offset")]
     offset: usize,
     #[serde(default = "default_sort")]
-    sort:   String,
+    sort: String,
 }
 
-fn default_offset() -> usize { 0 }
-fn default_sort() -> String { "reputation".to_string() }
+fn default_offset() -> usize {
+    0
+}
+fn default_sort() -> String {
+    "reputation".to_string()
+}
 
 pub async fn get_agents(
-    State(state):  State<AppState>,
+    State(state): State<AppState>,
     Query(params): Query<AgentsParams>,
 ) -> impl IntoResponse {
-    let limit  = params.limit.min(200);
+    let limit = params.limit.min(200);
     let agents = state.store.list_agents(limit, params.offset, &params.sort);
     Json(agents)
 }
@@ -205,14 +213,16 @@ pub async fn get_registry(State(state): State<AppState>) -> impl IntoResponse {
 #[derive(Deserialize)]
 pub struct InteractionsParams {
     /// Filter by sender agent_id (hex).
-    from:  Option<String>,
+    from: Option<String>,
     /// Filter by target agent_id (hex).
-    to:    Option<String>,
+    to: Option<String>,
     #[serde(default = "default_interactions_limit")]
     limit: usize,
 }
 
-fn default_interactions_limit() -> usize { 100 }
+fn default_interactions_limit() -> usize {
+    100
+}
 
 /// GET /interactions[?from=<agent_id>&to=<agent_id>&limit=N]
 ///
@@ -220,15 +230,13 @@ fn default_interactions_limit() -> usize { 100 }
 /// edges originating from or arriving at a specific agent. Maximum 1 000
 /// per request.
 pub async fn get_interactions(
-    State(state):  State<AppState>,
+    State(state): State<AppState>,
     Query(params): Query<InteractionsParams>,
 ) -> impl IntoResponse {
-    let limit  = params.limit.min(1_000);
-    let result = state.store.interactions(
-        params.from.as_deref(),
-        params.to.as_deref(),
-        limit,
-    );
+    let limit = params.limit.min(1_000);
+    let result = state
+        .store
+        .interactions(params.from.as_deref(), params.to.as_deref(), limit);
     Json(result)
 }
 
@@ -244,14 +252,16 @@ pub struct TimeseriesParams {
     window: String,
 }
 
-fn default_window() -> String { "24h".to_string() }
+fn default_window() -> String {
+    "24h".to_string()
+}
 
 fn parse_window(s: &str) -> u64 {
     match s {
-        "1h"  =>     3_600,
-        "7d"  =>   604_800,
+        "1h" => 3_600,
+        "7d" => 604_800,
         "30d" => 2_592_000,
-        _     =>    86_400, // "24h" and anything unrecognised
+        _ => 86_400, // "24h" and anything unrecognised
     }
 }
 
@@ -265,7 +275,7 @@ fn parse_window(s: &str) -> u64 {
 /// Score > 0 means at least one entropy component fell below its threshold.
 /// Higher score = more suspicious.
 pub async fn get_anomaly_leaderboard(
-    State(state):  State<AppState>,
+    State(state): State<AppState>,
     Query(params): Query<LeaderboardParams>,
 ) -> impl IntoResponse {
     let limit = params.limit.min(200);
@@ -277,15 +287,16 @@ pub async fn get_anomaly_leaderboard(
 /// Latest entropy vector for the agent (the most recent epoch).
 /// Returns 404 when the agent has no recorded entropy yet.
 pub async fn get_entropy(
-    State(state):       State<AppState>,
-    Path(agent_id):     Path<String>,
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     match state.store.entropy_latest(&agent_id) {
         Some(ev) => Json(serde_json::to_value(ev).unwrap_or_default()).into_response(),
-        None     => (
+        None => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "no entropy data for agent" })),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -295,19 +306,21 @@ pub struct EntropyHistoryParams {
     limit: usize,
 }
 
-fn default_entropy_limit() -> usize { 30 }
+fn default_entropy_limit() -> usize {
+    30
+}
 
 /// GET /entropy/:agent_id/history[?limit=30]
 ///
 /// All recorded entropy vectors for the agent (newest first, up to 100).
 /// Useful for plotting anomaly score over time.
 pub async fn get_entropy_history(
-    State(state):  State<AppState>,
+    State(state): State<AppState>,
     Path(agent_id): Path<String>,
     Query(params): Query<EntropyHistoryParams>,
 ) -> impl IntoResponse {
-    let limit  = params.limit.min(100);
-    let rows   = state.store.entropy_history(&agent_id, limit);
+    let limit = params.limit.min(100);
+    let rows = state.store.entropy_history(&agent_id, limit);
     Json(rows)
 }
 
@@ -317,7 +330,7 @@ pub async fn get_entropy_history(
 /// Each bucket contains feedback_count, positive_count, negative_count,
 /// dispute_count. Useful for activity charts.
 pub async fn get_timeseries(
-    State(state):  State<AppState>,
+    State(state): State<AppState>,
     Query(params): Query<TimeseriesParams>,
 ) -> impl IntoResponse {
     let window_secs = parse_window(&params.window);
@@ -334,13 +347,15 @@ pub struct RollingEntropyParams {
     window: u32,
 }
 
-fn default_rolling_window() -> u32 { 10 }
+fn default_rolling_window() -> u32 {
+    10
+}
 
 /// GET /entropy/{agent_id}/rolling[?window=10]
 pub async fn get_rolling_entropy(
-    State(state):   State<AppState>,
+    State(state): State<AppState>,
     Path(agent_id): Path<String>,
-    Query(params):  Query<RollingEntropyParams>,
+    Query(params): Query<RollingEntropyParams>,
 ) -> impl IntoResponse {
     let window = params.window.clamp(3, 100);
     Json(state.store.rolling_entropy(&agent_id, window))
@@ -352,7 +367,7 @@ pub async fn get_rolling_entropy(
 
 /// GET /leaderboard/verifier-concentration[?limit=50]
 pub async fn get_verifier_concentration(
-    State(state):  State<AppState>,
+    State(state): State<AppState>,
     Query(params): Query<LeaderboardParams>,
 ) -> impl IntoResponse {
     let limit = params.limit.min(200);
@@ -392,7 +407,7 @@ pub async fn get_sri_status(State(state): State<AppState>) -> impl IntoResponse 
 
 /// GET /stake/required/{agent_id}
 pub async fn get_required_stake(
-    State(state):   State<AppState>,
+    State(state): State<AppState>,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     Json(state.store.required_stake(&agent_id))
@@ -411,19 +426,23 @@ pub struct FlowParams {
     limit: usize,
 }
 
-fn default_flow_window() -> String { "30d".to_string() }
-fn default_flow_limit()  -> usize  { 500 }
+fn default_flow_window() -> String {
+    "30d".to_string()
+}
+fn default_flow_limit() -> usize {
+    500
+}
 
 /// GET /graph/flow[?window=30d&limit=500]
 ///
 /// Directed capital flow edges: (from, to, positive_flow, interaction_count).
 /// Pairs with high mutual flow are the primary Sybil signal.
 pub async fn get_flow_graph(
-    State(state):  State<AppState>,
+    State(state): State<AppState>,
     Query(params): Query<FlowParams>,
 ) -> impl IntoResponse {
     let window_secs = parse_window(&params.window);
-    let limit       = params.limit.min(2_000);
+    let limit = params.limit.min(2_000);
     Json(state.store.capital_flow_edges(window_secs, limit))
 }
 
@@ -432,7 +451,7 @@ pub async fn get_flow_graph(
 /// Ownership clusters detected via mutual positive-feedback analysis.
 /// Each cluster's `c_coefficient` feeds β₃ in the stake multiplier.
 pub async fn get_flow_clusters(
-    State(state):  State<AppState>,
+    State(state): State<AppState>,
     Query(params): Query<FlowParams>,
 ) -> impl IntoResponse {
     let window_secs = parse_window(&params.window);
@@ -444,9 +463,9 @@ pub async fn get_flow_clusters(
 /// Graph position for one agent: cluster membership, C coefficient,
 /// concentration ratio, and top counterparties.
 pub async fn get_agent_flow(
-    State(state):   State<AppState>,
+    State(state): State<AppState>,
     Path(agent_id): Path<String>,
-    Query(params):  Query<FlowParams>,
+    Query(params): Query<FlowParams>,
 ) -> impl IntoResponse {
     let window_secs = parse_window(&params.window);
     Json(state.store.agent_flow_info(&agent_id, window_secs))
@@ -459,7 +478,7 @@ pub async fn get_agent_flow(
 #[derive(Deserialize)]
 pub struct EpochPath {
     agent_id: String,
-    epoch:    u64,
+    epoch: u64,
 }
 
 /// GET /epochs/{agent_id}/{epoch}/envelopes
@@ -468,8 +487,8 @@ pub struct EpochPath {
 /// Used by the challenger bot to construct Merkle inclusion proofs.
 /// Up to 1000 entries, ordered by sequence (node's log order).
 pub async fn get_epoch_envelopes(
-    State(state):  State<AppState>,
-    Path(params):  Path<EpochPath>,
+    State(state): State<AppState>,
+    Path(params): Path<EpochPath>,
 ) -> impl IntoResponse {
     Json(state.store.epoch_envelopes(&params.agent_id, params.epoch))
 }
@@ -492,17 +511,23 @@ pub struct SearchParams {
 /// Agents must have broadcast an ADVERTISE message with a matching
 /// capabilities JSON array to appear here.
 pub async fn search_agents(
-    State(state):  State<AppState>,
+    State(state): State<AppState>,
     Query(params): Query<SearchParams>,
 ) -> impl IntoResponse {
     let limit: usize = params.limit.min(200);
     // Sanitise capability string: alphanumeric + dash/underscore, max 64 chars.
     let cap = params.capability.trim().to_lowercase();
-    if cap.is_empty() || cap.len() > 64 || !cap.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+    if cap.is_empty()
+        || cap.len() > 64
+        || !cap
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "invalid capability name" })),
-        ).into_response();
+        )
+            .into_response();
     }
     let results: Vec<CapabilityMatch> = state.store.search_by_capability(&cap, limit);
     Json(results).into_response()
@@ -517,14 +542,15 @@ pub async fn search_agents(
 /// Returns reputation + entropy + capabilities + recent disputes + name in one call.
 /// Avoids 4 separate round trips for dashboard use.
 pub async fn get_agent_profile(
-    State(state):   State<AppState>,
+    State(state): State<AppState>,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     if agent_id.len() != 64 || !agent_id.chars().all(|c| c.is_ascii_hexdigit()) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "invalid agent_id" })),
-        ).into_response();
+        )
+            .into_response();
     }
     let profile: AgentProfile = state.store.agent_profile(&agent_id);
     Json(profile).into_response()
@@ -545,16 +571,17 @@ pub struct NameSearchParams {
 ///
 /// Case-insensitive substring search against names broadcast in BEACON messages.
 pub async fn search_agents_by_name(
-    State(state):  State<AppState>,
+    State(state): State<AppState>,
     Query(params): Query<NameSearchParams>,
 ) -> impl IntoResponse {
     let limit = params.limit.min(200);
-    let name  = params.name.trim().to_string();
+    let name = params.name.trim().to_string();
     if name.is_empty() || name.len() > 64 {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "invalid name" })),
-        ).into_response();
+        )
+            .into_response();
     }
     let results: Vec<AgentRegistryEntry> = state.store.search_by_name(&name, limit);
     Json(results).into_response()
@@ -569,11 +596,11 @@ pub async fn search_agents_by_name(
 /// All interactions where the given agent was the *sender* (outbound history).
 /// Complements GET /interactions?to=X which shows inbound.
 pub async fn get_interactions_by(
-    State(state):   State<AppState>,
+    State(state): State<AppState>,
     Path(agent_id): Path<String>,
-    Query(params):  Query<InteractionsParams>,
+    Query(params): Query<InteractionsParams>,
 ) -> impl IntoResponse {
-    let limit  = params.limit.min(1_000);
+    let limit = params.limit.min(1_000);
     let result = state.store.interactions(Some(&agent_id), None, limit);
     Json(result)
 }
@@ -593,9 +620,9 @@ pub struct DisputeParams {
 /// Returns recent disputes targeting the given agent, newest first.
 /// Used by the challenger bot to identify agents that should be investigated.
 pub async fn get_disputes(
-    State(state):   State<AppState>,
+    State(state): State<AppState>,
     Path(agent_id): Path<String>,
-    Query(params):  Query<DisputeParams>,
+    Query(params): Query<DisputeParams>,
 ) -> impl IntoResponse {
     let limit: usize = params.limit.min(500);
     let results: Vec<DisputeRecord> = state.store.disputes_for_agent(&agent_id, limit);
@@ -608,7 +635,7 @@ pub async fn get_disputes(
 
 #[derive(Deserialize)]
 pub struct FcmRegisterBody {
-    pub agent_id:  String,
+    pub agent_id: String,
     pub fcm_token: String,
 }
 
@@ -621,35 +648,33 @@ pub struct FcmSleepBody {
 #[derive(Deserialize)]
 pub struct PostPendingBody {
     /// Hex-encoded agent_id of the sender.
-    pub from:     String,
+    pub from: String,
     /// Protocol message type, e.g. "PROPOSE".
     pub msg_type: String,
     /// Base64-encoded raw CBOR envelope bytes.
-    pub payload:  String,
+    pub payload: String,
 }
 
 /// Helper to verify Ed25519 signature from headers.
 fn verify_request_signature(
-    agent_id:  &str,
+    agent_id: &str,
     signature: &str,
-    body:      &[u8],
+    body: &[u8],
 ) -> Result<(), StatusCode> {
-    use ed25519_dalek::{VerifyingKey, Signature, Verifier};
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
-    let pubkey_bytes = hex::decode(agent_id)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let pubkey_bytes = hex::decode(agent_id).map_err(|_| StatusCode::BAD_REQUEST)?;
     if pubkey_bytes.len() != 32 {
         return Err(StatusCode::BAD_REQUEST);
     }
     let pubkey = VerifyingKey::from_bytes(&pubkey_bytes.try_into().unwrap())
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let sig_bytes = hex::decode(signature)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let sig = Signature::from_slice(&sig_bytes)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let sig_bytes = hex::decode(signature).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let sig = Signature::from_slice(&sig_bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    pubkey.verify(body, &sig)
+    pubkey
+        .verify(body, &sig)
         .map_err(|_| StatusCode::UNAUTHORIZED)
 }
 
@@ -660,12 +685,13 @@ fn verify_request_signature(
 /// Requirement: Must be signed by the agent (HIGH-7).
 pub async fn fcm_register(
     State(state): State<AppState>,
-    headers:      axum::http::HeaderMap,
-    body_bytes:   axum::body::Bytes,
+    headers: axum::http::HeaderMap,
+    body_bytes: axum::body::Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let sig      = headers.get("X-Signature").and_then(|h| h.to_str().ok());
+    let sig = headers.get("X-Signature").and_then(|h| h.to_str().ok());
     let body_str = std::str::from_utf8(&body_bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let body: FcmRegisterBody = serde_json::from_str(body_str).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let body: FcmRegisterBody =
+        serde_json::from_str(body_str).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     if let Some(s) = sig {
         verify_request_signature(&body.agent_id, s, &body_bytes)?;
@@ -676,7 +702,9 @@ pub async fn fcm_register(
     if body.agent_id.len() != 64 || !body.agent_id.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(StatusCode::BAD_REQUEST);
     }
-    state.store.store_fcm_token(body.agent_id.clone(), body.fcm_token);
+    state
+        .store
+        .store_fcm_token(body.agent_id.clone(), body.fcm_token);
     tracing::debug!("FCM token registered for agent {}", body.agent_id);
     Ok(StatusCode::OK)
 }
@@ -688,10 +716,10 @@ pub async fn fcm_register(
 /// Requirement: Must be signed by the agent (HIGH-7).
 pub async fn fcm_sleep(
     State(state): State<AppState>,
-    headers:      axum::http::HeaderMap,
-    body_bytes:   axum::body::Bytes,
+    headers: axum::http::HeaderMap,
+    body_bytes: axum::body::Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let sig      = headers.get("X-Signature").and_then(|h| h.to_str().ok());
+    let sig = headers.get("X-Signature").and_then(|h| h.to_str().ok());
     let body_str = std::str::from_utf8(&body_bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
     let body: FcmSleepBody = serde_json::from_str(body_str).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -718,7 +746,7 @@ pub async fn fcm_sleep(
 /// Returns whether the agent is currently in sleep mode.
 /// Senders check this before posting a pending message.
 pub async fn get_sleep_status(
-    State(state):   State<AppState>,
+    State(state): State<AppState>,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     Json(serde_json::json!({ "sleeping": state.store.is_sleeping(&agent_id) }))
@@ -731,9 +759,9 @@ pub async fn get_sleep_status(
 /// Returns 200 with an empty array when there are no pending messages.
 /// Requirement: Only the agent (pubkey) can drain its own queue (HIGH-8).
 pub async fn get_pending(
-    State(state):   State<AppState>,
+    State(state): State<AppState>,
     Path(agent_id): Path<String>,
-    headers:        axum::http::HeaderMap,
+    headers: axum::http::HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
     let sig = headers.get("X-Signature").and_then(|h| h.to_str().ok());
     if let Some(s) = sig {
@@ -757,14 +785,15 @@ pub async fn get_pending(
 /// notification is fired immediately to wake the app.
 /// Requirement: Validate that the sender (body.from) matches the signature (HIGH-9).
 pub async fn post_pending(
-    State(state):   State<AppState>,
+    State(state): State<AppState>,
     Path(agent_id): Path<String>,
-    headers:        axum::http::HeaderMap,
-    body_bytes:     axum::body::Bytes,
+    headers: axum::http::HeaderMap,
+    body_bytes: axum::body::Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let sig      = headers.get("X-Signature").and_then(|h| h.to_str().ok());
+    let sig = headers.get("X-Signature").and_then(|h| h.to_str().ok());
     let body_str = std::str::from_utf8(&body_bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let body: PostPendingBody = serde_json::from_str(body_str).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let body: PostPendingBody =
+        serde_json::from_str(body_str).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     if let Some(s) = sig {
         // HIGH-9: Signature MUST match the sender (body.from)
@@ -783,11 +812,11 @@ pub async fn post_pending(
         .as_nanos();
 
     let msg = PendingMessage {
-        id:       format!("{ts:016x}"),
-        from:     body.from.clone(),
+        id: format!("{ts:016x}"),
+        from: body.from.clone(),
         msg_type: body.msg_type.clone(),
-        payload:  body.payload,
-        ts:       (ts / 1_000_000_000) as u64,
+        payload: body.payload,
+        ts: (ts / 1_000_000_000) as u64,
     };
 
     state.store.push_pending(&agent_id, msg);
@@ -796,10 +825,10 @@ pub async fn post_pending(
     if state.store.is_sleeping(&agent_id) {
         if let Some(token) = state.store.get_fcm_token(&agent_id) {
             if let Some(ref fcm_key) = state.fcm_server_key {
-                let client  = state.http_client.clone();
-                let key     = fcm_key.clone();
-                let aid     = agent_id.clone();
-                let from    = body.from.clone();
+                let client = state.http_client.clone();
+                let key = fcm_key.clone();
+                let aid = agent_id.clone();
+                let from = body.from.clone();
                 let msgtype = body.msg_type.clone();
                 tokio::spawn(async move {
                     send_fcm_push(&key, &token, &aid, &from, &msgtype, &client).await;
@@ -818,18 +847,20 @@ pub async fn post_pending(
 #[derive(Deserialize)]
 pub struct ActivityParams {
     #[serde(default = "default_activity_limit")]
-    limit:  usize,
+    limit: usize,
     before: Option<i64>,
 }
 
-fn default_activity_limit() -> usize { 50 }
+fn default_activity_limit() -> usize {
+    50
+}
 
 /// GET /activity[?limit=50&before=<id>]
 ///
 /// Returns recent activity events (JOIN, FEEDBACK, DISPUTE, VERDICT), newest first.
 /// Use `before=<id>` for cursor-based pagination.
 pub async fn get_activity(
-    State(state):  State<AppState>,
+    State(state): State<AppState>,
     Query(params): Query<ActivityParams>,
 ) -> impl IntoResponse {
     let limit = params.limit.min(200);
@@ -841,8 +872,8 @@ pub async fn get_activity(
 /// WebSocket endpoint that streams activity events in real-time.
 /// Requires `Authorization: Bearer <secret>` or `token=<secret>` query param (HIGH-10).
 pub async fn ws_activity(
-    ws:           WebSocketUpgrade,
-    headers:      axum::http::HeaderMap,
+    ws: WebSocketUpgrade,
+    headers: axum::http::HeaderMap,
     Query(params): Query<std::collections::HashMap<String, String>>,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, StatusCode> {
@@ -854,7 +885,7 @@ pub async fn ws_activity(
             .and_then(|s| s.strip_prefix("Bearer "))
             .or_else(|| params.get("token").map(|s: &String| s.as_str()))
             .unwrap_or("");
-        
+
         if !ct_eq(provided, secret) {
             return Err(StatusCode::UNAUTHORIZED);
         }
@@ -887,12 +918,12 @@ pub async fn ws_activity(
 /// Uses the FCM legacy HTTP API (v1 API requires OAuth2 which adds
 /// unnecessary complexity for this use-case).
 async fn send_fcm_push(
-    fcm_key:      &str,
+    fcm_key: &str,
     device_token: &str,
-    agent_id:     &str,
-    from:         &str,
-    msg_type:     &str,
-    client:       &reqwest::Client,
+    agent_id: &str,
+    from: &str,
+    msg_type: &str,
+    client: &reqwest::Client,
 ) {
     let payload = serde_json::json!({
         "to": device_token,
@@ -934,7 +965,7 @@ async fn send_fcm_push(
 #[derive(Deserialize)]
 pub struct HostingRegisterBody {
     node_id: String,
-    name:    String,
+    name: String,
     fee_bps: u32,
     api_url: String,
 }
@@ -996,7 +1027,9 @@ fn validate_host_api_url(url: &str) -> Result<(), &'static str> {
 fn is_rfc1918_172(host: &str) -> bool {
     // 172.16.0.0/12 = 172.16.x.x – 172.31.x.x
     let parts: Vec<&str> = host.split('.').collect();
-    if parts.len() < 2 || parts[0] != "172" { return false; }
+    if parts.len() < 2 || parts[0] != "172" {
+        return false;
+    }
     if let Ok(second) = parts[1].parse::<u8>() {
         return (16..=31).contains(&second);
     }
@@ -1013,8 +1046,8 @@ fn is_rfc1918_172(host: &str) -> bool {
 /// Requirement: Must be signed by the node (HIGH-6).
 pub async fn post_hosting_register(
     State(state): State<AppState>,
-    headers:      HeaderMap,
-    body_bytes:   axum::body::Bytes,
+    headers: HeaderMap,
+    body_bytes: axum::body::Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
     // When --hosting-secret is configured, require Bearer token as a first gate.
     // This prevents nodes that don't know the secret from registering at all,
@@ -1030,9 +1063,10 @@ pub async fn post_hosting_register(
         }
     }
 
-    let sig      = headers.get("X-Signature").and_then(|h| h.to_str().ok());
+    let sig = headers.get("X-Signature").and_then(|h| h.to_str().ok());
     let body_str = std::str::from_utf8(&body_bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let body: HostingRegisterBody = serde_json::from_str(body_str).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let body: HostingRegisterBody =
+        serde_json::from_str(body_str).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     if let Some(s) = sig {
         // HIGH-6: Signature MUST match the node_id
@@ -1046,7 +1080,9 @@ pub async fn post_hosting_register(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    state.store.register_hosting_node(&body.node_id, &body.name, body.fee_bps, &body.api_url);
+    state
+        .store
+        .register_hosting_node(&body.node_id, &body.name, body.fee_bps, &body.api_url);
     Ok(StatusCode::OK)
 }
 
@@ -1084,8 +1120,8 @@ pub struct ClaimOwnerBody {
 /// The proposed_owner is stored as pending until the human calls /claim-owner.
 pub async fn post_propose_owner(
     Path(agent_id): Path<String>,
-    State(state):   State<AppState>,
-    Json(body):     Json<ProposeOwnerBody>,
+    State(state): State<AppState>,
+    Json(body): Json<ProposeOwnerBody>,
 ) -> impl IntoResponse {
     // Validate agent_id format (64 hex chars = 32-byte SATI mint).
     if agent_id.len() != 64 || !agent_id.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -1122,8 +1158,8 @@ pub async fn post_propose_owner(
 /// `"status": "claimed"` with the owner's wallet address.
 pub async fn post_claim_owner(
     Path(agent_id): Path<String>,
-    State(state):   State<AppState>,
-    Json(body):     Json<ClaimOwnerBody>,
+    State(state): State<AppState>,
+    Json(body): Json<ClaimOwnerBody>,
 ) -> impl IntoResponse {
     // Validate agent_id format (64 hex chars = 32-byte SATI mint).
     if agent_id.len() != 64 || !agent_id.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -1140,7 +1176,10 @@ pub async fn post_claim_owner(
     }
 
     match state.store.claim_owner(&agent_id, &body.owner_wallet) {
-        Ok(record) => (StatusCode::OK, Json(serde_json::to_value(record).unwrap_or_default())),
+        Ok(record) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(record).unwrap_or_default()),
+        ),
         Err(e) => (StatusCode::CONFLICT, Json(json!({ "error": e }))),
     }
 }
@@ -1153,7 +1192,7 @@ pub async fn post_claim_owner(
 ///   - `{ "status": "claimed",  "agent_id": "...", "owner": "...", "claimed_at": 123 }`
 pub async fn get_agent_owner(
     Path(agent_id): Path<String>,
-    State(state):   State<AppState>,
+    State(state): State<AppState>,
 ) -> impl IntoResponse {
     let status: OwnerStatus = state.store.get_owner(&agent_id);
     Json(serde_json::to_value(status).unwrap_or_default())
@@ -1177,39 +1216,74 @@ pub async fn get_agent_owner(
 ///   X-0x01-Signature: Ed25519 signature of body bytes || timestamp LE-u64.
 pub async fn post_blob(
     State(state): State<AppState>,
-    headers:      HeaderMap,
-    body:         axum::body::Bytes,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
 ) -> impl IntoResponse {
     let blob_dir = match state.blob_dir {
         Some(ref d) => d,
-        None => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "blob storage disabled" }))).into_response(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "blob storage disabled" })),
+            )
+                .into_response()
+        }
     };
 
     // 1. Extract and validate headers
-    let agent_id_hex  = headers.get("X-0x01-Agent-Id") .and_then(|h| h.to_str().ok()).unwrap_or("");
-    let timestamp_str = headers.get("X-0x01-Timestamp").and_then(|h| h.to_str().ok()).unwrap_or("");
-    let signature_hex = headers.get("X-0x01-Signature").and_then(|h| h.to_str().ok()).unwrap_or("");
+    let agent_id_hex = headers
+        .get("X-0x01-Agent-Id")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    let timestamp_str = headers
+        .get("X-0x01-Timestamp")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    let signature_hex = headers
+        .get("X-0x01-Signature")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
     // X-0x01-Signer is the actual Ed25519 verifying key, which may differ from
     // agent_id in SATI mode (where agent_id = SATI mint address).
-    let signer_hex = headers.get("X-0x01-Signer")
+    let signer_hex = headers
+        .get("X-0x01-Signer")
         .and_then(|h| h.to_str().ok())
-        .unwrap_or(agent_id_hex);  // dev-mode fallback: signer == agent_id
+        .unwrap_or(agent_id_hex); // dev-mode fallback: signer == agent_id
 
-    if agent_id_hex.len() != 64 || signer_hex.len() != 64
-        || timestamp_str.is_empty() || signature_hex.len() != 128
+    if agent_id_hex.len() != 64
+        || signer_hex.len() != 64
+        || timestamp_str.is_empty()
+        || signature_hex.len() != 128
     {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "missing or invalid X-0x01 headers" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "missing or invalid X-0x01 headers" })),
+        )
+            .into_response();
     }
 
     let timestamp = match timestamp_str.parse::<u64>() {
         Ok(t) => t,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid timestamp" }))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid timestamp" })),
+            )
+                .into_response()
+        }
     };
 
     // Clock skew check (+/- 30s)
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     if timestamp < now.saturating_sub(60) || timestamp > now + 60 {
-        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "timestamp out of sync" }))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "timestamp out of sync" })),
+        )
+            .into_response();
     }
 
     // 2. Verify Signature
@@ -1217,25 +1291,55 @@ pub async fn post_blob(
     // dev mode, but is the node's Ed25519 key (not the SATI mint) in SATI mode.
     let signer_bytes = match hex::decode(signer_hex) {
         Ok(b) => b,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid signer hex" }))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid signer hex" })),
+            )
+                .into_response()
+        }
     };
     let sig_bytes = match hex::decode(signature_hex) {
         Ok(b) => b,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid signature hex" }))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid signature hex" })),
+            )
+                .into_response()
+        }
     };
 
     let pubkey_bytes: [u8; 32] = match signer_bytes.as_slice().try_into() {
         Ok(b) => b,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid signer key length" }))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid signer key length" })),
+            )
+                .into_response()
+        }
     };
     let pubkey = match VerifyingKey::from_bytes(&pubkey_bytes) {
         Ok(k) => k,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid signer key" }))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid signer key" })),
+            )
+                .into_response()
+        }
     };
 
     let sig_bytes: [u8; 64] = match sig_bytes.as_slice().try_into() {
         Ok(b) => b,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid signature length" }))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid signature length" })),
+            )
+                .into_response()
+        }
     };
     let sig = Signature::from_bytes(&sig_bytes);
 
@@ -1243,7 +1347,11 @@ pub async fn post_blob(
     let mut data = body.to_vec();
     data.extend_from_slice(&timestamp.to_le_bytes());
     if pubkey.verify(&data, &sig).is_err() {
-        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "signature verification failed" }))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "signature verification failed" })),
+        )
+            .into_response();
     }
 
     // 3. Tier Check
@@ -1253,15 +1361,19 @@ pub async fn post_blob(
     let max_size = if is_claimed || score >= 100 {
         10 * 1024 * 1024 // 10 MB
     } else if score >= 50 {
-        2 * 1024 * 1024  // 2 MB
+        2 * 1024 * 1024 // 2 MB
     } else if score >= 10 {
-        512 * 1024       // 512 KB
+        512 * 1024 // 512 KB
     } else {
         0 // Tier 0: Disabled
     };
 
     if max_size == 0 {
-        return (StatusCode::FORBIDDEN, Json(json!({ "error": "reputation too low for blob storage" }))).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "reputation too low for blob storage" })),
+        )
+            .into_response();
     }
     if body.len() > max_size {
         return (StatusCode::PAYLOAD_TOO_LARGE, Json(json!({ "error": format!("blob too large for your tier (max {} bytes)", max_size) }))).into_response();
@@ -1277,31 +1389,51 @@ pub async fn post_blob(
     let file_path = blob_dir.join(&cid);
     if let Err(e) = std::fs::write(&file_path, &body) {
         tracing::error!("Failed to write blob {}: {}", cid, e);
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "failed to store blob" }))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "failed to store blob" })),
+        )
+            .into_response();
     }
 
-    tracing::info!("Blob uploaded: cid={} from={} size={}", &cid[..8], &agent_id_hex[..8], body.len());
+    tracing::info!(
+        "Blob uploaded: cid={} from={} size={}",
+        &cid[..8],
+        &agent_id_hex[..8],
+        body.len()
+    );
     (StatusCode::CREATED, Json(json!({ "cid": cid }))).into_response()
 }
 
 /// GET /blobs/:cid
-pub async fn get_blob(
-    State(state): State<AppState>,
-    Path(cid):    Path<String>,
-) -> impl IntoResponse {
+pub async fn get_blob(State(state): State<AppState>, Path(cid): Path<String>) -> impl IntoResponse {
     let blob_dir = match state.blob_dir {
         Some(ref d) => d,
-        None => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "blob storage disabled" }))).into_response(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "blob storage disabled" })),
+            )
+                .into_response()
+        }
     };
 
     // Sanitize CID (prevent path traversal)
     if cid.len() != 64 || !cid.chars().all(|c| c.is_ascii_hexdigit()) {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid cid" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid cid" })),
+        )
+            .into_response();
     }
 
     let file_path = blob_dir.join(&cid);
     if !file_path.exists() {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "blob not found" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "blob not found" })),
+        )
+            .into_response();
     }
 
     match std::fs::read(file_path) {
@@ -1309,7 +1441,12 @@ pub async fn get_blob(
             StatusCode::OK,
             [("Content-Type", "application/octet-stream")],
             data,
-        ).into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "failed to read blob" }))).into_response(),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "failed to read blob" })),
+        )
+            .into_response(),
     }
 }

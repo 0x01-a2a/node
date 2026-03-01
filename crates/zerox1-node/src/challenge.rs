@@ -40,11 +40,15 @@ pub const TREASURY_PUBKEY_STR: &str = "qw4hzfV7UUXTrNh3hiS9Q8KSPMXWUusNoyFKLvtcM
 pub const CHALLENGE_STAKE_USDC: u64 = 10_000_000;
 
 fn challenge_program_id() -> Pubkey {
-    CHALLENGE_PROGRAM_ID_STR.parse().expect("valid challenge program ID")
+    CHALLENGE_PROGRAM_ID_STR
+        .parse()
+        .expect("valid challenge program ID")
 }
 
 fn behavior_log_program_id() -> Pubkey {
-    BEHAVIOR_LOG_PROGRAM_ID_STR.parse().expect("valid behavior-log program ID")
+    BEHAVIOR_LOG_PROGRAM_ID_STR
+        .parse()
+        .expect("valid behavior-log program ID")
 }
 
 fn treasury_pubkey() -> Pubkey {
@@ -56,11 +60,15 @@ fn usdc_mint() -> Pubkey {
 }
 
 fn spl_token_program() -> Pubkey {
-    SPL_TOKEN_PROGRAM_STR.parse().expect("valid SPL token program ID")
+    SPL_TOKEN_PROGRAM_STR
+        .parse()
+        .expect("valid SPL token program ID")
 }
 
 fn associated_token_program() -> Pubkey {
-    ASSOCIATED_TOKEN_PROGRAM_STR.parse().expect("valid ATA program ID")
+    ASSOCIATED_TOKEN_PROGRAM_STR
+        .parse()
+        .expect("valid ATA program ID")
 }
 
 // ============================================================================
@@ -112,28 +120,28 @@ pub fn vault_authority_pda(challenge_key: &Pubkey) -> (Pubkey, u8) {
 /// `contradicting_entry`: CBOR bytes of a signed Envelope from the log.
 /// `merkle_proof`:        Merkle sibling hashes from entry leaf to log_merkle_root.
 pub struct SubmitChallengeArgs {
-    pub target_agent_id:     [u8; 32],
-    pub epoch_number:        u64,
-    pub leaf_index:          u64,
+    pub target_agent_id: [u8; 32],
+    pub epoch_number: u64,
+    pub leaf_index: u64,
     pub contradicting_entry: Vec<u8>,
-    pub merkle_proof:        Vec<[u8; 32]>,
+    pub merkle_proof: Vec<[u8; 32]>,
 }
 
 pub async fn submit_challenge_onchain(
-    rpc:                 &RpcClient,
-    identity:            &AgentIdentity,
-    kora:                Option<&KoraClient>,
-    args:                SubmitChallengeArgs,
+    rpc: &RpcClient,
+    identity: &AgentIdentity,
+    kora: Option<&KoraClient>,
+    args: SubmitChallengeArgs,
 ) -> anyhow::Result<()> {
-    let program_id       = challenge_program_id();
-    let usdc             = usdc_mint();
+    let program_id = challenge_program_id();
+    let usdc = usdc_mint();
     let challenger_pubkey = Pubkey::new_from_array(identity.verifying_key.to_bytes());
 
-    let batch_key      = batch_pda(&args.target_agent_id, args.epoch_number);
-    let challenge_key  = challenge_pda(&batch_key, &challenger_pubkey);
+    let batch_key = batch_pda(&args.target_agent_id, args.epoch_number);
+    let challenge_key = challenge_pda(&batch_key, &challenger_pubkey);
     let (vault_auth, _) = vault_authority_pda(&challenge_key);
-    let vault_ata       = get_ata(&vault_auth, &usdc);
-    let challenger_ata  = get_ata(&challenger_pubkey, &usdc);
+    let vault_ata = get_ata(&vault_auth, &usdc);
+    let challenger_ata = get_ata(&challenger_pubkey, &usdc);
 
     let recent_blockhash = rpc.get_latest_blockhash().await?;
 
@@ -141,8 +149,7 @@ pub async fn submit_challenge_onchain(
         let mut b = [0u8; 64];
         b[..32].copy_from_slice(&identity.signing_key.to_bytes());
         b[32..].copy_from_slice(&identity.verifying_key.to_bytes());
-        Keypair::try_from(b.as_slice())
-            .map_err(|e| anyhow::anyhow!("keypair conversion: {e}"))?
+        Keypair::try_from(b.as_slice()).map_err(|e| anyhow::anyhow!("keypair conversion: {e}"))?
     };
 
     if let Some(kora) = kora {
@@ -173,8 +180,8 @@ pub async fn submit_challenge_onchain(
         };
         tx.partial_sign(&[&solana_kp], recent_blockhash);
 
-        let tx_bytes = bincode::serialize(&tx)
-            .map_err(|e| anyhow::anyhow!("bincode serialize: {e}"))?;
+        let tx_bytes =
+            bincode::serialize(&tx).map_err(|e| anyhow::anyhow!("bincode serialize: {e}"))?;
         let tx_b64 = BASE64.encode(&tx_bytes);
 
         kora.sign_and_send(&tx_b64).await?;
@@ -233,14 +240,14 @@ pub async fn submit_challenge_onchain(
 /// Build and submit a `resolve_challenge` transaction.
 #[allow(clippy::too_many_arguments)]
 pub async fn resolve_challenge_onchain(
-    rpc:                 &RpcClient,
-    identity:            &AgentIdentity,
-    target_agent_id:     [u8; 32],
-    epoch_number:        u64,
-    challenger:          &Pubkey,
+    rpc: &RpcClient,
+    identity: &AgentIdentity,
+    target_agent_id: [u8; 32],
+    epoch_number: u64,
+    challenger: &Pubkey,
     contradicting_entry: Vec<u8>,
-    merkle_proof:        Vec<[u8; 32]>,
-    contradicts_batch:   bool,
+    merkle_proof: Vec<[u8; 32]>,
+    contradicts_batch: bool,
 ) -> anyhow::Result<()> {
     let program_id = challenge_program_id();
     let usdc = usdc_mint();
@@ -251,7 +258,7 @@ pub async fn resolve_challenge_onchain(
     let (vault_auth, _) = vault_authority_pda(&challenge_key);
     let vault_ata = get_ata(&vault_auth, &usdc);
     let challenger_ata = get_ata(challenger, &usdc);
-    
+
     let treasury = treasury_pubkey();
     let treasury_ata = get_ata(&treasury, &usdc);
 
@@ -287,7 +294,10 @@ pub async fn resolve_challenge_onchain(
         recent_blockhash,
     );
 
-    let sig = rpc.send_and_confirm_transaction(&tx).await.map_err(|e| anyhow::anyhow!("resolve_challenge: {e}"))?;
+    let sig = rpc
+        .send_and_confirm_transaction(&tx)
+        .await
+        .map_err(|e| anyhow::anyhow!("resolve_challenge: {e}"))?;
 
     tracing::info!(
         tx           = %sig,
@@ -327,20 +337,20 @@ fn anchor_discriminator(name: &str) -> [u8; 8] {
 /// Args: discriminator(8) + Borsh(SubmitChallengeArgs).
 #[allow(clippy::too_many_arguments)]
 fn build_submit_challenge_ix(
-    payer:               &Pubkey,
-    challenger:          &Pubkey,
-    challenger_ata:      &Pubkey,
-    challenge_pda_key:   &Pubkey,
-    vault_auth:          &Pubkey,
-    vault_ata:           &Pubkey,
-    batch_account:       &Pubkey,
-    usdc:                &Pubkey,
-    program_id:          &Pubkey,
-    agent_id:            [u8; 32],
-    epoch_number:        u64,
-    leaf_index:          u64,
+    payer: &Pubkey,
+    challenger: &Pubkey,
+    challenger_ata: &Pubkey,
+    challenge_pda_key: &Pubkey,
+    vault_auth: &Pubkey,
+    vault_ata: &Pubkey,
+    batch_account: &Pubkey,
+    usdc: &Pubkey,
+    program_id: &Pubkey,
+    agent_id: [u8; 32],
+    epoch_number: u64,
+    leaf_index: u64,
     contradicting_entry: Vec<u8>,
-    merkle_proof:        Vec<[u8; 32]>,
+    merkle_proof: Vec<[u8; 32]>,
 ) -> Instruction {
     // Borsh-encode SubmitChallengeArgs manually (no borsh dep in node crate).
     let mut data = Vec::new();
@@ -382,33 +392,33 @@ fn build_submit_challenge_ix(
 /// Build the `resolve_challenge` instruction.
 #[allow(clippy::too_many_arguments)]
 fn build_resolve_challenge_ix(
-    resolver:            &Pubkey,
-    challenge_account:   &Pubkey,
-    vault_auth:          &Pubkey,
-    vault_ata:           &Pubkey,
-    challenger_ata:      &Pubkey,
-    treasury_usdc:       &Pubkey,
-    treasury:            &Pubkey,
-    batch_account:       &Pubkey,
-    usdc:                &Pubkey,
-    program_id:          &Pubkey,
+    resolver: &Pubkey,
+    challenge_account: &Pubkey,
+    vault_auth: &Pubkey,
+    vault_ata: &Pubkey,
+    challenger_ata: &Pubkey,
+    treasury_usdc: &Pubkey,
+    treasury: &Pubkey,
+    batch_account: &Pubkey,
+    usdc: &Pubkey,
+    program_id: &Pubkey,
     contradicting_entry: Vec<u8>,
-    merkle_proof:        Vec<[u8; 32]>,
-    contradicts_batch:   bool,
+    merkle_proof: Vec<[u8; 32]>,
+    contradicts_batch: bool,
 ) -> Instruction {
     let mut data = Vec::new();
     data.extend_from_slice(&anchor_discriminator("resolve_challenge"));
-    
+
     // contradicting_entry: Vec<u8>
     data.extend_from_slice(&(contradicting_entry.len() as u32).to_le_bytes());
     data.extend_from_slice(&contradicting_entry);
-    
+
     // merkle_proof: Vec<[u8; 32]>
     data.extend_from_slice(&(merkle_proof.len() as u32).to_le_bytes());
     for hash in &merkle_proof {
         data.extend_from_slice(hash);
     }
-    
+
     // contradicts_batch: bool
     data.push(contradicts_batch as u8);
 
@@ -458,7 +468,11 @@ pub fn build_merkle_proof(leaves: &[[u8; 32]], leaf_index: usize) -> Vec<[u8; 32
     let mut idx = leaf_index;
 
     while layer.len() > 1 {
-        let sibling_idx = if idx.is_multiple_of(2) { idx + 1 } else { idx - 1 };
+        let sibling_idx = if idx.is_multiple_of(2) {
+            idx + 1
+        } else {
+            idx - 1
+        };
         proof.push(layer[sibling_idx]);
 
         let mut next = Vec::with_capacity(layer.len() / 2);

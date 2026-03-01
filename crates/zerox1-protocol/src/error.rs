@@ -15,7 +15,10 @@ pub enum ProtocolError {
     NonceReplay { received: u64, last_seen: u64 },
 
     #[error("timestamp out of tolerance: delta {delta_secs}s exceeds {tolerance_secs}s")]
-    TimestampOutOfTolerance { delta_secs: u64, tolerance_secs: u64 },
+    TimestampOutOfTolerance {
+        delta_secs: u64,
+        tolerance_secs: u64,
+    },
 
     #[error("payload hash mismatch")]
     PayloadHashMismatch,

@@ -3,8 +3,7 @@ use anchor_spl::{
     associated_token::AssociatedToken,
     token::{self, CloseAccount, Mint, Token, TokenAccount, Transfer},
     token_interface::{
-        Mint as MintInterface, TokenAccount as TokenAccountInterface,
-        TokenInterface,
+        Mint as MintInterface, TokenAccount as TokenAccountInterface, TokenInterface,
     },
 };
 
@@ -29,14 +28,11 @@ pub const MIN_STAKE_USDC: u64 = 10_000_000;
 /// ~2 days at 400ms/slot before stake can be claimed after unlock queue.
 pub const UNLOCK_DELAY_SLOTS: u64 = 432_000;
 /// Challenge program ID — only this program can call slash().
-const CHALLENGE_PROGRAM_ID: Pubkey =
-    pubkey!("7FoisCiS1gyUx7osQkCLk4A1zNKGq37yHpVhL2BFgk1Y");
+const CHALLENGE_PROGRAM_ID: Pubkey = pubkey!("7FoisCiS1gyUx7osQkCLk4A1zNKGq37yHpVhL2BFgk1Y");
 /// Lease program ID — used to verify lease PDA in queue_unlock.
-const LEASE_PROGRAM_ID: Pubkey =
-    pubkey!("5P8uXqavnQFGXbHKE3tQDezh41D7ZutHsT2jY6gZ3C3x");
+const LEASE_PROGRAM_ID: Pubkey = pubkey!("5P8uXqavnQFGXbHKE3tQDezh41D7ZutHsT2jY6gZ3C3x");
 /// BehaviorLog program ID — AgentBatchRegistry accounts must be owned by this.
-const BEHAVIOR_LOG_PROGRAM_ID: Pubkey =
-    pubkey!("35DAMPQVu6wsmMEGv67URFAGgyauEYD73egd74uiX1sM");
+const BEHAVIOR_LOG_PROGRAM_ID: Pubkey = pubkey!("35DAMPQVu6wsmMEGv67URFAGgyauEYD73egd74uiX1sM");
 /// USDC mint address — constrain all token operations to real USDC.
 #[cfg(feature = "devnet")]
 pub const USDC_MINT: Pubkey = pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
@@ -63,9 +59,12 @@ pub mod stake_lock {
     /// Requires SATI AgentIndex PDA to exist (proves registration is complete).
     pub fn lock_stake(ctx: Context<LockStake>, args: LockStakeArgs) -> Result<()> {
         let stake = &mut ctx.accounts.stake_account;
-        let clock  = Clock::get()?;
+        let clock = Clock::get()?;
 
-        require!(args.amount >= MIN_STAKE_USDC, StakeLockError::InsufficientStake);
+        require!(
+            args.amount >= MIN_STAKE_USDC,
+            StakeLockError::InsufficientStake
+        );
         require!(
             args.agent_mint == ctx.accounts.agent_mint_account.key().to_bytes(),
             StakeLockError::MintMismatch
@@ -75,28 +74,28 @@ pub mod stake_lock {
         let cpi_ctx = CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
-                from:      ctx.accounts.owner_usdc.to_account_info(),
-                to:        ctx.accounts.stake_vault.to_account_info(),
+                from: ctx.accounts.owner_usdc.to_account_info(),
+                to: ctx.accounts.stake_vault.to_account_info(),
                 authority: ctx.accounts.owner.to_account_info(),
             },
         );
         token::transfer(cpi_ctx, args.amount)?;
 
-        stake.version                = 1;
-        stake.agent_mint             = args.agent_mint;
-        stake.owner                  = ctx.accounts.owner.key();
-        stake.stake_usdc             = args.amount;
-        stake.locked_since_slot      = clock.slot;
-        stake.in_unlock_queue        = false;
-        stake.unlock_available_slot  = 0;
-        stake.bump                   = ctx.bumps.stake_account;
-        stake.vault_authority_bump   = ctx.bumps.stake_vault_authority;
+        stake.version = 1;
+        stake.agent_mint = args.agent_mint;
+        stake.owner = ctx.accounts.owner.key();
+        stake.stake_usdc = args.amount;
+        stake.locked_since_slot = clock.slot;
+        stake.in_unlock_queue = false;
+        stake.unlock_available_slot = 0;
+        stake.bump = ctx.bumps.stake_account;
+        stake.vault_authority_bump = ctx.bumps.stake_vault_authority;
 
         emit!(StakeLocked {
             agent_mint: args.agent_mint,
-            owner:      ctx.accounts.owner.key(),
-            usdc:       args.amount,
-            slot:       clock.slot,
+            owner: ctx.accounts.owner.key(),
+            usdc: args.amount,
+            slot: clock.slot,
         });
 
         Ok(())
@@ -108,7 +107,7 @@ pub mod stake_lock {
     /// Agent must be deactivated on the Lease program before queuing.
     pub fn queue_unlock(ctx: Context<QueueUnlock>) -> Result<()> {
         let stake = &mut ctx.accounts.stake_account;
-        let clock  = Clock::get()?;
+        let clock = Clock::get()?;
 
         // Read `deactivated` from LeaseAccount raw bytes.
         // Layout (after 8-byte discriminator): agent_id[32], owner[32],
@@ -121,7 +120,7 @@ pub mod stake_lock {
                 ctx.accounts.lease_account.owner == &LEASE_PROGRAM_ID,
                 StakeLockError::InvalidLeaseAccount
             );
-            
+
             let (expected_lease, _) = Pubkey::find_program_address(
                 &[b"lease", stake.agent_mint.as_ref()],
                 &LEASE_PROGRAM_ID,
@@ -136,11 +135,11 @@ pub mod stake_lock {
         }
         require!(!stake.in_unlock_queue, StakeLockError::AlreadyQueued);
 
-        stake.in_unlock_queue       = true;
+        stake.in_unlock_queue = true;
         stake.unlock_available_slot = clock.slot + UNLOCK_DELAY_SLOTS;
 
         emit!(UnlockQueued {
-            agent_mint:            stake.agent_mint,
+            agent_mint: stake.agent_mint,
             unlock_available_slot: stake.unlock_available_slot,
         });
 
@@ -152,7 +151,7 @@ pub mod stake_lock {
     /// Returns USDC to owner's ATA and closes the vault token account.
     pub fn claim_stake(ctx: Context<ClaimStake>) -> Result<()> {
         let stake = &ctx.accounts.stake_account;
-        let clock  = Clock::get()?;
+        let clock = Clock::get()?;
 
         require!(stake.in_unlock_queue, StakeLockError::NotQueued);
         require!(
@@ -160,23 +159,20 @@ pub mod stake_lock {
             StakeLockError::UnlockDelayNotPassed,
         );
 
-        let agent_mint             = stake.agent_mint;
-        let owner                  = stake.owner;
-        let amount                 = ctx.accounts.stake_vault.amount;
-        let vault_authority_bump   = stake.vault_authority_bump;
+        let agent_mint = stake.agent_mint;
+        let owner = stake.owner;
+        let amount = ctx.accounts.stake_vault.amount;
+        let vault_authority_bump = stake.vault_authority_bump;
 
-        let signer_seeds: &[&[&[u8]]] = &[&[
-            b"stake_vault",
-            agent_mint.as_ref(),
-            &[vault_authority_bump],
-        ]];
+        let signer_seeds: &[&[&[u8]]] =
+            &[&[b"stake_vault", agent_mint.as_ref(), &[vault_authority_bump]]];
 
         // Return USDC from vault to owner.
         let cpi_ctx = CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
-                from:      ctx.accounts.stake_vault.to_account_info(),
-                to:        ctx.accounts.owner_usdc.to_account_info(),
+                from: ctx.accounts.stake_vault.to_account_info(),
+                to: ctx.accounts.owner_usdc.to_account_info(),
                 authority: ctx.accounts.stake_vault_authority.to_account_info(),
             },
             signer_seeds,
@@ -187,9 +183,9 @@ pub mod stake_lock {
         let cpi_ctx = CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
             CloseAccount {
-                account:     ctx.accounts.stake_vault.to_account_info(),
+                account: ctx.accounts.stake_vault.to_account_info(),
                 destination: ctx.accounts.owner.to_account_info(),
-                authority:   ctx.accounts.stake_vault_authority.to_account_info(),
+                authority: ctx.accounts.stake_vault_authority.to_account_info(),
             },
             signer_seeds,
         );
@@ -224,7 +220,10 @@ pub mod stake_lock {
         // Verify the agent_registry is the correct PDA for this stake account's
         // agent_mint under the BehaviorLog program.
         let (expected_registry, _) = Pubkey::find_program_address(
-            &[b"agent_registry", ctx.accounts.stake_account.agent_mint.as_ref()],
+            &[
+                b"agent_registry",
+                ctx.accounts.stake_account.agent_mint.as_ref(),
+            ],
             &BEHAVIOR_LOG_PROGRAM_ID,
         );
         require!(
@@ -257,28 +256,31 @@ pub mod stake_lock {
         );
 
         let stake = &mut ctx.accounts.stake_account;
-        require!(!stake.inactive_slashed, StakeLockError::AlreadySlashedInactive);
-        require!(stake.stake_usdc > 0, StakeLockError::InsufficientStakeToSlash);
+        require!(
+            !stake.inactive_slashed,
+            StakeLockError::AlreadySlashedInactive
+        );
+        require!(
+            stake.stake_usdc > 0,
+            StakeLockError::InsufficientStakeToSlash
+        );
 
         stake.inactive_slashed = true;
         let slash_amount = stake.stake_usdc / 2;
         stake.stake_usdc -= slash_amount;
 
-        let agent_mint            = stake.agent_mint;
-        let vault_authority_bump  = stake.vault_authority_bump;
-        let epoch                 = current_epoch;
+        let agent_mint = stake.agent_mint;
+        let vault_authority_bump = stake.vault_authority_bump;
+        let epoch = current_epoch;
 
-        let signer_seeds: &[&[&[u8]]] = &[&[
-            b"stake_vault",
-            agent_mint.as_ref(),
-            &[vault_authority_bump],
-        ]];
+        let signer_seeds: &[&[&[u8]]] =
+            &[&[b"stake_vault", agent_mint.as_ref(), &[vault_authority_bump]]];
 
         let cpi_ctx = CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
-                from:      ctx.accounts.stake_vault.to_account_info(),
-                to:        ctx.accounts.caller_usdc.to_account_info(),
+                from: ctx.accounts.stake_vault.to_account_info(),
+                to: ctx.accounts.caller_usdc.to_account_info(),
                 authority: ctx.accounts.stake_vault_authority.to_account_info(),
             },
             signer_seeds,
@@ -306,23 +308,25 @@ pub mod stake_lock {
         let cpi_ctx = CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
-                from:      ctx.accounts.owner_usdc.to_account_info(),
-                to:        ctx.accounts.stake_vault.to_account_info(),
+                from: ctx.accounts.owner_usdc.to_account_info(),
+                to: ctx.accounts.stake_vault.to_account_info(),
                 authority: ctx.accounts.owner.to_account_info(),
             },
         );
         token::transfer(cpi_ctx, amount)?;
 
-        ctx.accounts.stake_account.stake_usdc = ctx.accounts.stake_account
+        ctx.accounts.stake_account.stake_usdc = ctx
+            .accounts
+            .stake_account
             .stake_usdc
             .checked_add(amount)
             .ok_or(StakeLockError::Overflow)?;
 
         emit!(StakeToppedUp {
             agent_mint: ctx.accounts.stake_account.agent_mint,
-            owner:      ctx.accounts.owner.key(),
+            owner: ctx.accounts.owner.key(),
             amount,
-            new_total:  ctx.accounts.stake_account.stake_usdc,
+            new_total: ctx.accounts.stake_account.stake_usdc,
         });
 
         Ok(())
@@ -333,14 +337,15 @@ pub mod stake_lock {
     /// Transfers `args.amount` USDC from stake vault to `recipient_usdc`.
     pub fn slash(ctx: Context<Slash>, args: SlashArgs) -> Result<()> {
         // Enforce that the caller is the Challenge program via its PDA authority.
-        let (expected_auth, _) = Pubkey::find_program_address(&[b"slash_authority"], &CHALLENGE_PROGRAM_ID);
+        let (expected_auth, _) =
+            Pubkey::find_program_address(&[b"slash_authority"], &CHALLENGE_PROGRAM_ID);
         require!(
             ctx.accounts.challenge_authority.key() == expected_auth,
             StakeLockError::UnauthorizedCaller,
         );
 
-        let stake              = &mut ctx.accounts.stake_account;
-        let agent_mint         = stake.agent_mint;
+        let stake = &mut ctx.accounts.stake_account;
+        let agent_mint = stake.agent_mint;
         let vault_authority_bump = stake.vault_authority_bump;
 
         require!(
@@ -354,18 +359,15 @@ pub mod stake_lock {
 
         stake.stake_usdc -= args.amount;
 
-        let signer_seeds: &[&[&[u8]]] = &[&[
-            b"stake_vault",
-            agent_mint.as_ref(),
-            &[vault_authority_bump],
-        ]];
+        let signer_seeds: &[&[&[u8]]] =
+            &[&[b"stake_vault", agent_mint.as_ref(), &[vault_authority_bump]]];
 
         // Transfer USDC from vault to recipient.
         let cpi_ctx = CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
-                from:      ctx.accounts.stake_vault.to_account_info(),
-                to:        ctx.accounts.recipient_usdc.to_account_info(),
+                from: ctx.accounts.stake_vault.to_account_info(),
+                to: ctx.accounts.recipient_usdc.to_account_info(),
                 authority: ctx.accounts.stake_vault_authority.to_account_info(),
             },
             signer_seeds,
@@ -374,7 +376,7 @@ pub mod stake_lock {
 
         emit!(StakeSlashed {
             agent_mint,
-            amount:    args.amount,
+            amount: args.amount,
             recipient: ctx.accounts.recipient_usdc.key(),
         });
 
@@ -448,10 +450,10 @@ pub struct LockStake<'info> {
     /// Token program for SATI NFTs (Token-2022).
     pub sati_token_program: Interface<'info, TokenInterface>,
     #[account(address = USDC_MINT)]
-    pub usdc_mint:                Account<'info, Mint>,
-    pub token_program:            Program<'info, Token>,
+    pub usdc_mint: Account<'info, Mint>,
+    pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
-    pub system_program:           Program<'info, System>,
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
@@ -509,8 +511,8 @@ pub struct ClaimStake<'info> {
     pub stake_vault: Account<'info, TokenAccount>,
 
     #[account(address = USDC_MINT)]
-    pub usdc_mint:                Account<'info, Mint>,
-    pub token_program:            Program<'info, Token>,
+    pub usdc_mint: Account<'info, Mint>,
+    pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
 }
 
@@ -557,8 +559,8 @@ pub struct SlashInactive<'info> {
     pub agent_registry: UncheckedAccount<'info>,
 
     #[account(address = USDC_MINT)]
-    pub usdc_mint:                Account<'info, Mint>,
-    pub token_program:            Program<'info, Token>,
+    pub usdc_mint: Account<'info, Mint>,
+    pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
 }
 
@@ -601,8 +603,8 @@ pub struct TopUpStake<'info> {
     pub stake_vault: Account<'info, TokenAccount>,
 
     #[account(address = USDC_MINT)]
-    pub usdc_mint:                Account<'info, Mint>,
-    pub token_program:            Program<'info, Token>,
+    pub usdc_mint: Account<'info, Mint>,
+    pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
 }
 
@@ -639,7 +641,7 @@ pub struct Slash<'info> {
     pub recipient_usdc: Account<'info, TokenAccount>,
 
     #[account(address = USDC_MINT)]
-    pub usdc_mint:     Account<'info, Mint>,
+    pub usdc_mint: Account<'info, Mint>,
     pub token_program: Program<'info, Token>,
 }
 
@@ -651,25 +653,25 @@ pub struct Slash<'info> {
 #[account]
 pub struct StakeLockAccount {
     /// Struct version for migration safety.
-    pub version:               u8,
+    pub version: u8,
     /// SATI mint address = agent ID.
-    pub agent_mint:            [u8; 32],
+    pub agent_mint: [u8; 32],
     /// Wallet that owns the SATI NFT.
-    pub owner:                 Pubkey,
+    pub owner: Pubkey,
     /// Locked USDC (micro-USDC, 6 decimals).
-    pub stake_usdc:            u64,
+    pub stake_usdc: u64,
     /// Slot at which stake was locked.
-    pub locked_since_slot:     u64,
+    pub locked_since_slot: u64,
     /// True if unlock has been queued.
-    pub in_unlock_queue:       bool,
+    pub in_unlock_queue: bool,
     /// Earliest slot at which claim_stake can be called (0 = not queued).
     pub unlock_available_slot: u64,
     /// PDA bump.
-    pub bump:                  u8,
+    pub bump: u8,
     /// Vault authority PDA bump (for USDC transfer signing).
-    pub vault_authority_bump:  u8,
+    pub vault_authority_bump: u8,
     /// Set to true after slash_inactive is called. Prevents double-slash.
-    pub inactive_slashed:      bool,
+    pub inactive_slashed: bool,
 }
 
 impl StakeLockAccount {
@@ -684,7 +686,7 @@ impl StakeLockAccount {
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct LockStakeArgs {
     pub agent_mint: [u8; 32],
-    pub amount:     u64,
+    pub amount: u64,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
@@ -699,45 +701,45 @@ pub struct SlashArgs {
 #[event]
 pub struct StakeLocked {
     pub agent_mint: [u8; 32],
-    pub owner:      Pubkey,
-    pub usdc:       u64,
-    pub slot:       u64,
+    pub owner: Pubkey,
+    pub usdc: u64,
+    pub slot: u64,
 }
 
 #[event]
 pub struct UnlockQueued {
-    pub agent_mint:            [u8; 32],
+    pub agent_mint: [u8; 32],
     pub unlock_available_slot: u64,
 }
 
 #[event]
 pub struct StakeClaimed {
     pub agent_mint: [u8; 32],
-    pub owner:      Pubkey,
-    pub usdc:       u64,
+    pub owner: Pubkey,
+    pub usdc: u64,
 }
 
 #[event]
 pub struct StakeSlashed {
     pub agent_mint: [u8; 32],
-    pub amount:     u64,
-    pub recipient:  Pubkey,
+    pub amount: u64,
+    pub recipient: Pubkey,
 }
 
 #[event]
 pub struct StakeToppedUp {
     pub agent_mint: [u8; 32],
-    pub owner:      Pubkey,
-    pub amount:     u64,
-    pub new_total:  u64,
+    pub owner: Pubkey,
+    pub amount: u64,
+    pub new_total: u64,
 }
 
 #[event]
 pub struct StakeSlashedInactive {
     pub agent_mint: [u8; 32],
-    pub amount:     u64,
-    pub caller:     Pubkey,
-    pub epoch:      u64,
+    pub amount: u64,
+    pub caller: Pubkey,
+    pub epoch: u64,
 }
 
 // ============================================================================

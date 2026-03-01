@@ -51,20 +51,20 @@ fn behavior_log_program_id() -> Pubkey {
 /// If `kora` is Some, gas is paid via the Kora paymaster (USDC reimbursement).
 /// If `kora` is None, the agent's keypair pays gas directly (requires SOL).
 pub async fn submit_batch_onchain(
-    rpc:          &RpcClient,
-    identity:     &AgentIdentity,
-    batch:        &BehaviorBatch,
+    rpc: &RpcClient,
+    identity: &AgentIdentity,
+    batch: &BehaviorBatch,
     epoch_number: u64,
-    kora:         Option<&KoraClient>,
+    kora: Option<&KoraClient>,
 ) -> anyhow::Result<()> {
     // 1. Serialize batch and compute hash.
     let batch_cbor = batch.to_cbor()?;
     let batch_hash = batch.batch_hash()?;
 
     // 2. Sign the CBOR with the agent's Ed25519 key.
-    let dalek_sig:  ed25519_dalek::Signature = identity.signing_key.sign(&batch_cbor);
-    let sig_bytes:  [u8; 64] = dalek_sig.to_bytes();
-    let vk_bytes:   [u8; 32] = identity.verifying_key.to_bytes();
+    let dalek_sig: ed25519_dalek::Signature = identity.signing_key.sign(&batch_cbor);
+    let sig_bytes: [u8; 64] = dalek_sig.to_bytes();
+    let vk_bytes: [u8; 32] = identity.verifying_key.to_bytes();
 
     // 3. Derive PDAs.
     let program_id = behavior_log_program_id();
@@ -72,10 +72,8 @@ pub async fn submit_batch_onchain(
         &[b"batch", &identity.agent_id, &epoch_number.to_le_bytes()],
         &program_id,
     );
-    let (registry_pda, _) = Pubkey::find_program_address(
-        &[b"agent_registry", &identity.agent_id],
-        &program_id,
-    );
+    let (registry_pda, _) =
+        Pubkey::find_program_address(&[b"agent_registry", &identity.agent_id], &program_id);
 
     // 4. Build instructions.
     let verify_ix = build_ed25519_verify_ix(&vk_bytes, &sig_bytes, &batch_cbor);
@@ -84,11 +82,13 @@ pub async fn submit_batch_onchain(
 
     if let Some(kora) = kora {
         // ── Kora path: gasless, fee payer = Kora's pubkey ────────────────────
-        let fee_payer = kora.get_fee_payer().await
+        let fee_payer = kora
+            .get_fee_payer()
+            .await
             .map_err(|e| anyhow::anyhow!("Kora get_fee_payer: {e}"))?;
 
         let submit_ix = build_submit_batch_ix(
-            &fee_payer,     // Kora pays PDA rent
+            &fee_payer, // Kora pays PDA rent
             &batch_pda,
             &registry_pda,
             &program_id,
@@ -111,11 +111,13 @@ pub async fn submit_batch_onchain(
             message,
         };
 
-        let tx_bytes = bincode::serialize(&tx)
-            .map_err(|e| anyhow::anyhow!("bincode serialize: {e}"))?;
+        let tx_bytes =
+            bincode::serialize(&tx).map_err(|e| anyhow::anyhow!("bincode serialize: {e}"))?;
         let tx_b64 = BASE64.encode(&tx_bytes);
 
-        let signer_pubkey = kora.sign_and_send(&tx_b64).await
+        let signer_pubkey = kora
+            .sign_and_send(&tx_b64)
+            .await
             .map_err(|e| anyhow::anyhow!("Kora sign_and_send: {e}"))?;
 
         tracing::info!(
@@ -193,22 +195,30 @@ fn anchor_discriminator(name: &str) -> [u8; 8] {
 /// [n  bytes: message]
 /// ```
 fn build_ed25519_verify_ix(
-    pubkey_bytes:    &[u8; 32],
+    pubkey_bytes: &[u8; 32],
     signature_bytes: &[u8; 64],
-    message:         &[u8],
+    message: &[u8],
 ) -> Instruction {
     // Header = 1 (count) + 1 (padding) + 14 (one offsets entry) = 16 bytes.
     const HEADER: u16 = 2 + 14;
     let sig_off = HEADER;
-    let pk_off  = HEADER + 64;
+    let pk_off = HEADER + 64;
     let msg_off = HEADER + 64 + 32;
     let msg_len = message.len() as u16;
 
     let mut data = Vec::with_capacity(HEADER as usize + 64 + 32 + message.len());
     data.push(1u8); // num_sigs
     data.push(0u8); // padding
-    // 7 × u16 LE offsets entry
-    for val in [sig_off, u16::MAX, pk_off, u16::MAX, msg_off, msg_len, u16::MAX] {
+                    // 7 × u16 LE offsets entry
+    for val in [
+        sig_off,
+        u16::MAX,
+        pk_off,
+        u16::MAX,
+        msg_off,
+        msg_len,
+        u16::MAX,
+    ] {
         data.extend_from_slice(&val.to_le_bytes());
     }
     data.extend_from_slice(signature_bytes);
@@ -217,7 +227,7 @@ fn build_ed25519_verify_ix(
 
     Instruction {
         program_id: solana_sdk::ed25519_program::id(),
-        accounts:   vec![],
+        accounts: vec![],
         data,
     }
 }
@@ -233,15 +243,15 @@ fn build_ed25519_verify_ix(
 /// Instruction data: discriminator(8) + Borsh(SubmitBatchArgs)(168).
 #[allow(clippy::too_many_arguments)]
 fn build_submit_batch_ix(
-    payer:           &Pubkey,
-    batch_pda:       &Pubkey,
-    registry_pda:    &Pubkey,
-    program_id:      &Pubkey,
-    agent_id:        &[u8; 32],
-    epoch_number:    u64,
+    payer: &Pubkey,
+    batch_pda: &Pubkey,
+    registry_pda: &Pubkey,
+    program_id: &Pubkey,
+    agent_id: &[u8; 32],
+    epoch_number: u64,
     log_merkle_root: &[u8; 32],
-    batch_hash:      &[u8; 32],
-    signature:       &[u8; 64],
+    batch_hash: &[u8; 32],
+    signature: &[u8; 64],
 ) -> Instruction {
     // Anchor Borsh discriminator.
     let mut data = Vec::with_capacity(8 + 168);

@@ -1,6 +1,6 @@
-use std::collections::HashMap;
 use ed25519_dalek::VerifyingKey;
 use libp2p::PeerId;
+use std::collections::HashMap;
 
 /// Maximum number of distinct 0x01 agents tracked in memory.
 /// Prevents unbounded growth from BEACON floods with rotating sender IDs.
@@ -32,10 +32,13 @@ pub struct PeerEntry {
     pub last_active_epoch: u64,
 }
 
-
 /// Thread-local in-memory peer state map.
 pub struct PeerStateMap {
     by_agent_id: HashMap<[u8; 32], PeerEntry>,
+    /// Durable replay floor for SATI-confirmed agents.
+    /// Preserved across in-memory `by_agent_id` evictions so nonce replay
+    /// protection does not reset under churn.
+    confirmed_nonce_floor: HashMap<[u8; 32], u64>,
     /// Reverse lookup: libp2p PeerId → 0x01 agent_id (SATI mint).
     peer_to_agent: HashMap<PeerId, [u8; 32]>,
     /// Keys received from the `identify` protocol before the peer has sent a
@@ -48,36 +51,59 @@ impl PeerStateMap {
     pub fn new() -> Self {
         Self {
             by_agent_id: HashMap::new(),
+            confirmed_nonce_floor: HashMap::new(),
             peer_to_agent: HashMap::new(),
             pending_keys: HashMap::new(),
         }
     }
 
     fn entry(&mut self, agent_id: [u8; 32]) -> &mut PeerEntry {
-        if !self.by_agent_id.contains_key(&agent_id)
-            && self.by_agent_id.len() >= MAX_PEERS
-        {
+        if !self.by_agent_id.contains_key(&agent_id) && self.by_agent_id.len() >= MAX_PEERS {
             // Prefer evicting peers that are NOT SATI-confirmed to protect
             // established agents from being displaced by BEACON floods.
-            let evict_key = self.by_agent_id.iter()
+            let evict_key = self
+                .by_agent_id
+                .iter()
                 .find(|(_, e)| !matches!(e.sati_status, Some(true)))
                 .map(|(k, _)| *k);
+            let evict_key = evict_key
+                // If all entries are SATI-confirmed, still evict one to enforce
+                // MAX_PEERS and prevent unbounded growth.
+                .or_else(|| self.by_agent_id.keys().next().copied());
             if let Some(evict_key) = evict_key {
-                if let Some(pid) = self.by_agent_id[&evict_key].peer_id {
-                    self.peer_to_agent.remove(&pid);
+                if let Some(entry) = self.by_agent_id.remove(&evict_key) {
+                    if let Some(pid) = entry.peer_id {
+                        self.peer_to_agent.remove(&pid);
+                    }
+                    // Preserve replay floor for confirmed peers across eviction.
+                    if matches!(entry.sati_status, Some(true)) {
+                        let floor = self.confirmed_nonce_floor.entry(evict_key).or_insert(0);
+                        *floor = (*floor).max(entry.last_nonce);
+                    }
                 }
-                self.by_agent_id.remove(&evict_key);
             }
         }
         self.by_agent_id.entry(agent_id).or_default()
     }
 
     pub fn last_nonce(&self, agent_id: &[u8; 32]) -> u64 {
-        self.by_agent_id.get(agent_id).map_or(0, |e| e.last_nonce)
+        let in_mem = self.by_agent_id.get(agent_id).map_or(0, |e| e.last_nonce);
+        let floor = self
+            .confirmed_nonce_floor
+            .get(agent_id)
+            .copied()
+            .unwrap_or(0);
+        in_mem.max(floor)
     }
 
     pub fn update_nonce(&mut self, agent_id: [u8; 32], nonce: u64) {
-        self.entry(agent_id).last_nonce = nonce;
+        let entry = self.entry(agent_id);
+        entry.last_nonce = nonce;
+        let is_confirmed = matches!(entry.sati_status, Some(true));
+        if is_confirmed {
+            let floor = self.confirmed_nonce_floor.entry(agent_id).or_insert(0);
+            *floor = (*floor).max(nonce);
+        }
     }
 
     pub fn verifying_key(&self, agent_id: &[u8; 32]) -> Option<&VerifyingKey> {
@@ -117,7 +143,9 @@ impl PeerStateMap {
     }
 
     pub fn last_active_epoch(&self, agent_id: &[u8; 32]) -> u64 {
-        self.by_agent_id.get(agent_id).map_or(0, |e| e.last_active_epoch)
+        self.by_agent_id
+            .get(agent_id)
+            .map_or(0, |e| e.last_active_epoch)
     }
 
     pub fn touch_epoch(&mut self, agent_id: [u8; 32], epoch: u64) {
@@ -133,7 +161,13 @@ impl PeerStateMap {
 
     /// Record the result of a SATI registration check.
     pub fn set_sati_status(&mut self, agent_id: [u8; 32], registered: bool) {
-        self.entry(agent_id).sati_status = Some(registered);
+        let entry = self.entry(agent_id);
+        entry.sati_status = Some(registered);
+        let last_nonce = entry.last_nonce;
+        if registered {
+            let floor = self.confirmed_nonce_floor.entry(agent_id).or_insert(0);
+            *floor = (*floor).max(last_nonce);
+        }
     }
 
     /// Returns the cached SATI status:

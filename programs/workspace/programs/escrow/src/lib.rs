@@ -72,12 +72,12 @@ pub mod escrow {
     /// `timeout_slots` — slots after which provider may claim without approval.
     ///   Pass 0 to use DEFAULT_TIMEOUT_SLOTS.
     pub fn lock_payment(
-        ctx:             Context<LockPayment>,
+        ctx: Context<LockPayment>,
         conversation_id: [u8; 16],
-        amount:          u64,
-        notary_fee:      u64,
-        notary:          Option<Pubkey>,
-        timeout_slots:   u64,
+        amount: u64,
+        notary_fee: u64,
+        notary: Option<Pubkey>,
+        timeout_slots: u64,
     ) -> Result<()> {
         require!(amount > 0, EscrowError::ZeroAmount);
         require!(
@@ -85,29 +85,35 @@ pub mod escrow {
             EscrowError::NotaryFeeWithoutNotary,
         );
 
-        let clock   = Clock::get()?;
-        let timeout = if timeout_slots == 0 { DEFAULT_TIMEOUT_SLOTS } else { timeout_slots };
-        let total   = amount.checked_add(notary_fee).ok_or(EscrowError::AmountOverflow)?;
+        let clock = Clock::get()?;
+        let timeout = if timeout_slots == 0 {
+            DEFAULT_TIMEOUT_SLOTS
+        } else {
+            timeout_slots
+        };
+        let total = amount
+            .checked_add(notary_fee)
+            .ok_or(EscrowError::AmountOverflow)?;
 
-        let escrow              = &mut ctx.accounts.escrow_account;
-        escrow.version           = 1;
-        escrow.requester         = ctx.accounts.requester.key();
-        escrow.provider          = ctx.accounts.provider.key();
-        escrow.notary            = notary;
-        escrow.amount            = amount;
-        escrow.notary_fee        = notary_fee;
-        escrow.created_slot      = clock.slot;
-        escrow.timeout_slots     = timeout;
-        escrow.conversation_id   = conversation_id;
-        escrow.released          = false;
-        escrow.bump              = ctx.bumps.escrow_account;
+        let escrow = &mut ctx.accounts.escrow_account;
+        escrow.version = 1;
+        escrow.requester = ctx.accounts.requester.key();
+        escrow.provider = ctx.accounts.provider.key();
+        escrow.notary = notary;
+        escrow.amount = amount;
+        escrow.notary_fee = notary_fee;
+        escrow.created_slot = clock.slot;
+        escrow.timeout_slots = timeout;
+        escrow.conversation_id = conversation_id;
+        escrow.released = false;
+        escrow.bump = ctx.bumps.escrow_account;
 
         // Transfer amount + notary_fee from requester into vault.
         let cpi_ctx = CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
-                from:      ctx.accounts.requester_usdc.to_account_info(),
-                to:        ctx.accounts.escrow_vault.to_account_info(),
+                from: ctx.accounts.requester_usdc.to_account_info(),
+                to: ctx.accounts.escrow_vault.to_account_info(),
                 authority: ctx.accounts.requester.to_account_info(),
             },
         );
@@ -115,7 +121,9 @@ pub mod escrow {
 
         msg!(
             "Escrow locked: {} USDC task + {} notary_fee | timeout {} slots",
-            amount, notary_fee, timeout,
+            amount,
+            notary_fee,
+            timeout,
         );
         Ok(())
     }
@@ -134,22 +142,22 @@ pub mod escrow {
         require!(!escrow.released, EscrowError::AlreadySettled);
 
         // Caller must be requester or designated notary.
-        let caller     = ctx.accounts.approver.key();
-        let authorized = caller == escrow.requester
-            || escrow.notary.map(|n| n == caller).unwrap_or(false);
+        let caller = ctx.accounts.approver.key();
+        let authorized =
+            caller == escrow.requester || escrow.notary.map(|n| n == caller).unwrap_or(false);
         require!(authorized, EscrowError::Unauthorized);
 
-        let amount      = escrow.amount;
-        let notary_fee  = escrow.notary_fee;
-        let fee         = amount.saturating_mul(FEE_BPS) / 10_000;
-        let payout      = amount.saturating_sub(fee);
+        let amount = escrow.amount;
+        let notary_fee = escrow.notary_fee;
+        let fee = amount.saturating_mul(FEE_BPS) / 10_000;
+        let payout = amount.saturating_sub(fee);
         let has_notary_payout = escrow.notary.is_some() && notary_fee > 0;
         let designated_notary = escrow.notary;
 
-        let bump      = escrow.bump;
+        let bump = escrow.bump;
         let requester = escrow.requester;
-        let provider  = escrow.provider;
-        let conv_id   = escrow.conversation_id;
+        let provider = escrow.provider;
+        let conv_id = escrow.conversation_id;
 
         ctx.accounts.escrow_account.released = true;
 
@@ -172,8 +180,8 @@ pub mod escrow {
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
                 Transfer {
-                    from:      ctx.accounts.escrow_vault.to_account_info(),
-                    to:        ctx.accounts.provider_usdc.to_account_info(),
+                    from: ctx.accounts.escrow_vault.to_account_info(),
+                    to: ctx.accounts.provider_usdc.to_account_info(),
                     authority: ctx.accounts.escrow_vault_authority.to_account_info(),
                 },
                 vault_auth_seeds,
@@ -187,8 +195,8 @@ pub mod escrow {
                 CpiContext::new_with_signer(
                     ctx.accounts.token_program.to_account_info(),
                     Transfer {
-                        from:      ctx.accounts.escrow_vault.to_account_info(),
-                        to:        ctx.accounts.treasury_usdc.to_account_info(),
+                        from: ctx.accounts.escrow_vault.to_account_info(),
+                        to: ctx.accounts.treasury_usdc.to_account_info(),
                         authority: ctx.accounts.escrow_vault_authority.to_account_info(),
                     },
                     vault_auth_seeds,
@@ -204,15 +212,21 @@ pub mod escrow {
             let notary_data = ctx.accounts.notary_usdc.try_borrow_data()?;
             let parsed = anchor_spl::token::spl_token::state::Account::unpack(&notary_data)
                 .map_err(|_| EscrowError::InvalidNotaryUsdc)?;
-            require!(parsed.owner == expected_notary, EscrowError::InvalidNotaryUsdc);
-            require!(parsed.mint == ctx.accounts.usdc_mint.key(), EscrowError::InvalidNotaryUsdc);
+            require!(
+                parsed.owner == expected_notary,
+                EscrowError::InvalidNotaryUsdc
+            );
+            require!(
+                parsed.mint == ctx.accounts.usdc_mint.key(),
+                EscrowError::InvalidNotaryUsdc
+            );
 
             token::transfer(
                 CpiContext::new_with_signer(
                     ctx.accounts.token_program.to_account_info(),
                     Transfer {
-                        from:      ctx.accounts.escrow_vault.to_account_info(),
-                        to:        ctx.accounts.notary_usdc.to_account_info(),
+                        from: ctx.accounts.escrow_vault.to_account_info(),
+                        to: ctx.accounts.notary_usdc.to_account_info(),
                         authority: ctx.accounts.escrow_vault_authority.to_account_info(),
                     },
                     vault_auth_seeds,
@@ -224,7 +238,9 @@ pub mod escrow {
         let _ = seeds; // suppress unused warning
         msg!(
             "Approved: {} USDC to provider, {} fee, {} notary",
-            payout, fee, notary_fee,
+            payout,
+            fee,
+            notary_fee,
         );
         Ok(())
     }
@@ -249,15 +265,15 @@ pub mod escrow {
             EscrowError::TimeoutNotReached,
         );
 
-        let amount      = escrow.amount;
-        let notary_fee  = escrow.notary_fee;
-        let fee         = amount.saturating_mul(FEE_BPS) / 10_000;
+        let amount = escrow.amount;
+        let notary_fee = escrow.notary_fee;
+        let fee = amount.saturating_mul(FEE_BPS) / 10_000;
         // Provider absorbs notary_fee since notary did not act.
-        let payout      = amount.saturating_add(notary_fee).saturating_sub(fee);
-        let requester   = escrow.requester;
-        let provider    = escrow.provider;
-        let conv_id     = escrow.conversation_id;
-        let bump        = escrow.bump;
+        let payout = amount.saturating_add(notary_fee).saturating_sub(fee);
+        let requester = escrow.requester;
+        let provider = escrow.provider;
+        let conv_id = escrow.conversation_id;
+        let bump = escrow.bump;
 
         ctx.accounts.escrow_account.released = true;
 
@@ -271,8 +287,8 @@ pub mod escrow {
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
                 Transfer {
-                    from:      ctx.accounts.escrow_vault.to_account_info(),
-                    to:        ctx.accounts.provider_usdc.to_account_info(),
+                    from: ctx.accounts.escrow_vault.to_account_info(),
+                    to: ctx.accounts.provider_usdc.to_account_info(),
                     authority: ctx.accounts.escrow_vault_authority.to_account_info(),
                 },
                 vault_auth_seeds,
@@ -285,8 +301,8 @@ pub mod escrow {
                 CpiContext::new_with_signer(
                     ctx.accounts.token_program.to_account_info(),
                     Transfer {
-                        from:      ctx.accounts.escrow_vault.to_account_info(),
-                        to:        ctx.accounts.treasury_usdc.to_account_info(),
+                        from: ctx.accounts.escrow_vault.to_account_info(),
+                        to: ctx.accounts.treasury_usdc.to_account_info(),
                         authority: ctx.accounts.escrow_vault_authority.to_account_info(),
                     },
                     vault_auth_seeds,
@@ -298,7 +314,9 @@ pub mod escrow {
         let _ = (requester, provider, conv_id, bump);
         msg!(
             "Timeout claimed: {} USDC to provider (incl. {} notary_fee), {} fee",
-            payout, notary_fee, fee,
+            payout,
+            notary_fee,
+            fee,
         );
         Ok(())
     }
@@ -320,13 +338,13 @@ pub mod escrow {
             EscrowError::TimeoutAlreadyReached,
         );
 
-        let amount      = escrow.amount;
-        let notary_fee  = escrow.notary_fee;
-        let total       = amount.saturating_add(notary_fee);
-        let requester   = escrow.requester;
-        let provider    = escrow.provider;
-        let conv_id     = escrow.conversation_id;
-        let bump        = escrow.bump;
+        let amount = escrow.amount;
+        let notary_fee = escrow.notary_fee;
+        let total = amount.saturating_add(notary_fee);
+        let requester = escrow.requester;
+        let provider = escrow.provider;
+        let conv_id = escrow.conversation_id;
+        let bump = escrow.bump;
 
         ctx.accounts.escrow_account.released = true;
 
@@ -340,8 +358,8 @@ pub mod escrow {
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
                 Transfer {
-                    from:      ctx.accounts.escrow_vault.to_account_info(),
-                    to:        ctx.accounts.requester_usdc.to_account_info(),
+                    from: ctx.accounts.escrow_vault.to_account_info(),
+                    to: ctx.accounts.requester_usdc.to_account_info(),
                     authority: ctx.accounts.escrow_vault_authority.to_account_info(),
                 },
                 vault_auth_seeds,
@@ -400,10 +418,10 @@ pub struct LockPayment<'info> {
     pub requester_usdc: Account<'info, TokenAccount>,
 
     #[account(address = USDC_MINT)]
-    pub usdc_mint:               Account<'info, Mint>,
-    pub token_program:           Program<'info, Token>,
+    pub usdc_mint: Account<'info, Mint>,
+    pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
-    pub system_program:          Program<'info, System>,
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
@@ -462,7 +480,7 @@ pub struct ApprovePayment<'info> {
     pub notary_usdc: UncheckedAccount<'info>,
 
     #[account(address = USDC_MINT)]
-    pub usdc_mint:     Account<'info, Mint>,
+    pub usdc_mint: Account<'info, Mint>,
     pub token_program: Program<'info, Token>,
 }
 
@@ -515,7 +533,7 @@ pub struct ClaimTimeout<'info> {
     pub treasury: UncheckedAccount<'info>,
 
     #[account(address = USDC_MINT)]
-    pub usdc_mint:     Account<'info, Mint>,
+    pub usdc_mint: Account<'info, Mint>,
     pub token_program: Program<'info, Token>,
 }
 
@@ -557,7 +575,7 @@ pub struct CancelEscrow<'info> {
     pub requester_usdc: Account<'info, TokenAccount>,
 
     #[account(address = USDC_MINT)]
-    pub usdc_mint:     Account<'info, Mint>,
+    pub usdc_mint: Account<'info, Mint>,
     pub token_program: Program<'info, Token>,
 }
 
@@ -568,27 +586,27 @@ pub struct CancelEscrow<'info> {
 #[account]
 pub struct EscrowAccount {
     /// Struct version for migration safety.
-    pub version:         u8,             // 1
+    pub version: u8, // 1
     /// The party who locked payment and can approve release.
-    pub requester:       Pubkey,         // 32
+    pub requester: Pubkey, // 32
     /// The party who will receive payment on approval or timeout.
-    pub provider:        Pubkey,         // 32
+    pub provider: Pubkey, // 32
     /// Optional trusted third party (notary) authorised to approve payment.
-    pub notary:          Option<Pubkey>, // 1 + 32 = 33
+    pub notary: Option<Pubkey>, // 1 + 32 = 33
     /// USDC task amount locked (6 decimal places).
-    pub amount:          u64,            // 8
+    pub amount: u64, // 8
     /// USDC notary compensation locked (6 decimal places). 0 if no notary fee.
-    pub notary_fee:      u64,            // 8
+    pub notary_fee: u64, // 8
     /// Slot when escrow was created.
-    pub created_slot:    u64,            // 8
+    pub created_slot: u64, // 8
     /// Slots after creation_slot before provider may claim without approval.
-    pub timeout_slots:   u64,            // 8
+    pub timeout_slots: u64, // 8
     /// Shared reference ID (maps to protocol conversation_id).
-    pub conversation_id: [u8; 16],       // 16
+    pub conversation_id: [u8; 16], // 16
     /// True once settled (approved, claimed, or cancelled).
-    pub released:        bool,           // 1
+    pub released: bool, // 1
     /// PDA bump.
-    pub bump:            u8,             // 1
+    pub bump: u8, // 1
 }
 
 impl EscrowAccount {

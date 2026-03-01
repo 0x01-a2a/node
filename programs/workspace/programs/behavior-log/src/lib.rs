@@ -27,7 +27,10 @@ pub mod behavior_log {
             args.epoch_number == ctx.accounts.registry.next_epoch,
             BehaviorLogError::InvalidEpochNumber
         );
-        require!(args.batch_hash != [0u8; 32], BehaviorLogError::EmptyBatchHash);
+        require!(
+            args.batch_hash != [0u8; 32],
+            BehaviorLogError::EmptyBatchHash
+        );
 
         // Ed25519 signature is pre-verified by the Solana Ed25519 program
         // via instruction introspection. The caller MUST include an Ed25519
@@ -35,7 +38,10 @@ pub mod behavior_log {
         let current_index = solana_program::sysvar::instructions::load_current_index_checked(
             &ctx.accounts.instructions.to_account_info(),
         )?;
-        require!(current_index > 0, BehaviorLogError::MissingSignatureInstruction);
+        require!(
+            current_index > 0,
+            BehaviorLogError::MissingSignatureInstruction
+        );
 
         let ed25519_ix = solana_program::sysvar::instructions::load_instruction_at_checked(
             (current_index - 1) as usize,
@@ -47,15 +53,22 @@ pub mod behavior_log {
         );
 
         // Introspect the ed25519 ix data to ensure the correctly signed pubkey and message.
-        require!(ed25519_ix.data.len() >= 16 + 32 + 64, BehaviorLogError::InvalidSignatureInstruction);
-        require!(ed25519_ix.data[0] == 1, BehaviorLogError::InvalidSignatureInstruction); // num_signatures = 1
+        require!(
+            ed25519_ix.data.len() >= 16 + 32 + 64,
+            BehaviorLogError::InvalidSignatureInstruction
+        );
+        require!(
+            ed25519_ix.data[0] == 1,
+            BehaviorLogError::InvalidSignatureInstruction
+        ); // num_signatures = 1
 
         let pubkey_offset = u16::from_le_bytes([ed25519_ix.data[6], ed25519_ix.data[7]]) as usize;
         let msg_offset = u16::from_le_bytes([ed25519_ix.data[10], ed25519_ix.data[11]]) as usize;
         let msg_size = u16::from_le_bytes([ed25519_ix.data[12], ed25519_ix.data[13]]) as usize;
 
         require!(
-            pubkey_offset + 32 <= ed25519_ix.data.len() && msg_offset + msg_size <= ed25519_ix.data.len(),
+            pubkey_offset + 32 <= ed25519_ix.data.len()
+                && msg_offset + msg_size <= ed25519_ix.data.len(),
             BehaviorLogError::InvalidSignatureInstruction
         );
 
@@ -65,13 +78,13 @@ pub mod behavior_log {
         require!(pubkey == args.agent_id, BehaviorLogError::SignerMismatch);
         require!(msg == args.batch_hash, BehaviorLogError::MessageMismatch);
 
-        batch.version         = 1;
-        batch.agent_id        = args.agent_id;
-        batch.epoch_number    = args.epoch_number;
+        batch.version = 1;
+        batch.agent_id = args.agent_id;
+        batch.epoch_number = args.epoch_number;
         batch.log_merkle_root = args.log_merkle_root;
-        batch.batch_hash      = args.batch_hash;
-        batch.submitted_slot  = clock.slot;
-        batch.bump            = ctx.bumps.batch_account;
+        batch.batch_hash = args.batch_hash;
+        batch.submitted_slot = clock.slot;
+        batch.bump = ctx.bumps.batch_account;
 
         // Initialize registry agent_id if this is the first time (init_if_needed).
         let registry = &mut ctx.accounts.registry;
@@ -84,9 +97,9 @@ pub mod behavior_log {
         registry.next_epoch += 1;
 
         emit!(BatchSubmitted {
-            agent_id:     args.agent_id,
+            agent_id: args.agent_id,
             epoch_number: args.epoch_number,
-            batch_hash:   args.batch_hash,
+            batch_hash: args.batch_hash,
             submitted_slot: clock.slot,
         });
 
@@ -174,10 +187,10 @@ impl BatchAccount {
 /// PDA: seeds = ["agent_registry", agent_id]
 #[account]
 pub struct AgentBatchRegistry {
-    pub version:    u8,
-    pub agent_id:   [u8; 32],
+    pub version: u8,
+    pub agent_id: [u8; 32],
     pub next_epoch: u64,
-    pub bump:       u8,
+    pub bump: u8,
 }
 
 impl AgentBatchRegistry {
@@ -191,13 +204,13 @@ impl AgentBatchRegistry {
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct SubmitBatchArgs {
-    pub agent_id:         [u8; 32],
-    pub epoch_number:     u64,
-    pub log_merkle_root:  [u8; 32],
-    pub batch_hash:       [u8; 32],
+    pub agent_id: [u8; 32],
+    pub epoch_number: u64,
+    pub log_merkle_root: [u8; 32],
+    pub batch_hash: [u8; 32],
     /// Ed25519 signature over the full BehaviorBatch CBOR encoding.
     /// Must be verified by the Solana Ed25519 program in the same tx.
-    pub signature:        [u8; 64],
+    pub signature: [u8; 64],
 }
 
 // ============================================================================
@@ -206,9 +219,9 @@ pub struct SubmitBatchArgs {
 
 #[event]
 pub struct BatchSubmitted {
-    pub agent_id:       [u8; 32],
-    pub epoch_number:   u64,
-    pub batch_hash:     [u8; 32],
+    pub agent_id: [u8; 32],
+    pub epoch_number: u64,
+    pub batch_hash: [u8; 32],
     pub submitted_slot: u64,
 }
 

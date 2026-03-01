@@ -28,13 +28,15 @@ mod tests {
     #[test]
     fn test_list_agents_pagination() {
         let store = ReputationStore::new();
-        
+
         // Populate with 25 dummy agents
         // Using "agent-{i:02}" ensures lexicographical order matches numerical order for easy testing
         for i in 0..25 {
             let agent_id = format!("agent-{:02}", i);
             let mut inner = store.inner.write().unwrap();
-            inner.agents.insert(agent_id.clone(), AgentReputation::new(agent_id));
+            inner
+                .agents
+                .insert(agent_id.clone(), AgentReputation::new(agent_id));
         }
 
         // Test case 1: Basic pagination (limit 10, offset 0)
@@ -65,77 +67,76 @@ mod tests {
     }
 }
 
-
 // ============================================================================
 // Wire types (matches node.rs push format + serde tag)
 // ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedbackEvent {
-    pub sender:          String,
-    pub target_agent:    String,
-    pub score:           i32,
-    pub outcome:         u8,
-    pub is_dispute:      bool,
-    pub role:            u8,
+    pub sender: String,
+    pub target_agent: String,
+    pub score: i32,
+    pub outcome: u8,
+    pub is_dispute: bool,
+    pub role: u8,
     pub conversation_id: String,
-    pub slot:            u64,
+    pub slot: u64,
     /// Base64-encoded raw CBOR envelope bytes — used for Merkle proof construction.
     /// None when pushed by older node versions.
-    pub raw_b64:         Option<String>,
+    pub raw_b64: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerdictEvent {
-    pub sender:          String,
-    pub recipient:       String,
+    pub sender: String,
+    pub recipient: String,
     pub conversation_id: String,
-    pub slot:            u64,
+    pub slot: u64,
 }
 
 /// Entropy vector pushed by a node at epoch boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntropyEvent {
     pub agent_id: String,
-    pub epoch:    u64,
-    pub ht:       Option<f64>,
-    pub hb:       Option<f64>,
-    pub hs:       Option<f64>,
-    pub hv:       Option<f64>,
-    pub anomaly:  f64,
-    pub n_ht:     u32,
-    pub n_hb:     u32,
-    pub n_hs:     u32,
-    pub n_hv:     u32,
+    pub epoch: u64,
+    pub ht: Option<f64>,
+    pub hb: Option<f64>,
+    pub hs: Option<f64>,
+    pub hv: Option<f64>,
+    pub anomaly: f64,
+    pub n_ht: u32,
+    pub n_hb: u32,
+    pub n_hs: u32,
+    pub n_hv: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotarizeBidEvent {
-    pub sender:          String,
+    pub sender: String,
     pub conversation_id: String,
-    pub slot:            u64,
+    pub slot: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdvertiseEvent {
-    pub sender:       String,
+    pub sender: String,
     pub capabilities: Vec<String>,
-    pub slot:         u64,
+    pub slot: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DisputeEvent {
-    pub sender:          String,
-    pub disputed_agent:  String,
+    pub sender: String,
+    pub disputed_agent: String,
     pub conversation_id: String,
-    pub slot:            u64,
+    pub slot: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BeaconEvent {
     pub sender: String,
-    pub name:   String,
-    pub slot:   u64,
+    pub name: String,
+    pub slot: u64,
 }
 
 /// A message held by the aggregator for a sleeping phone node.
@@ -143,70 +144,70 @@ pub struct BeaconEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingMessage {
     /// Unique ID — nanosecond hex timestamp on arrival.
-    pub id:       String,
+    pub id: String,
     /// Hex-encoded agent_id of the sender.
-    pub from:     String,
+    pub from: String,
     /// Protocol message type, e.g. "PROPOSE".
     pub msg_type: String,
     /// Base64-encoded raw CBOR envelope bytes.
-    pub payload:  String,
+    pub payload: String,
     /// Unix timestamp (seconds) when the aggregator received this message.
-    pub ts:       u64,
+    pub ts: u64,
 }
 
 /// A single dispute record — used by GET /disputes/{agent_id}.
 #[derive(Debug, Clone, Serialize)]
 pub struct DisputeRecord {
-    pub id:              i64,
-    pub sender:          String,
-    pub disputed_agent:  String,
+    pub id: i64,
+    pub sender: String,
+    pub disputed_agent: String,
     pub conversation_id: String,
-    pub slot:            u64,
-    pub ts:              u64,
+    pub slot: u64,
+    pub ts: u64,
 }
 
 /// Capability match — used by GET /agents/search.
 #[derive(Debug, Clone, Serialize)]
 pub struct CapabilityMatch {
-    pub agent_id:   String,
+    pub agent_id: String,
     pub capability: String,
-    pub last_seen:  u64,
+    pub last_seen: u64,
 }
 
 /// A full registry entry populated by BEACON tracking
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentRegistryEntry {
-    pub agent_id:   String,
-    pub name:       String,
+    pub agent_id: String,
+    pub name: String,
     pub first_seen: u64,
-    pub last_seen:  u64,
+    pub last_seen: u64,
 }
 
 /// Full agent profile — reputation + entropy + capabilities + recent disputes + name.
 /// Returned by GET /agents/{agent_id}/profile to avoid multiple round trips.
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentProfile {
-    pub agent_id:     String,
-    pub name:         Option<String>,
-    pub reputation:   Option<AgentReputation>,
-    pub entropy:      Option<EntropyEvent>,
+    pub agent_id: String,
+    pub name: Option<String>,
+    pub reputation: Option<AgentReputation>,
+    pub entropy: Option<EntropyEvent>,
     pub capabilities: Vec<CapabilityMatch>,
-    pub disputes:     Vec<DisputeRecord>,
-    pub last_seen:    Option<u64>,
+    pub disputes: Vec<DisputeRecord>,
+    pub last_seen: Option<u64>,
 }
 
 /// Activity event broadcast to WebSocket clients and stored in activity_log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActivityEvent {
-    pub id:              i64,
-    pub ts:              i64,
-    pub event_type:      String,  // "JOIN" | "FEEDBACK" | "DISPUTE" | "VERDICT"
-    pub agent_id:        String,
-    pub target_id:       Option<String>,
-    pub score:           Option<i64>,
-    pub name:            Option<String>,
-    pub target_name:     Option<String>,
-    pub slot:            Option<i64>,
+    pub id: i64,
+    pub ts: i64,
+    pub event_type: String, // "JOIN" | "FEEDBACK" | "DISPUTE" | "VERDICT"
+    pub agent_id: String,
+    pub target_id: Option<String>,
+    pub score: Option<i64>,
+    pub name: Option<String>,
+    pub target_name: Option<String>,
+    pub slot: Option<i64>,
     pub conversation_id: Option<String>,
 }
 
@@ -235,42 +236,44 @@ pub enum IngestEvent {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentReputation {
-    pub agent_id:       String,
+    pub agent_id: String,
     pub feedback_count: u64,
-    pub total_score:    i64,
+    pub total_score: i64,
     pub positive_count: u64,
-    pub neutral_count:  u64,
+    pub neutral_count: u64,
     pub negative_count: u64,
-    pub verdict_count:  u64,
-    pub average_score:  f64,
-    pub last_updated:   u64,
+    pub verdict_count: u64,
+    pub average_score: f64,
+    pub last_updated: u64,
     /// Computed on read from DB; not stored. "rising" | "falling" | "stable".
     #[serde(default = "default_trend")]
-    pub trend:          String,
+    pub trend: String,
     #[serde(default)]
-    pub last_seen:      u64,
+    pub last_seen: u64,
     /// Human-readable name from the last BEACON, empty string if unknown.
     #[serde(default)]
-    pub name:           String,
+    pub name: String,
 }
 
-fn default_trend() -> String { "stable".to_string() }
+fn default_trend() -> String {
+    "stable".to_string()
+}
 
 impl AgentReputation {
     fn new(agent_id: String) -> Self {
         Self {
             agent_id,
             feedback_count: 0,
-            total_score:    0,
+            total_score: 0,
             positive_count: 0,
-            neutral_count:  0,
+            neutral_count: 0,
             negative_count: 0,
-            verdict_count:  0,
-            average_score:  0.0,
-            last_updated:   now_secs(),
-            trend:          default_trend(),
-            last_seen:      now_secs(),
-            name:           String::new(),
+            verdict_count: 0,
+            average_score: 0.0,
+            last_updated: now_secs(),
+            trend: default_trend(),
+            last_seen: now_secs(),
+            name: String::new(),
         }
     }
 
@@ -278,19 +281,19 @@ impl AgentReputation {
         // Clamp score to protocol range to prevent total_score corruption.
         let score = score.clamp(-100, 100);
         self.feedback_count += 1;
-        self.total_score    += score as i64;
+        self.total_score += score as i64;
         match outcome {
             0 => self.negative_count += 1,
-            1 => self.neutral_count  += 1,
+            1 => self.neutral_count += 1,
             _ => self.positive_count += 1,
         }
         self.average_score = self.total_score as f64 / self.feedback_count as f64;
-        self.last_updated  = now_secs();
+        self.last_updated = now_secs();
     }
 
     fn apply_verdict(&mut self) {
         self.verdict_count += 1;
-        self.last_updated   = now_secs();
+        self.last_updated = now_secs();
     }
 }
 
@@ -301,37 +304,37 @@ impl AgentReputation {
 /// A single raw feedback event — used by GET /interactions.
 #[derive(Debug, Clone, Serialize)]
 pub struct RawInteraction {
-    pub sender:          String,
-    pub target_agent:    String,
-    pub score:           i32,
-    pub outcome:         u8,
-    pub is_dispute:      bool,
-    pub role:            u8,
+    pub sender: String,
+    pub target_agent: String,
+    pub score: i32,
+    pub outcome: u8,
+    pub is_dispute: bool,
+    pub role: u8,
     pub conversation_id: String,
-    pub slot:            u64,
+    pub slot: u64,
     /// Unix timestamp (seconds) when the aggregator received this event.
-    pub ts:              u64,
+    pub ts: u64,
 }
 
 /// One hourly bucket — used by GET /stats/timeseries.
 #[derive(Debug, Clone, Serialize)]
 pub struct TimeseriesBucket {
     /// Start of the 1-hour window (unix seconds).
-    pub bucket:         u64,
+    pub bucket: u64,
     pub feedback_count: u64,
     pub positive_count: u64,
     pub negative_count: u64,
-    pub dispute_count:  u64,
+    pub dispute_count: u64,
 }
 
 /// Rolling entropy result — used by GET /entropy/{id}/rolling
 #[derive(Debug, Clone, Serialize)]
 pub struct RollingEntropyResult {
-    pub agent_id:          String,
-    pub window_epochs:     u32,
-    pub epochs_found:      u32,
-    pub mean_anomaly:      f64,
-    pub anomaly_variance:  f64,
+    pub agent_id: String,
+    pub window_epochs: u32,
+    pub epochs_found: u32,
+    pub mean_anomaly: f64,
+    pub anomaly_variance: f64,
     /// True when variance is below 0.005 AND mean_anomaly > 0.3 — patient cartel signal.
     pub low_variance_flag: bool,
     /// True when mean_anomaly > 0.55.
@@ -341,55 +344,55 @@ pub struct RollingEntropyResult {
 /// Verifier concentration entry — used by GET /leaderboard/verifier-concentration
 #[derive(Debug, Clone, Serialize)]
 pub struct VerifierConcentrationEntry {
-    pub agent_id:               String,
-    pub epochs_sampled:         u32,
-    pub mean_hv:                f64,
+    pub agent_id: String,
+    pub epochs_sampled: u32,
+    pub mean_hv: f64,
     pub epochs_below_threshold: u32,
-    pub concentration_score:    f64, // 1.0 - (mean_hv / hv_threshold)  clamped [0,1]
+    pub concentration_score: f64, // 1.0 - (mean_hv / hv_threshold)  clamped [0,1]
 }
 
 /// Ownership cluster — used by GET /leaderboard/ownership-clusters
 #[derive(Debug, Clone, Serialize)]
 pub struct OwnershipCluster {
-    pub cluster_id:       u32,
-    pub agents:           Vec<String>,
+    pub cluster_id: u32,
+    pub agents: Vec<String>,
     pub mean_anomaly_mad: f64, // mean absolute diff of anomaly scores — lower = more correlated
 }
 
 /// Calibrated β parameters derived from live data — GET /params/calibrated
 #[derive(Debug, Clone, Serialize)]
 pub struct CalibratedParams {
-    pub beta_1_anomaly:      f64,
-    pub beta_2_rep_decay:    f64,
+    pub beta_1_anomaly: f64,
+    pub beta_2_rep_decay: f64,
     pub beta_3_coordination: f64,
-    pub beta_4_systemic:     f64,
-    pub sample_agents:       u32,
-    pub flagged_agents:      u32,
-    pub calibrated_at:       u64,
+    pub beta_4_systemic: f64,
+    pub sample_agents: u32,
+    pub flagged_agents: u32,
+    pub calibrated_at: u64,
 }
 
 /// Systemic Risk Index — GET /system/sri
 #[derive(Debug, Clone, Serialize)]
 pub struct SriStatus {
-    pub sri:                    f64,  // fraction of agents with anomaly > 0.55
+    pub sri: f64,                     // fraction of agents with anomaly > 0.55
     pub circuit_breaker_active: bool, // true when sri > 0.50
-    pub mean_anomaly:           f64,
-    pub active_agents:          u32,
-    pub flagged_agents:         u32,
-    pub computed_at:            u64,
+    pub mean_anomaly: f64,
+    pub active_agents: u32,
+    pub flagged_agents: u32,
+    pub computed_at: u64,
 }
 
 /// Per-agent required stake — GET /stake/required/{id}
 #[derive(Debug, Clone, Serialize)]
 pub struct RequiredStakeResult {
-    pub agent_id:            String,
-    pub base_stake_usdc:     f64,
-    pub current_anomaly:     f64,
-    pub c_coefficient:       f64, // ownership clustering score (0-1)
-    pub beta_1:              f64,
-    pub beta_3:              f64,
+    pub agent_id: String,
+    pub base_stake_usdc: f64,
+    pub current_anomaly: f64,
+    pub c_coefficient: f64, // ownership clustering score (0-1)
+    pub beta_1: f64,
+    pub beta_3: f64,
     pub required_stake_usdc: f64, // base * (1 + β₁·A + β₃·C)
-    pub deficit_usdc:        f64, // max(0, required - base)
+    pub deficit_usdc: f64,        // max(0, required - base)
 }
 
 // ============================================================================
@@ -402,44 +405,44 @@ pub struct RequiredStakeResult {
 /// High mutual positive_flow between two agents signals score inflation.
 #[derive(Debug, Clone, Serialize)]
 pub struct CapitalFlowEdge {
-    pub from_agent:        String,
-    pub to_agent:          String,
+    pub from_agent: String,
+    pub to_agent: String,
     pub interaction_count: u32,
-    pub positive_flow:     i64,
-    pub total_abs_flow:    i64,
-    pub avg_score:         f64,
+    pub positive_flow: i64,
+    pub total_abs_flow: i64,
+    pub avg_score: f64,
 }
 
 /// A cluster of suspected same-owner agents detected via mutual flow analysis.
 #[derive(Debug, Clone, Serialize)]
 pub struct FlowCluster {
-    pub cluster_id:        u32,
-    pub agents:            Vec<String>,
+    pub cluster_id: u32,
+    pub agents: Vec<String>,
     /// 0-1: (cluster_size - 1) / 10, capped at 1.0.
     pub cluster_suspicion: f64,
     /// C coefficient fed into the stake multiplier formula.
-    pub c_coefficient:     f64,
+    pub c_coefficient: f64,
     pub total_mutual_flow: i64,
 }
 
 /// Graph position and C coefficient for one agent.
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentFlowInfo {
-    pub agent_id:             String,
-    pub cluster_id:           Option<u32>,
-    pub c_coefficient:        f64,
+    pub agent_id: String,
+    pub cluster_id: Option<u32>,
+    pub c_coefficient: f64,
     /// Fraction of total outgoing positive flow directed at the top-3 counterparties.
     /// > 0.70 is suspicious for large networks.
-    pub concentration_ratio:  f64,
-    pub top_counterparties:   Vec<String>,
-    pub total_outgoing_flow:  i64,
+    pub concentration_ratio: f64,
+    pub top_counterparties: Vec<String>,
+    pub total_outgoing_flow: i64,
     pub unique_counterparties: u32,
 }
 
 /// One ordered CBOR envelope entry — used by GET /epochs/{agent_id}/{epoch}/envelopes.
 #[derive(Debug, Clone, Serialize)]
 pub struct EpochEnvelopeEntry {
-    pub seq:       i64,
+    pub seq: i64,
     pub leaf_hash: String,
     pub bytes_b64: String,
 }
@@ -453,7 +456,11 @@ struct UnionFind {
 }
 
 impl UnionFind {
-    fn new() -> Self { Self { parent: HashMap::new() } }
+    fn new() -> Self {
+        Self {
+            parent: HashMap::new(),
+        }
+    }
 
     fn find(&mut self, x: &str) -> String {
         if !self.parent.contains_key(x) {
@@ -477,7 +484,9 @@ impl UnionFind {
     fn union(&mut self, a: &str, b: &str) {
         let ra = self.find(a);
         let rb = self.find(b);
-        if ra != rb { self.parent.insert(rb, ra); }
+        if ra != rb {
+            self.parent.insert(rb, ra);
+        }
     }
 }
 
@@ -486,7 +495,9 @@ impl UnionFind {
 /// Two agents are linked when they have mutual positive feedback with
 /// mutual_ratio > 0.5 (i.e. both sides are giving nearly equal scores,
 /// suggesting coordinated score inflation).
-fn compute_clusters_from_edges(edges: &[CapitalFlowEdge]) -> (HashMap<String, u32>, Vec<FlowCluster>) {
+fn compute_clusters_from_edges(
+    edges: &[CapitalFlowEdge],
+) -> (HashMap<String, u32>, Vec<FlowCluster>) {
     // Index edge weights for O(1) reverse lookup.
     let mut flow_map: HashMap<(&str, &str), i64> = HashMap::new();
     for e in edges {
@@ -498,9 +509,16 @@ fn compute_clusters_from_edges(edges: &[CapitalFlowEdge]) -> (HashMap<String, u3
     let mut mutual_cache: HashMap<(String, String), i64> = HashMap::new();
 
     for e in edges {
-        if e.positive_flow <= 0 { continue; }
-        let rev = flow_map.get(&(e.to_agent.as_str(), e.from_agent.as_str())).copied().unwrap_or(0);
-        if rev <= 0 { continue; }
+        if e.positive_flow <= 0 {
+            continue;
+        }
+        let rev = flow_map
+            .get(&(e.to_agent.as_str(), e.from_agent.as_str()))
+            .copied()
+            .unwrap_or(0);
+        if rev <= 0 {
+            continue;
+        }
 
         let lo = e.positive_flow.min(rev);
         let hi = e.positive_flow.max(rev);
@@ -517,7 +535,8 @@ fn compute_clusters_from_edges(edges: &[CapitalFlowEdge]) -> (HashMap<String, u3
     }
 
     // Collect all nodes that appeared in any edge.
-    let all_nodes: std::collections::HashSet<&str> = edges.iter()
+    let all_nodes: std::collections::HashSet<&str> = edges
+        .iter()
         .flat_map(|e| [e.from_agent.as_str(), e.to_agent.as_str()])
         .collect();
 
@@ -535,17 +554,22 @@ fn compute_clusters_from_edges(edges: &[CapitalFlowEdge]) -> (HashMap<String, u3
         members.sort(); // deterministic ordering
         let member_set: std::collections::HashSet<&str> =
             members.iter().map(|s| s.as_str()).collect();
-        let total_flow: i64 = mutual_cache.iter()
-            .filter(|((a, b), _)| member_set.contains(a.as_str()) && member_set.contains(b.as_str()))
+        let total_flow: i64 = mutual_cache
+            .iter()
+            .filter(|((a, b), _)| {
+                member_set.contains(a.as_str()) && member_set.contains(b.as_str())
+            })
             .map(|(_, &v)| v)
             .sum();
         let suspicion = ((members.len() - 1) as f64 / 10.0).min(1.0);
-        for m in &members { agent_cluster.insert(m.clone(), cid); }
+        for m in &members {
+            agent_cluster.insert(m.clone(), cid);
+        }
         clusters.push(FlowCluster {
-            cluster_id:        cid,
-            agents:            members,
+            cluster_id: cid,
+            agents: members,
             cluster_suspicion: suspicion,
-            c_coefficient:     suspicion,
+            c_coefficient: suspicion,
             total_mutual_flow: total_flow,
         });
     }
@@ -715,26 +739,33 @@ struct Db(rusqlite::Connection);
 impl Db {
     fn open(path: &Path) -> rusqlite::Result<Self> {
         let mut conn = rusqlite::Connection::open(path)?;
-        
-        conn.execute_batch("
+
+        conn.execute_batch(
+            "
             PRAGMA journal_mode   = WAL;
             PRAGMA synchronous    = NORMAL;
             PRAGMA foreign_keys   = ON;
             CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY);
-        ")?;
+        ",
+        )?;
 
-        let current_version: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
-            [],
-            |row| row.get(0),
-        ).unwrap_or(0);
+        let current_version: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
 
         let tx = conn.transaction()?;
         for (i, &migration_sql) in MIGRATIONS.iter().enumerate() {
             let migration_version = (i + 1) as i64;
             if migration_version > current_version {
                 tx.execute_batch(migration_sql)?;
-                tx.execute("INSERT INTO schema_migrations (version) VALUES (?)", [migration_version])?;
+                tx.execute(
+                    "INSERT INTO schema_migrations (version) VALUES (?)",
+                    [migration_version],
+                )?;
                 tracing::info!("Applied SQLite database migration v{}", migration_version);
             }
         }
@@ -749,17 +780,17 @@ impl Db {
             "SELECT agent_id, feedback_count, total_score,
                     positive_count, neutral_count, negative_count,
                     verdict_count, last_updated
-             FROM agent_reputation"
+             FROM agent_reputation",
         )?;
         let rows = stmt.query_map([], |row| {
             let agent_id: String = row.get(0)?;
             let feedback_count: u64 = row.get::<_, i64>(1)? as u64;
-            let total_score:    i64 = row.get(2)?;
+            let total_score: i64 = row.get(2)?;
             let positive_count: u64 = row.get::<_, i64>(3)? as u64;
-            let neutral_count:  u64 = row.get::<_, i64>(4)? as u64;
+            let neutral_count: u64 = row.get::<_, i64>(4)? as u64;
             let negative_count: u64 = row.get::<_, i64>(5)? as u64;
-            let verdict_count:  u64 = row.get::<_, i64>(6)? as u64;
-            let last_updated:   u64 = row.get::<_, i64>(7)? as u64;
+            let verdict_count: u64 = row.get::<_, i64>(6)? as u64;
+            let last_updated: u64 = row.get::<_, i64>(7)? as u64;
             let average_score = if feedback_count > 0 {
                 total_score as f64 / feedback_count as f64
             } else {
@@ -809,10 +840,10 @@ impl Db {
                 rep.feedback_count as i64,
                 rep.total_score,
                 rep.positive_count as i64,
-                rep.neutral_count  as i64,
+                rep.neutral_count as i64,
                 rep.negative_count as i64,
-                rep.verdict_count  as i64,
-                rep.last_updated   as i64,
+                rep.verdict_count as i64,
+                rep.last_updated as i64,
             ],
         )?;
         Ok(())
@@ -827,12 +858,7 @@ impl Db {
                  name         = excluded.name,
                  last_seen    = excluded.last_seen,
                  beacon_count = beacon_count + 1",
-            rusqlite::params![
-                ev.sender,
-                ev.name,
-                ts as i64,
-                ts as i64,
-            ],
+            rusqlite::params![ev.sender, ev.name, ts as i64, ts as i64,],
         )?;
         Ok(())
     }
@@ -862,8 +888,8 @@ impl Db {
     /// Query raw interactions with optional sender/target filters.
     fn query_interactions(
         &self,
-        from:  Option<&str>,
-        to:    Option<&str>,
+        from: Option<&str>,
+        to: Option<&str>,
         limit: usize,
     ) -> rusqlite::Result<Vec<RawInteraction>> {
         let mut stmt = self.0.prepare(
@@ -873,22 +899,21 @@ impl Db {
              WHERE (?1 IS NULL OR sender       = ?1)
                AND (?2 IS NULL OR target_agent = ?2)
              ORDER BY ts DESC
-             LIMIT ?3"
+             LIMIT ?3",
         )?;
-        let rows = stmt.query_map(
-            rusqlite::params![from, to, limit as i64],
-            |row| Ok(RawInteraction {
-                sender:          row.get(0)?,
-                target_agent:    row.get(1)?,
-                score:           row.get(2)?,
-                outcome:         row.get::<_, i64>(3)? as u8,
-                is_dispute:      row.get::<_, i64>(4)? != 0,
-                role:            row.get::<_, i64>(5)? as u8,
+        let rows = stmt.query_map(rusqlite::params![from, to, limit as i64], |row| {
+            Ok(RawInteraction {
+                sender: row.get(0)?,
+                target_agent: row.get(1)?,
+                score: row.get(2)?,
+                outcome: row.get::<_, i64>(3)? as u8,
+                is_dispute: row.get::<_, i64>(4)? != 0,
+                role: row.get::<_, i64>(5)? as u8,
                 conversation_id: row.get(6)?,
-                slot:            row.get::<_, i64>(7)? as u64,
-                ts:              row.get::<_, i64>(8)? as u64,
-            }),
-        )?;
+                slot: row.get::<_, i64>(7)? as u64,
+                ts: row.get::<_, i64>(8)? as u64,
+            })
+        })?;
         rows.collect()
     }
 
@@ -897,14 +922,14 @@ impl Db {
         let mut stmt = self.0.prepare(
             "SELECT agent_id, name, first_seen, last_seen
              FROM agent_registry
-             ORDER BY last_seen DESC"
+             ORDER BY last_seen DESC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(AgentRegistryEntry {
-                agent_id:   row.get(0)?,
-                name:       row.get(1)?,
+                agent_id: row.get(0)?,
+                name: row.get(1)?,
                 first_seen: row.get::<_, i64>(2)? as u64,
-                last_seen:  row.get::<_, i64>(3)? as u64,
+                last_seen: row.get::<_, i64>(3)? as u64,
             })
         })?;
         rows.collect()
@@ -916,31 +941,34 @@ impl Db {
             "SELECT score FROM feedback_events
              WHERE target_agent = ?1
              ORDER BY ts DESC
-             LIMIT ?2"
+             LIMIT ?2",
         )?;
-        let rows = stmt.query_map(
-            rusqlite::params![agent_id, n as i64],
-            |row| row.get::<_, i32>(0),
-        )?;
+        let rows = stmt.query_map(rusqlite::params![agent_id, n as i64], |row| {
+            row.get::<_, i32>(0)
+        })?;
         rows.collect()
     }
 
     /// Search agent_registry by name (case-insensitive prefix/contains match).
-    fn query_agents_by_name(&self, name: &str, limit: usize) -> rusqlite::Result<Vec<AgentRegistryEntry>> {
+    fn query_agents_by_name(
+        &self,
+        name: &str,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<AgentRegistryEntry>> {
         let pattern = format!("%{}%", name.to_lowercase());
         let mut stmt = self.0.prepare(
             "SELECT agent_id, name, first_seen, last_seen
              FROM agent_registry
              WHERE LOWER(name) LIKE ?1
              ORDER BY last_seen DESC
-             LIMIT ?2"
+             LIMIT ?2",
         )?;
         let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], |row| {
             Ok(AgentRegistryEntry {
-                agent_id:   row.get(0)?,
-                name:       row.get(1)?,
+                agent_id: row.get(0)?,
+                name: row.get(1)?,
                 first_seen: row.get::<_, i64>(2)? as u64,
-                last_seen:  row.get::<_, i64>(3)? as u64,
+                last_seen: row.get::<_, i64>(3)? as u64,
             })
         })?;
         rows.collect()
@@ -948,11 +976,13 @@ impl Db {
 
     /// Look up a single agent's name from the registry.
     fn query_agent_name(&self, agent_id: &str) -> rusqlite::Result<Option<String>> {
-        self.0.query_row(
-            "SELECT name FROM agent_registry WHERE agent_id = ?1",
-            rusqlite::params![agent_id],
-            |row| row.get(0),
-        ).optional()
+        self.0
+            .query_row(
+                "SELECT name FROM agent_registry WHERE agent_id = ?1",
+                rusqlite::params![agent_id],
+                |row| row.get(0),
+            )
+            .optional()
     }
 
     /// Upsert an entropy vector (agent_id + epoch is the unique key).
@@ -999,7 +1029,7 @@ impl Db {
              FROM entropy_vectors
              WHERE agent_id = ?1
              ORDER BY epoch DESC
-             LIMIT 1"
+             LIMIT 1",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![agent_id], row_to_entropy)?;
         rows.next().transpose()
@@ -1015,21 +1045,25 @@ impl Db {
                  SELECT agent_id, MAX(epoch) FROM entropy_vectors GROUP BY agent_id
              )
              ORDER BY anomaly DESC
-             LIMIT ?1"
+             LIMIT ?1",
         )?;
         let rows = stmt.query_map(rusqlite::params![limit as i64], row_to_entropy)?;
         rows.collect()
     }
 
     /// All entropy vectors for an agent, oldest first.
-    fn query_entropy_history(&self, agent_id: &str, limit: usize) -> rusqlite::Result<Vec<EntropyEvent>> {
+    fn query_entropy_history(
+        &self,
+        agent_id: &str,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<EntropyEvent>> {
         let mut stmt = self.0.prepare(
             "SELECT agent_id, epoch, ht, hb, hs, hv, anomaly,
                     n_ht, n_hb, n_hs, n_hv
              FROM entropy_vectors
              WHERE agent_id = ?1
              ORDER BY epoch DESC
-             LIMIT ?2"
+             LIMIT ?2",
         )?;
         let rows = stmt.query_map(rusqlite::params![agent_id, limit as i64], row_to_entropy)?;
         rows.collect()
@@ -1047,22 +1081,26 @@ impl Db {
              FROM feedback_events
              WHERE ts >= ?1
              GROUP BY bucket
-             ORDER BY bucket ASC"
+             ORDER BY bucket ASC",
         )?;
         let rows = stmt.query_map(rusqlite::params![since as i64], |row| {
             Ok(TimeseriesBucket {
-                bucket:         row.get::<_, i64>(0)? as u64,
+                bucket: row.get::<_, i64>(0)? as u64,
                 feedback_count: row.get::<_, i64>(1)? as u64,
                 positive_count: row.get::<_, i64>(2)? as u64,
                 negative_count: row.get::<_, i64>(3)? as u64,
-                dispute_count:  row.get::<_, i64>(4)? as u64,
+                dispute_count: row.get::<_, i64>(4)? as u64,
             })
         })?;
         rows.collect()
     }
 
     /// Rolling anomaly stats for an agent over the last `window` epochs.
-    fn query_rolling_entropy(&self, agent_id: &str, window: u32) -> rusqlite::Result<RollingEntropyResult> {
+    fn query_rolling_entropy(
+        &self,
+        agent_id: &str,
+        window: u32,
+    ) -> rusqlite::Result<RollingEntropyResult> {
         let row: (f64, f64, i64, Option<f64>) = self.0.query_row(
             "SELECT AVG(anomaly),
                     AVG(anomaly * anomaly) - AVG(anomaly) * AVG(anomaly),
@@ -1075,27 +1113,32 @@ impl Db {
                  LIMIT ?2
              )",
             rusqlite::params![agent_id, window as i64],
-            |r| Ok((
-                r.get::<_, f64>(0).unwrap_or(0.0),
-                r.get::<_, f64>(1).unwrap_or(0.0),
-                r.get::<_, i64>(2).unwrap_or(0),
-                r.get::<_, Option<f64>>(3)?,
-            )),
+            |r| {
+                Ok((
+                    r.get::<_, f64>(0).unwrap_or(0.0),
+                    r.get::<_, f64>(1).unwrap_or(0.0),
+                    r.get::<_, i64>(2).unwrap_or(0),
+                    r.get::<_, Option<f64>>(3)?,
+                ))
+            },
         )?;
         let (mean_anomaly, variance, n, _mean_hv) = row;
         Ok(RollingEntropyResult {
-            agent_id:          agent_id.to_string(),
-            window_epochs:     window,
-            epochs_found:      n as u32,
+            agent_id: agent_id.to_string(),
+            window_epochs: window,
+            epochs_found: n as u32,
             mean_anomaly,
-            anomaly_variance:  variance.max(0.0),
+            anomaly_variance: variance.max(0.0),
             low_variance_flag: variance < 0.005 && mean_anomaly > 0.30 && n >= 5,
             high_anomaly_flag: mean_anomaly > 0.55,
         })
     }
 
     /// Verifier concentration: agents with consistently low hv (verifier entropy).
-    fn query_verifier_concentration(&self, limit: usize) -> rusqlite::Result<Vec<VerifierConcentrationEntry>> {
+    fn query_verifier_concentration(
+        &self,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<VerifierConcentrationEntry>> {
         let mut stmt = self.0.prepare(
             "SELECT agent_id,
                     COUNT(*)                                               AS epochs_sampled,
@@ -1106,18 +1149,18 @@ impl Db {
              GROUP BY agent_id
              HAVING COUNT(*) >= 3
              ORDER BY mean_hv ASC
-             LIMIT ?1"
+             LIMIT ?1",
         )?;
         let hv_threshold = 1.0_f64;
         let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
             let mean_hv: f64 = row.get(2)?;
             let score = (1.0 - (mean_hv / hv_threshold)).clamp(0.0, 1.0);
             Ok(VerifierConcentrationEntry {
-                agent_id:               row.get(0)?,
-                epochs_sampled:         row.get::<_, i64>(1)? as u32,
+                agent_id: row.get(0)?,
+                epochs_sampled: row.get::<_, i64>(1)? as u32,
                 mean_hv,
                 epochs_below_threshold: row.get::<_, i64>(3)? as u32,
-                concentration_score:    score,
+                concentration_score: score,
             })
         })?;
         rows.collect()
@@ -1136,20 +1179,26 @@ impl Db {
                  )
              )",
             [],
-            |r| Ok((
-                r.get::<_, i64>(0).unwrap_or(0),
-                r.get::<_, i64>(1).unwrap_or(0),
-                r.get::<_, f64>(2).unwrap_or(0.0),
-            )),
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0).unwrap_or(0),
+                    r.get::<_, i64>(1).unwrap_or(0),
+                    r.get::<_, f64>(2).unwrap_or(0.0),
+                ))
+            },
         )?;
-        let sri = if total > 0 { flagged as f64 / total as f64 } else { 0.0 };
+        let sri = if total > 0 {
+            flagged as f64 / total as f64
+        } else {
+            0.0
+        };
         Ok(SriStatus {
             sri,
             circuit_breaker_active: sri > 0.50,
             mean_anomaly,
-            active_agents:  total   as u32,
+            active_agents: total as u32,
             flagged_agents: flagged as u32,
-            computed_at:    now_secs(),
+            computed_at: now_secs(),
         })
     }
 
@@ -1159,7 +1208,7 @@ impl Db {
             "SELECT anomaly FROM entropy_vectors
              WHERE agent_id = ?1
              ORDER BY epoch DESC
-             LIMIT 1"
+             LIMIT 1",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![agent_id], |r| r.get::<_, f64>(0))?;
         rows.next().transpose()
@@ -1168,7 +1217,11 @@ impl Db {
     /// Capital flow edges: directed positive-feedback graph over a time window.
     ///
     /// Only pairs with ≥ 2 interactions are returned to reduce noise.
-    fn query_capital_flow_edges(&self, since: u64, limit: usize) -> rusqlite::Result<Vec<CapitalFlowEdge>> {
+    fn query_capital_flow_edges(
+        &self,
+        since: u64,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<CapitalFlowEdge>> {
         let mut stmt = self.0.prepare(
             "SELECT sender,
                     target_agent,
@@ -1181,23 +1234,27 @@ impl Db {
              GROUP BY sender, target_agent
              HAVING COUNT(*) >= 2
              ORDER BY positive_flow DESC
-             LIMIT ?2"
+             LIMIT ?2",
         )?;
         let rows = stmt.query_map(rusqlite::params![since as i64, limit as i64], |row| {
             Ok(CapitalFlowEdge {
-                from_agent:        row.get(0)?,
-                to_agent:          row.get(1)?,
+                from_agent: row.get(0)?,
+                to_agent: row.get(1)?,
                 interaction_count: row.get::<_, i64>(2)? as u32,
-                positive_flow:     row.get::<_, i64>(3)?,
-                total_abs_flow:    row.get::<_, i64>(4)?,
-                avg_score:         row.get::<_, f64>(5)?,
+                positive_flow: row.get::<_, i64>(3)?,
+                total_abs_flow: row.get::<_, i64>(4)?,
+                avg_score: row.get::<_, f64>(5)?,
             })
         })?;
         rows.collect()
     }
 
     /// Per-agent outgoing flow summary — top counterparties by positive flow.
-    fn query_agent_outgoing(&self, agent_id: &str, since: u64) -> rusqlite::Result<Vec<(String, u32, i64)>> {
+    fn query_agent_outgoing(
+        &self,
+        agent_id: &str,
+        since: u64,
+    ) -> rusqlite::Result<Vec<(String, u32, i64)>> {
         let mut stmt = self.0.prepare(
             "SELECT target_agent,
                     COUNT(*)                                       AS cnt,
@@ -1206,7 +1263,7 @@ impl Db {
              WHERE sender = ?1 AND ts >= ?2
              GROUP BY target_agent
              ORDER BY positive_flow DESC
-             LIMIT 20"
+             LIMIT 20",
         )?;
         let rows = stmt.query_map(rusqlite::params![agent_id, since as i64], |row| {
             Ok((
@@ -1220,12 +1277,12 @@ impl Db {
 
     fn store_raw_envelope(
         &self,
-        agent_id:  &str,
-        epoch:     u64,
-        seq_num:   i64,
-        ts:        u64,
+        agent_id: &str,
+        epoch: u64,
+        seq_num: i64,
+        ts: u64,
         leaf_hash: &str,
-        bytes:     &[u8],
+        bytes: &[u8],
     ) -> rusqlite::Result<()> {
         self.0.execute(
             "INSERT INTO raw_envelopes (agent_id, epoch, seq_num, ts, leaf_hash, bytes)
@@ -1238,20 +1295,27 @@ impl Db {
     fn query_epoch_envelopes(
         &self,
         agent_id: &str,
-        epoch:    u64,
-        limit:    usize,
+        epoch: u64,
+        limit: usize,
     ) -> rusqlite::Result<Vec<(i64, String, Vec<u8>)>> {
         let mut stmt = self.0.prepare(
             "SELECT seq_num, leaf_hash, bytes FROM raw_envelopes
              WHERE agent_id = ?1 AND epoch = ?2
              ORDER BY seq_num ASC LIMIT ?3",
         )?;
-        let rows = stmt.query_map(
-            rusqlite::params![agent_id, epoch as i64, limit as i64],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?)),
-        )?
-        .filter_map(|r| r.ok())
-        .collect();
+        let rows = stmt
+            .query_map(
+                rusqlite::params![agent_id, epoch as i64, limit as i64],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )?
+            .filter_map(|r| r.ok())
+            .collect();
         Ok(rows)
     }
 
@@ -1273,7 +1337,12 @@ impl Db {
         Ok(())
     }
 
-    fn upsert_capability(&self, agent_id: &str, capability: &str, last_seen: u64) -> rusqlite::Result<()> {
+    fn upsert_capability(
+        &self,
+        agent_id: &str,
+        capability: &str,
+        last_seen: u64,
+    ) -> rusqlite::Result<()> {
         self.0.execute(
             "INSERT INTO capabilities (agent_id, capability, last_seen)
              VALUES (?1, ?2, ?3)
@@ -1283,21 +1352,24 @@ impl Db {
         Ok(())
     }
 
-    fn query_agents_by_capability(&self, capability: &str, limit: usize) -> rusqlite::Result<Vec<CapabilityMatch>> {
+    fn query_agents_by_capability(
+        &self,
+        capability: &str,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<CapabilityMatch>> {
         let mut stmt = self.0.prepare(
             "SELECT agent_id, capability, last_seen FROM capabilities
              WHERE capability = ?1
              ORDER BY last_seen DESC
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(
-            rusqlite::params![capability, limit as i64],
-            |row| Ok(CapabilityMatch {
-                agent_id:   row.get(0)?,
+        let rows = stmt.query_map(rusqlite::params![capability, limit as i64], |row| {
+            Ok(CapabilityMatch {
+                agent_id: row.get(0)?,
                 capability: row.get(1)?,
-                last_seen:  row.get::<_, i64>(2)? as u64,
-            }),
-        )?;
+                last_seen: row.get::<_, i64>(2)? as u64,
+            })
+        })?;
         rows.collect()
     }
 
@@ -1316,7 +1388,11 @@ impl Db {
         Ok(())
     }
 
-    fn query_disputes_for_agent(&self, agent_id: &str, limit: usize) -> rusqlite::Result<Vec<DisputeRecord>> {
+    fn query_disputes_for_agent(
+        &self,
+        agent_id: &str,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<DisputeRecord>> {
         let mut stmt = self.0.prepare(
             "SELECT id, sender, disputed_agent, conversation_id, slot, ts
              FROM disputes
@@ -1324,17 +1400,16 @@ impl Db {
              ORDER BY ts DESC
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(
-            rusqlite::params![agent_id, limit as i64],
-            |row| Ok(DisputeRecord {
-                id:              row.get(0)?,
-                sender:          row.get(1)?,
-                disputed_agent:  row.get(2)?,
+        let rows = stmt.query_map(rusqlite::params![agent_id, limit as i64], |row| {
+            Ok(DisputeRecord {
+                id: row.get(0)?,
+                sender: row.get(1)?,
+                disputed_agent: row.get(2)?,
                 conversation_id: row.get(3)?,
-                slot:            row.get::<_, i64>(4)? as u64,
-                ts:              row.get::<_, i64>(5)? as u64,
-            }),
-        )?;
+                slot: row.get::<_, i64>(4)? as u64,
+                ts: row.get::<_, i64>(5)? as u64,
+            })
+        })?;
         rows.collect()
     }
 
@@ -1360,7 +1435,11 @@ impl Db {
         Ok(ActivityEvent { id, ..ev.clone() })
     }
 
-    fn query_activity(&self, limit: usize, before_id: Option<i64>) -> rusqlite::Result<Vec<ActivityEvent>> {
+    fn query_activity(
+        &self,
+        limit: usize,
+        before_id: Option<i64>,
+    ) -> rusqlite::Result<Vec<ActivityEvent>> {
         let mut stmt = self.0.prepare(
             "SELECT id, ts, event_type, agent_id, target_id, score, name, target_name, slot, conversation_id
              FROM activity_log
@@ -1370,15 +1449,15 @@ impl Db {
         )?;
         let rows = stmt.query_map(rusqlite::params![before_id, limit as i64], |row| {
             Ok(ActivityEvent {
-                id:              row.get(0)?,
-                ts:              row.get(1)?,
-                event_type:      row.get(2)?,
-                agent_id:        row.get(3)?,
-                target_id:       row.get(4)?,
-                score:           row.get(5)?,
-                name:            row.get(6)?,
-                target_name:     row.get(7)?,
-                slot:            row.get(8)?,
+                id: row.get(0)?,
+                ts: row.get(1)?,
+                event_type: row.get(2)?,
+                agent_id: row.get(3)?,
+                target_id: row.get(4)?,
+                score: row.get(5)?,
+                name: row.get(6)?,
+                target_name: row.get(7)?,
+                slot: row.get(8)?,
                 conversation_id: row.get(9)?,
             })
         })?;
@@ -1389,16 +1468,16 @@ impl Db {
 fn row_to_entropy(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntropyEvent> {
     Ok(EntropyEvent {
         agent_id: row.get(0)?,
-        epoch:    row.get::<_, i64>(1)? as u64,
-        ht:       row.get(2)?,
-        hb:       row.get(3)?,
-        hs:       row.get(4)?,
-        hv:       row.get(5)?,
-        anomaly:  row.get(6)?,
-        n_ht:     row.get::<_, i64>(7)? as u32,
-        n_hb:     row.get::<_, i64>(8)? as u32,
-        n_hs:     row.get::<_, i64>(9)? as u32,
-        n_hv:     row.get::<_, i64>(10)? as u32,
+        epoch: row.get::<_, i64>(1)? as u64,
+        ht: row.get(2)?,
+        hb: row.get(3)?,
+        hs: row.get(4)?,
+        hv: row.get(5)?,
+        anomaly: row.get(6)?,
+        n_ht: row.get::<_, i64>(7)? as u32,
+        n_hb: row.get::<_, i64>(8)? as u32,
+        n_hs: row.get::<_, i64>(9)? as u32,
+        n_hv: row.get::<_, i64>(10)? as u32,
     })
 }
 
@@ -1406,7 +1485,12 @@ fn row_to_entropy(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntropyEvent> {
 
 impl Db {
     /// Upsert / overwrite a pending ownership proposal.
-    pub fn upsert_ownership_proposal(&self, agent_id: &str, proposed_owner: &str, proposed_at: u64) -> rusqlite::Result<()> {
+    pub fn upsert_ownership_proposal(
+        &self,
+        agent_id: &str,
+        proposed_owner: &str,
+        proposed_at: u64,
+    ) -> rusqlite::Result<()> {
         self.0.execute(
             "INSERT INTO ownership_proposals (agent_id, proposed_owner, proposed_at)
              VALUES (?1, ?2, ?3)
@@ -1419,7 +1503,12 @@ impl Db {
     }
 
     /// Insert an accepted claim (immutable — ignored if already exists).
-    pub fn insert_ownership_claim(&self, agent_id: &str, owner: &str, claimed_at: u64) -> rusqlite::Result<()> {
+    pub fn insert_ownership_claim(
+        &self,
+        agent_id: &str,
+        owner: &str,
+        claimed_at: u64,
+    ) -> rusqlite::Result<()> {
         self.0.execute(
             "INSERT OR IGNORE INTO ownership_claims (agent_id, owner, claimed_at)
              VALUES (?1, ?2, ?3)",
@@ -1430,41 +1519,53 @@ impl Db {
 
     /// Load all pending proposals into a HashMap.
     pub fn load_ownership_proposals(&self) -> rusqlite::Result<HashMap<String, OwnerProposal>> {
-        let mut stmt = self.0.prepare(
-            "SELECT agent_id, proposed_owner, proposed_at FROM ownership_proposals"
-        )?;
+        let mut stmt = self
+            .0
+            .prepare("SELECT agent_id, proposed_owner, proposed_at FROM ownership_proposals")?;
         let rows = stmt.query_map([], |row| {
-            let agent_id: String       = row.get(0)?;
+            let agent_id: String = row.get(0)?;
             let proposed_owner: String = row.get(1)?;
-            let proposed_at: i64       = row.get(2)?;
-            Ok((agent_id.clone(), OwnerProposal {
-                agent_id,
-                proposed_owner,
-                proposed_at: proposed_at as u64,
-            }))
+            let proposed_at: i64 = row.get(2)?;
+            Ok((
+                agent_id.clone(),
+                OwnerProposal {
+                    agent_id,
+                    proposed_owner,
+                    proposed_at: proposed_at as u64,
+                },
+            ))
         })?;
         let mut map = HashMap::new();
-        for row in rows { let (k, v) = row?; map.insert(k, v); }
+        for row in rows {
+            let (k, v) = row?;
+            map.insert(k, v);
+        }
         Ok(map)
     }
 
     /// Load all accepted claims into a HashMap.
     pub fn load_ownership_claims(&self) -> rusqlite::Result<HashMap<String, OwnerRecord>> {
-        let mut stmt = self.0.prepare(
-            "SELECT agent_id, owner, claimed_at FROM ownership_claims"
-        )?;
+        let mut stmt = self
+            .0
+            .prepare("SELECT agent_id, owner, claimed_at FROM ownership_claims")?;
         let rows = stmt.query_map([], |row| {
-            let agent_id: String  = row.get(0)?;
-            let owner: String     = row.get(1)?;
-            let claimed_at: i64   = row.get(2)?;
-            Ok((agent_id.clone(), OwnerRecord {
-                agent_id,
-                owner,
-                claimed_at: claimed_at as u64,
-            }))
+            let agent_id: String = row.get(0)?;
+            let owner: String = row.get(1)?;
+            let claimed_at: i64 = row.get(2)?;
+            Ok((
+                agent_id.clone(),
+                OwnerRecord {
+                    agent_id,
+                    owner,
+                    claimed_at: claimed_at as u64,
+                },
+            ))
         })?;
         let mut map = HashMap::new();
-        for row in rows { let (k, v) = row?; map.insert(k, v); }
+        for row in rows {
+            let (k, v) = row?;
+            map.insert(k, v);
+        }
         Ok(map)
     }
 }
@@ -1478,7 +1579,7 @@ const MAX_IN_MEMORY_INTERACTIONS: usize = 10_000;
 
 #[derive(Default)]
 struct Inner {
-    agents:       HashMap<String, AgentReputation>,
+    agents: HashMap<String, AgentReputation>,
     /// Bounded ring buffer of recent interactions (used as fallback when no SQLite).
     interactions: VecDeque<RawInteraction>,
     /// Maps agent_id -> c_coefficient (clustering factor) derived from on-chain Solana tokens.
@@ -1492,26 +1593,26 @@ struct Inner {
 #[derive(Debug, Clone, Serialize)]
 pub struct NetworkStats {
     /// Number of distinct agents seen by the aggregator.
-    pub agent_count:       usize,
+    pub agent_count: usize,
     /// Total feedback events recorded (all-time).
     pub interaction_count: u64,
     /// Total BEACON events recorded (persistent since v2 migration).
-    pub beacon_count:      u64,
+    pub beacon_count: u64,
     /// Beacons per minute (sliding 60s window).
-    pub beacon_bpm:        u64,
+    pub beacon_bpm: u64,
     /// Unix timestamp (seconds) when the aggregator process started.
-    pub started_at:        u64,
+    pub started_at: u64,
 }
 
 /// A hosting node entry returned by GET /hosting/nodes.
 #[derive(Debug, Clone, Serialize)]
 pub struct HostingNode {
-    pub node_id:      String,
-    pub name:         String,
-    pub fee_bps:      u32,
-    pub api_url:      String,
-    pub first_seen:   u64,
-    pub last_seen:    u64,
+    pub node_id: String,
+    pub name: String,
+    pub fee_bps: u32,
+    pub api_url: String,
+    pub first_seen: u64,
+    pub last_seen: u64,
     /// Live count of hosted agents on this node.
     pub hosted_count: u32,
 }
@@ -1519,17 +1620,17 @@ pub struct HostingNode {
 /// A pending ownership proposal recorded by POST /agents/:id/propose-owner.
 #[derive(Debug, Clone, Serialize)]
 pub struct OwnerProposal {
-    pub agent_id:       String,
-    pub proposed_owner: String,  // base58 Solana wallet
-    pub proposed_at:    u64,
+    pub agent_id: String,
+    pub proposed_owner: String, // base58 Solana wallet
+    pub proposed_at: u64,
 }
 
 /// An accepted ownership claim recorded by POST /agents/:id/claim-owner.
 /// Created only after on-chain AgentOwnership PDA is verified.
 #[derive(Debug, Clone, Serialize)]
 pub struct OwnerRecord {
-    pub agent_id:   String,
-    pub owner:      String,  // base58 Solana wallet
+    pub agent_id: String,
+    pub owner: String, // base58 Solana wallet
     pub claimed_at: u64,
 }
 
@@ -1544,9 +1645,9 @@ pub enum OwnerStatus {
 
 #[derive(Clone)]
 pub struct ReputationStore {
-    inner:      Arc<RwLock<Inner>>,
+    inner: Arc<RwLock<Inner>>,
     /// SQLite connection; None = in-memory only (no --db-path supplied).
-    db:         Arc<Mutex<Option<Db>>>,
+    db: Arc<Mutex<Option<Db>>>,
     /// Process start time — never changes after init.
     started_at: u64,
     /// Sliding window of BEACON timestamps for BPM calculation.
@@ -1571,13 +1672,13 @@ pub struct ReputationStore {
 impl Default for ReputationStore {
     fn default() -> Self {
         Self {
-            inner:             Arc::new(RwLock::new(Inner::default())),
-            db:                Arc::new(Mutex::new(None)),
-            started_at:        now_secs(),
-            beacon_window:     Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
-            fcm_tokens:        Arc::new(Mutex::new(HashMap::new())),
-            sleep_states:      Arc::new(Mutex::new(HashSet::new())),
-            pending_messages:  Arc::new(Mutex::new(HashMap::new())),
+            inner: Arc::new(RwLock::new(Inner::default())),
+            db: Arc::new(Mutex::new(None)),
+            started_at: now_secs(),
+            beacon_window: Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
+            fcm_tokens: Arc::new(Mutex::new(HashMap::new())),
+            sleep_states: Arc::new(Mutex::new(HashSet::new())),
+            pending_messages: Arc::new(Mutex::new(HashMap::new())),
             ownership_pending: Arc::new(Mutex::new(HashMap::new())),
             ownership_claimed: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -1590,20 +1691,18 @@ impl ReputationStore {
     }
 
     pub fn with_db(path: &Path) -> anyhow::Result<Self> {
-        let db = Db::open(path)
-            .map_err(|e| anyhow::anyhow!("SQLite open failed: {e}"))?;
-        let mut agents = db.load_all()
+        let db = Db::open(path).map_err(|e| anyhow::anyhow!("SQLite open failed: {e}"))?;
+        let mut agents = db
+            .load_all()
             .map_err(|e| anyhow::anyhow!("SQLite load failed: {e}"))?;
 
         if let Ok(registry) = db.get_registry() {
             for entry in registry {
-                let rep = agents
-                    .entry(entry.agent_id.clone())
-                    .or_insert_with(|| {
-                        let mut r = AgentReputation::new(entry.agent_id);
-                        r.last_seen = entry.last_seen;
-                        r
-                    });
+                let rep = agents.entry(entry.agent_id.clone()).or_insert_with(|| {
+                    let mut r = AgentReputation::new(entry.agent_id);
+                    r.last_seen = entry.last_seen;
+                    r
+                });
                 if entry.last_seen > rep.last_seen {
                     rep.last_seen = entry.last_seen;
                 }
@@ -1620,13 +1719,17 @@ impl ReputationStore {
         );
 
         // Load ownership state so it survives aggregator restarts.
-        let ownership_pending = db.load_ownership_proposals()
+        let ownership_pending = db
+            .load_ownership_proposals()
             .map_err(|e| anyhow::anyhow!("SQLite load_ownership_proposals failed: {e}"))?;
-        let ownership_claimed = db.load_ownership_claims()
+        let ownership_claimed = db
+            .load_ownership_claims()
             .map_err(|e| anyhow::anyhow!("SQLite load_ownership_claims failed: {e}"))?;
         tracing::info!(
             "Loaded {} ownership proposals, {} ownership claims from {}",
-            ownership_pending.len(), ownership_claimed.len(), path.display()
+            ownership_pending.len(),
+            ownership_claimed.len(),
+            path.display()
         );
 
         Ok(Self {
@@ -1635,12 +1738,12 @@ impl ReputationStore {
                 interactions: VecDeque::new(),
                 solana_flow_clusters: HashMap::new(),
             })),
-            db:                Arc::new(Mutex::new(Some(db))),
-            started_at:        now_secs(),
-            beacon_window:     Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
-            fcm_tokens:        Arc::new(Mutex::new(HashMap::new())),
-            sleep_states:      Arc::new(Mutex::new(HashSet::new())),
-            pending_messages:  Arc::new(Mutex::new(HashMap::new())),
+            db: Arc::new(Mutex::new(Some(db))),
+            started_at: now_secs(),
+            beacon_window: Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
+            fcm_tokens: Arc::new(Mutex::new(HashMap::new())),
+            sleep_states: Arc::new(Mutex::new(HashSet::new())),
+            pending_messages: Arc::new(Mutex::new(HashMap::new())),
             ownership_pending: Arc::new(Mutex::new(ownership_pending)),
             ownership_claimed: Arc::new(Mutex::new(ownership_claimed)),
         })
@@ -1648,12 +1751,21 @@ impl ReputationStore {
 
     /// Return a reputation score for an agent, or 0 if unknown.
     pub fn get_agent_reputation_score(&self, agent_id: &str) -> i64 {
-        self.inner.read().unwrap().agents.get(agent_id).map(|r| r.total_score).unwrap_or(0)
+        self.inner
+            .read()
+            .unwrap()
+            .agents
+            .get(agent_id)
+            .map(|r| r.total_score)
+            .unwrap_or(0)
     }
 
     /// Return true if the agent has a claimed owner.
     pub fn is_agent_claimed(&self, agent_id: &str) -> bool {
-        self.ownership_claimed.lock().unwrap().contains_key(agent_id)
+        self.ownership_claimed
+            .lock()
+            .unwrap()
+            .contains_key(agent_id)
     }
 
     // ========================================================================
@@ -1691,7 +1803,7 @@ impl ReputationStore {
     pub fn push_pending(&self, agent_id: &str, msg: PendingMessage) {
         const CAP: usize = 100;
         let mut map = self.pending_messages.lock().unwrap();
-        let queue   = map.entry(agent_id.to_string()).or_default();
+        let queue = map.entry(agent_id.to_string()).or_default();
         if queue.len() >= CAP {
             queue.pop_front();
         }
@@ -1723,11 +1835,14 @@ impl ReputationStore {
         drop(claimed);
         let proposed_at = now_secs();
         let mut pending = self.ownership_pending.lock().unwrap();
-        pending.insert(agent_id.to_string(), OwnerProposal {
-            agent_id:       agent_id.to_string(),
-            proposed_owner: proposed_owner.to_string(),
-            proposed_at,
-        });
+        pending.insert(
+            agent_id.to_string(),
+            OwnerProposal {
+                agent_id: agent_id.to_string(),
+                proposed_owner: proposed_owner.to_string(),
+                proposed_at,
+            },
+        );
         drop(pending);
         // Persist to SQLite so the proposal survives restarts.
         let db = self.db.lock().unwrap();
@@ -1736,27 +1851,37 @@ impl ReputationStore {
                 tracing::warn!("SQLite upsert_ownership_proposal failed: {e}");
             }
         }
-        tracing::info!("Ownership proposal: agent={} owner={}", &agent_id[..8.min(agent_id.len())], proposed_owner);
+        tracing::info!(
+            "Ownership proposal: agent={} owner={}",
+            &agent_id[..8.min(agent_id.len())],
+            proposed_owner
+        );
         Ok(())
     }
 
     /// Record an accepted ownership claim (called when human POSTs /claim-owner).
     /// Returns Err if (a) no pending proposal exists, (b) the signing wallet
     /// doesn't match the proposed_owner, or (c) already claimed.
-    pub fn claim_owner(&self, agent_id: &str, owner_wallet: &str) -> Result<OwnerRecord, &'static str> {
+    pub fn claim_owner(
+        &self,
+        agent_id: &str,
+        owner_wallet: &str,
+    ) -> Result<OwnerRecord, &'static str> {
         let mut claimed = self.ownership_claimed.lock().unwrap();
         if claimed.contains_key(agent_id) {
             return Err("agent already has an accepted owner");
         }
         let pending = self.ownership_pending.lock().unwrap();
-        let proposal = pending.get(agent_id).ok_or("no pending ownership proposal for this agent")?;
+        let proposal = pending
+            .get(agent_id)
+            .ok_or("no pending ownership proposal for this agent")?;
         if proposal.proposed_owner != owner_wallet {
             return Err("owner wallet does not match the pending proposal");
         }
         drop(pending);
         let record = OwnerRecord {
-            agent_id:   agent_id.to_string(),
-            owner:      owner_wallet.to_string(),
+            agent_id: agent_id.to_string(),
+            owner: owner_wallet.to_string(),
             claimed_at: now_secs(),
         };
         claimed.insert(agent_id.to_string(), record.clone());
@@ -1768,7 +1893,11 @@ impl ReputationStore {
                 tracing::warn!("SQLite insert_ownership_claim failed: {e}");
             }
         }
-        tracing::info!("Ownership claimed: agent={} owner={}", &agent_id[..8.min(agent_id.len())], owner_wallet);
+        tracing::info!(
+            "Ownership claimed: agent={} owner={}",
+            &agent_id[..8.min(agent_id.len())],
+            owner_wallet
+        );
         Ok(record)
     }
 
@@ -1792,10 +1921,14 @@ impl ReputationStore {
         match event {
             IngestEvent::Feedback(fb) => {
                 if !is_valid_agent_id(&fb.target_agent) {
-                    tracing::warn!("Ingest: invalid target_agent '{}' — dropped", &fb.target_agent);
+                    tracing::warn!(
+                        "Ingest: invalid target_agent '{}' — dropped",
+                        &fb.target_agent
+                    );
                     return None;
                 }
-                let rep = inner.agents
+                let rep = inner
+                    .agents
                     .entry(fb.target_agent.clone())
                     .or_insert_with(|| AgentReputation::new(fb.target_agent.clone()));
                 rep.apply_feedback(fb.score, fb.outcome);
@@ -1804,14 +1937,14 @@ impl ReputationStore {
                 // Store raw interaction for /interactions and /stats/timeseries.
                 let ts = now_secs();
                 let interaction = RawInteraction {
-                    sender:          fb.sender.clone(),
-                    target_agent:    fb.target_agent.clone(),
-                    score:           fb.score.clamp(-100, 100),
-                    outcome:         fb.outcome,
-                    is_dispute:      fb.is_dispute,
-                    role:            fb.role,
+                    sender: fb.sender.clone(),
+                    target_agent: fb.target_agent.clone(),
+                    score: fb.score.clamp(-100, 100),
+                    outcome: fb.outcome,
+                    is_dispute: fb.is_dispute,
+                    role: fb.role,
                     conversation_id: fb.conversation_id.clone(),
-                    slot:            fb.slot,
+                    slot: fb.slot,
                     ts,
                 };
                 if inner.interactions.len() >= MAX_IN_MEMORY_INTERACTIONS {
@@ -1832,15 +1965,15 @@ impl ReputationStore {
                     let sender_name = conn.query_agent_name(&fb.sender).ok().flatten();
                     let target_name = conn.query_agent_name(&fb.target_agent).ok().flatten();
                     let ev = ActivityEvent {
-                        id:              0,
-                        ts:              ts as i64,
-                        event_type:      "FEEDBACK".to_string(),
-                        agent_id:        fb.sender.clone(),
-                        target_id:       Some(fb.target_agent.clone()),
-                        score:           Some(fb.score as i64),
-                        name:            sender_name,
+                        id: 0,
+                        ts: ts as i64,
+                        event_type: "FEEDBACK".to_string(),
+                        agent_id: fb.sender.clone(),
+                        target_id: Some(fb.target_agent.clone()),
+                        score: Some(fb.score as i64),
+                        name: sender_name,
                         target_name,
-                        slot:            Some(fb.slot as i64),
+                        slot: Some(fb.slot as i64),
                         conversation_id: Some(fb.conversation_id.clone()),
                     };
                     match conn.insert_activity(&ev) {
@@ -1855,7 +1988,8 @@ impl ReputationStore {
                     tracing::warn!("Ingest: invalid recipient '{}' — dropped", &v.recipient);
                     return None;
                 }
-                let rep = inner.agents
+                let rep = inner
+                    .agents
                     .entry(v.recipient.clone())
                     .or_insert_with(|| AgentReputation::new(v.recipient.clone()));
                 rep.apply_verdict();
@@ -1869,15 +2003,15 @@ impl ReputationStore {
                     let name = conn.query_agent_name(&v.sender).ok().flatten();
                     let target_name = conn.query_agent_name(&v.recipient).ok().flatten();
                     let ev = ActivityEvent {
-                        id:              0,
-                        ts:              ts as i64,
-                        event_type:      "VERDICT".to_string(),
-                        agent_id:        v.sender.clone(),
-                        target_id:       Some(v.recipient.clone()),
-                        score:           None,
+                        id: 0,
+                        ts: ts as i64,
+                        event_type: "VERDICT".to_string(),
+                        agent_id: v.sender.clone(),
+                        target_id: Some(v.recipient.clone()),
+                        score: None,
                         name,
                         target_name,
-                        slot:            Some(v.slot as i64),
+                        slot: Some(v.slot as i64),
                         conversation_id: Some(v.conversation_id.clone()),
                     };
                     match conn.insert_activity(&ev) {
@@ -1889,14 +2023,19 @@ impl ReputationStore {
             }
             IngestEvent::Entropy(ev) => {
                 if !is_valid_agent_id(&ev.agent_id) {
-                    tracing::warn!("Ingest: invalid agent_id in ENTROPY '{}' — dropped", &ev.agent_id);
+                    tracing::warn!(
+                        "Ingest: invalid agent_id in ENTROPY '{}' — dropped",
+                        &ev.agent_id
+                    );
                     return None;
                 }
                 drop(inner);
                 let ts = now_secs();
                 tracing::debug!(
                     "ENTROPY epoch={} agent={} anomaly={:.4}",
-                    ev.epoch, &ev.agent_id[..8], ev.anomaly,
+                    ev.epoch,
+                    &ev.agent_id[..8],
+                    ev.anomaly,
                 );
                 let db = self.db.lock().unwrap();
                 if let Some(ref conn) = *db {
@@ -1908,7 +2047,10 @@ impl ReputationStore {
             }
             IngestEvent::NotarizeBid(bid) => {
                 if !is_valid_agent_id(&bid.sender) {
-                    tracing::warn!("Ingest: invalid sender in NOTARIZE_BID '{}' — dropped", &bid.sender);
+                    tracing::warn!(
+                        "Ingest: invalid sender in NOTARIZE_BID '{}' — dropped",
+                        &bid.sender
+                    );
                     return None;
                 }
                 drop(inner);
@@ -1924,19 +2066,29 @@ impl ReputationStore {
             }
             IngestEvent::Advertise(ad) => {
                 if !is_valid_agent_id(&ad.sender) {
-                    tracing::warn!("Ingest: invalid sender in ADVERTISE '{}' — dropped", &ad.sender);
+                    tracing::warn!(
+                        "Ingest: invalid sender in ADVERTISE '{}' — dropped",
+                        &ad.sender
+                    );
                     return None;
                 }
                 // Ensure sender has a reputation entry so they appear in /agents.
-                inner.agents
+                inner
+                    .agents
                     .entry(ad.sender.clone())
                     .or_insert_with(|| AgentReputation::new(ad.sender.clone()));
                 drop(inner);
                 let ts = now_secs();
                 // Sanitise: max 32 caps, each ≤64 chars, alphanumeric + dash/underscore.
-                let caps: Vec<String> = ad.capabilities.iter()
-                    .filter(|c| !c.is_empty() && c.len() <= 64
-                        && c.chars().all(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_'))
+                let caps: Vec<String> = ad
+                    .capabilities
+                    .iter()
+                    .filter(|c| {
+                        !c.is_empty()
+                            && c.len() <= 64
+                            && c.chars()
+                                .all(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_')
+                    })
                     .take(32)
                     .cloned()
                     .collect();
@@ -1953,18 +2105,25 @@ impl ReputationStore {
             }
             IngestEvent::Dispute(d) => {
                 if !is_valid_agent_id(&d.disputed_agent) {
-                    tracing::warn!("Ingest: invalid disputed_agent '{}' — dropped", &d.disputed_agent);
+                    tracing::warn!(
+                        "Ingest: invalid disputed_agent '{}' — dropped",
+                        &d.disputed_agent
+                    );
                     return None;
                 }
                 // Apply synthetic negative feedback so reputation and anomaly scores reflect the dispute.
-                let rep = inner.agents
+                let rep = inner
+                    .agents
                     .entry(d.disputed_agent.clone())
                     .or_insert_with(|| AgentReputation::new(d.disputed_agent.clone()));
                 rep.apply_feedback(-50, 0); // score=-50, outcome=0 (negative)
                 let rep = rep.clone();
                 drop(inner);
                 let ts = now_secs();
-                tracing::warn!("DISPUTE disputed_agent={}", &d.disputed_agent[..8.min(d.disputed_agent.len())]);
+                tracing::warn!(
+                    "DISPUTE disputed_agent={}",
+                    &d.disputed_agent[..8.min(d.disputed_agent.len())]
+                );
                 self.persist(&rep);
                 let db = self.db.lock().unwrap();
                 if let Some(ref conn) = *db {
@@ -1974,15 +2133,15 @@ impl ReputationStore {
                     let name = conn.query_agent_name(&d.sender).ok().flatten();
                     let target_name = conn.query_agent_name(&d.disputed_agent).ok().flatten();
                     let ev = ActivityEvent {
-                        id:              0,
-                        ts:              ts as i64,
-                        event_type:      "DISPUTE".to_string(),
-                        agent_id:        d.sender.clone(),
-                        target_id:       Some(d.disputed_agent.clone()),
-                        score:           None,
+                        id: 0,
+                        ts: ts as i64,
+                        event_type: "DISPUTE".to_string(),
+                        agent_id: d.sender.clone(),
+                        target_id: Some(d.disputed_agent.clone()),
+                        score: None,
                         name,
                         target_name,
-                        slot:            Some(d.slot as i64),
+                        slot: Some(d.slot as i64),
                         conversation_id: Some(d.conversation_id.clone()),
                     };
                     match conn.insert_activity(&ev) {
@@ -2001,19 +2160,27 @@ impl ReputationStore {
                 }
 
                 if !is_valid_agent_id(&ev.sender) {
-                    tracing::warn!("Ingest: invalid sender in BEACON '{}' — dropped", &ev.sender);
+                    tracing::warn!(
+                        "Ingest: invalid sender in BEACON '{}' — dropped",
+                        &ev.sender
+                    );
                     return None;
                 }
                 let ts = now_secs();
                 let is_new = !inner.agents.contains_key(&ev.sender);
-                let rep = inner.agents
+                let rep = inner
+                    .agents
                     .entry(ev.sender.clone())
                     .or_insert_with(|| AgentReputation::new(ev.sender.clone()));
                 rep.last_seen = ts;
                 rep.name = ev.name.clone();
                 drop(inner);
 
-                tracing::debug!("BEACON agent={} name={}", &ev.sender[..8.min(ev.sender.len())], &ev.name);
+                tracing::debug!(
+                    "BEACON agent={} name={}",
+                    &ev.sender[..8.min(ev.sender.len())],
+                    &ev.name
+                );
                 let db = self.db.lock().unwrap();
                 if let Some(ref conn) = *db {
                     if let Err(e) = conn.upsert_registry(&ev, ts) {
@@ -2021,15 +2188,15 @@ impl ReputationStore {
                     }
                     if is_new {
                         let join_ev = ActivityEvent {
-                            id:              0,
-                            ts:              ts as i64,
-                            event_type:      "JOIN".to_string(),
-                            agent_id:        ev.sender.clone(),
-                            target_id:       None,
-                            score:           None,
-                            name:            Some(ev.name.clone()),
-                            target_name:     None,
-                            slot:            Some(ev.slot as i64),
+                            id: 0,
+                            ts: ts as i64,
+                            event_type: "JOIN".to_string(),
+                            agent_id: ev.sender.clone(),
+                            target_id: None,
+                            score: None,
+                            name: Some(ev.name.clone()),
+                            target_name: None,
+                            slot: Some(ev.slot as i64),
                             conversation_id: None,
                         };
                         match conn.insert_activity(&join_ev) {
@@ -2067,21 +2234,33 @@ impl ReputationStore {
         agents
     }
 
-
     pub fn list_agents(&self, limit: usize, offset: usize, sort_by: &str) -> Vec<AgentReputation> {
         let inner = self.inner.read().unwrap();
         let mut agents: Vec<&AgentReputation> = inner.agents.values().collect();
         if sort_by == "recent" || sort_by == "active" {
-            agents.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.agent_id.cmp(&b.agent_id)));
+            agents.sort_by(|a, b| {
+                b.last_seen
+                    .cmp(&a.last_seen)
+                    .then(a.agent_id.cmp(&b.agent_id))
+            });
         } else if sort_by == "new" {
             // "new" — use last_seen ascending so newest-first approximates join order.
-            agents.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.agent_id.cmp(&b.agent_id)));
+            agents.sort_by(|a, b| {
+                b.last_seen
+                    .cmp(&a.last_seen)
+                    .then(a.agent_id.cmp(&b.agent_id))
+            });
         } else if sort_by == "reputation" {
-            agents.sort_by(|a, b| b.total_score.cmp(&a.total_score).then(a.agent_id.cmp(&b.agent_id)));
+            agents.sort_by(|a, b| {
+                b.total_score
+                    .cmp(&a.total_score)
+                    .then(a.agent_id.cmp(&b.agent_id))
+            });
         } else {
             agents.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
         }
-        agents.into_iter()
+        agents
+            .into_iter()
             .skip(offset)
             .take(limit)
             .cloned()
@@ -2110,7 +2289,9 @@ impl ReputationStore {
             let db = self.db.lock().unwrap();
             if let Some(ref conn) = *db {
                 conn.0
-                    .query_row("SELECT COUNT(*) FROM feedback_events", [], |row| row.get::<_, i64>(0))
+                    .query_row("SELECT COUNT(*) FROM feedback_events", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
                     .unwrap_or(0) as u64
             } else {
                 self.inner.read().unwrap().interactions.len() as u64
@@ -2121,7 +2302,9 @@ impl ReputationStore {
             let db = self.db.lock().unwrap();
             if let Some(ref conn) = *db {
                 conn.0
-                    .query_row("SELECT SUM(beacon_count) FROM agent_registry", [], |row| row.get::<_, i64>(0))
+                    .query_row("SELECT SUM(beacon_count) FROM agent_registry", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
                     .unwrap_or(0) as u64
             } else {
                 0
@@ -2133,7 +2316,10 @@ impl ReputationStore {
         let bpm = {
             let mut window = self.beacon_window.lock().unwrap();
             // Evict timestamps older than 60 seconds
-            while window.front().is_some_and(|&ts| ts < now.saturating_sub(60)) {
+            while window
+                .front()
+                .is_some_and(|&ts| ts < now.saturating_sub(60))
+            {
                 window.pop_front();
             }
             window.len() as u64
@@ -2158,7 +2344,7 @@ impl ReputationStore {
         if let Some(ref conn) = *db {
             match conn.query_entropy_latest(agent_id) {
                 Ok(row) => return row,
-                Err(e)  => tracing::warn!("query_entropy_latest failed: {e}"),
+                Err(e) => tracing::warn!("query_entropy_latest failed: {e}"),
             }
         }
         None
@@ -2170,7 +2356,7 @@ impl ReputationStore {
         if let Some(ref conn) = *db {
             match conn.query_anomaly_leaderboard(limit) {
                 Ok(rows) => return rows,
-                Err(e)   => tracing::warn!("query_anomaly_leaderboard failed: {e}"),
+                Err(e) => tracing::warn!("query_anomaly_leaderboard failed: {e}"),
             }
         }
         vec![]
@@ -2182,7 +2368,7 @@ impl ReputationStore {
         if let Some(ref conn) = *db {
             match conn.query_entropy_history(agent_id, limit) {
                 Ok(rows) => return rows,
-                Err(e)   => tracing::warn!("query_entropy_history failed: {e}"),
+                Err(e) => tracing::warn!("query_entropy_history failed: {e}"),
             }
         }
         vec![]
@@ -2193,22 +2379,25 @@ impl ReputationStore {
     /// from the in-memory ring buffer (last 10 000 events).
     pub fn interactions(
         &self,
-        from:  Option<&str>,
-        to:    Option<&str>,
+        from: Option<&str>,
+        to: Option<&str>,
         limit: usize,
     ) -> Vec<RawInteraction> {
         let db = self.db.lock().unwrap();
         if let Some(ref conn) = *db {
             match conn.query_interactions(from, to, limit) {
                 Ok(rows) => return rows,
-                Err(e)   => tracing::warn!("query_interactions failed: {e}"),
+                Err(e) => tracing::warn!("query_interactions failed: {e}"),
             }
         }
         // In-memory fallback.
         let inner = self.inner.read().unwrap();
-        inner.interactions.iter().rev()
-            .filter(|i| from.is_none_or(|f| i.sender      == f))
-            .filter(|i| to.is_none_or(  |t| i.target_agent == t))
+        inner
+            .interactions
+            .iter()
+            .rev()
+            .filter(|i| from.is_none_or(|f| i.sender == f))
+            .filter(|i| to.is_none_or(|t| i.target_agent == t))
             .take(limit)
             .cloned()
             .collect()
@@ -2221,7 +2410,7 @@ impl ReputationStore {
         if let Some(ref conn) = *db {
             match conn.query_timeseries(since) {
                 Ok(rows) => return rows,
-                Err(e)   => tracing::warn!("query_timeseries failed: {e}"),
+                Err(e) => tracing::warn!("query_timeseries failed: {e}"),
             }
         }
         // In-memory fallback: bucket the ring buffer.
@@ -2234,12 +2423,18 @@ impl ReputationStore {
                 feedback_count: 0,
                 positive_count: 0,
                 negative_count: 0,
-                dispute_count:  0,
+                dispute_count: 0,
             });
             entry.feedback_count += 1;
-            if i.outcome   == 2 { entry.positive_count += 1; }
-            if i.outcome   == 0 { entry.negative_count += 1; }
-            if i.is_dispute     { entry.dispute_count  += 1; }
+            if i.outcome == 2 {
+                entry.positive_count += 1;
+            }
+            if i.outcome == 0 {
+                entry.negative_count += 1;
+            }
+            if i.is_dispute {
+                entry.dispute_count += 1;
+            }
         }
         let mut buckets: Vec<_> = map.into_values().collect();
         buckets.sort_by_key(|b| b.bucket);
@@ -2256,11 +2451,11 @@ impl ReputationStore {
             }
         }
         RollingEntropyResult {
-            agent_id:          agent_id.to_string(),
-            window_epochs:     window,
-            epochs_found:      0,
-            mean_anomaly:      0.0,
-            anomaly_variance:  0.0,
+            agent_id: agent_id.to_string(),
+            window_epochs: window,
+            epochs_found: 0,
+            mean_anomaly: 0.0,
+            anomaly_variance: 0.0,
             low_variance_flag: false,
             high_anomaly_flag: false,
         }
@@ -2286,17 +2481,20 @@ impl ReputationStore {
     pub fn ownership_clusters(&self) -> Vec<OwnershipCluster> {
         let db = self.db.lock().unwrap();
         let rows: Vec<(String, f64)> = if let Some(ref conn) = *db {
-            conn.0.prepare(
-                "SELECT agent_id, anomaly FROM entropy_vectors
+            conn.0
+                .prepare(
+                    "SELECT agent_id, anomaly FROM entropy_vectors
                  WHERE (agent_id, epoch) IN (
                      SELECT agent_id, MAX(epoch) FROM entropy_vectors GROUP BY agent_id
                  )
                  ORDER BY anomaly DESC
-                 LIMIT 50"
-            ).and_then(|mut s| {
-                s.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)))
-                    .and_then(|rows| rows.collect())
-            }).unwrap_or_default()
+                 LIMIT 50",
+                )
+                .and_then(|mut s| {
+                    s.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)))
+                        .and_then(|rows| rows.collect())
+                })
+                .unwrap_or_default()
         } else {
             vec![]
         };
@@ -2311,13 +2509,19 @@ impl ReputationStore {
         let mut next_cluster = 0u32;
 
         for i in 0..rows.len() {
-            if assigned[i].is_some() { continue; }
+            if assigned[i].is_some() {
+                continue;
+            }
             for j in (i + 1)..rows.len() {
-                if assigned[j].is_some() { continue; }
+                if assigned[j].is_some() {
+                    continue;
+                }
                 let mad = (rows[i].1 - rows[j].1).abs();
                 if mad < 0.05 {
                     let cid = assigned[i].get_or_insert_with(|| {
-                        let c = next_cluster; next_cluster += 1; c
+                        let c = next_cluster;
+                        next_cluster += 1;
+                        c
                     });
                     assigned[j] = Some(*cid);
                 }
@@ -2328,19 +2532,26 @@ impl ReputationStore {
             }
         }
 
-        let mut cluster_map: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+        let mut cluster_map: std::collections::HashMap<u32, Vec<usize>> =
+            std::collections::HashMap::new();
         for (i, cid) in assigned.iter().enumerate() {
             cluster_map.entry(cid.unwrap()).or_default().push(i);
         }
 
-        cluster_map.into_iter()
+        cluster_map
+            .into_iter()
             .filter(|(_, members)| members.len() >= 2)
             .map(|(cid, members)| {
                 let agents: Vec<String> = members.iter().map(|&i| rows[i].0.clone()).collect();
-                let scores: Vec<f64>    = members.iter().map(|&i| rows[i].1).collect();
+                let scores: Vec<f64> = members.iter().map(|&i| rows[i].1).collect();
                 let mean = scores.iter().sum::<f64>() / scores.len() as f64;
-                let mad  = scores.iter().map(|s| (s - mean).abs()).sum::<f64>() / scores.len() as f64;
-                OwnershipCluster { cluster_id: cid, agents, mean_anomaly_mad: mad }
+                let mad =
+                    scores.iter().map(|s| (s - mean).abs()).sum::<f64>() / scores.len() as f64;
+                OwnershipCluster {
+                    cluster_id: cid,
+                    agents,
+                    mean_anomaly_mad: mad,
+                }
             })
             .collect()
     }
@@ -2352,23 +2563,30 @@ impl ReputationStore {
     pub fn calibrated_params(&self) -> CalibratedParams {
         let db = self.db.lock().unwrap();
         type EntropyRow = (f64, Option<f64>, Option<f64>, Option<f64>, Option<f64>);
-        let rows: Vec<EntropyRow> =
-            if let Some(ref conn) = *db {
-                conn.0.prepare(
+        let rows: Vec<EntropyRow> = if let Some(ref conn) = *db {
+            conn.0
+                .prepare(
                     "SELECT anomaly, ht, hb, hs, hv FROM entropy_vectors
                      WHERE (agent_id, epoch) IN (
                          SELECT agent_id, MAX(epoch) FROM entropy_vectors GROUP BY agent_id
-                     )"
-                ).and_then(|mut s| {
-                    s.query_map([], |r| Ok((
-                        r.get::<_, f64>(0)?,
-                        r.get::<_, Option<f64>>(1)?,
-                        r.get::<_, Option<f64>>(2)?,
-                        r.get::<_, Option<f64>>(3)?,
-                        r.get::<_, Option<f64>>(4)?,
-                    ))).and_then(|rows| rows.collect())
-                }).unwrap_or_default()
-            } else { vec![] };
+                     )",
+                )
+                .and_then(|mut s| {
+                    s.query_map([], |r| {
+                        Ok((
+                            r.get::<_, f64>(0)?,
+                            r.get::<_, Option<f64>>(1)?,
+                            r.get::<_, Option<f64>>(2)?,
+                            r.get::<_, Option<f64>>(3)?,
+                            r.get::<_, Option<f64>>(4)?,
+                        ))
+                    })
+                    .and_then(|rows| rows.collect())
+                })
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
         drop(db);
 
         // Default EntropyParams thresholds.
@@ -2376,14 +2594,17 @@ impl ReputationStore {
         let (w_ht, w_hb, w_hs, w_hv) = (0.35, 0.20, 0.30, 0.15);
 
         let flagged: Vec<_> = rows.iter().filter(|r| r.0 > 0.55).collect();
-        let total   = rows.len() as u32;
-        let n_flag  = flagged.len() as u32;
+        let total = rows.len() as u32;
+        let n_flag = flagged.len() as u32;
 
         if flagged.is_empty() {
             return CalibratedParams {
-                beta_1_anomaly: 0.870, beta_2_rep_decay: 0.130,
-                beta_3_coordination: 0.0, beta_4_systemic: 0.0,
-                sample_agents: total, flagged_agents: n_flag,
+                beta_1_anomaly: 0.870,
+                beta_2_rep_decay: 0.130,
+                beta_3_coordination: 0.0,
+                beta_4_systemic: 0.0,
+                sample_agents: total,
+                flagged_agents: n_flag,
                 calibrated_at: now_secs(),
             };
         }
@@ -2396,22 +2617,40 @@ impl ReputationStore {
         let n = flagged.len() as f64;
 
         for &(_, ht, hb, hs, hv) in &flagged {
-            if let Some(h) = ht { c_ht += w_ht * (ht_thresh - h).max(0.0); }
-            if let Some(h) = hb { c_hb += w_hb * (hb_thresh - h).max(0.0); }
-            if let Some(h) = hs { c_hs += w_hs * (hs_thresh - h).max(0.0); }
-            if let Some(h) = hv { c_hv += w_hv * (hv_thresh - h).max(0.0); }
+            if let Some(h) = ht {
+                c_ht += w_ht * (ht_thresh - h).max(0.0);
+            }
+            if let Some(h) = hb {
+                c_hb += w_hb * (hb_thresh - h).max(0.0);
+            }
+            if let Some(h) = hs {
+                c_hs += w_hs * (hs_thresh - h).max(0.0);
+            }
+            if let Some(h) = hv {
+                c_hv += w_hv * (hv_thresh - h).max(0.0);
+            }
         }
-        c_ht /= n; c_hb /= n; c_hs /= n; c_hv /= n;
+        c_ht /= n;
+        c_hb /= n;
+        c_hs /= n;
+        c_hv /= n;
 
         let entropy_total = c_ht + c_hb + c_hs + c_hv;
-        let total_weight  = entropy_total + 0.15; // 0.15 reserved for rep decay
-        let b1 = if total_weight > 0.0 { entropy_total / total_weight } else { 0.870 };
+        let total_weight = entropy_total + 0.15; // 0.15 reserved for rep decay
+        let b1 = if total_weight > 0.0 {
+            entropy_total / total_weight
+        } else {
+            0.870
+        };
         let b2 = 1.0 - b1;
 
         CalibratedParams {
-            beta_1_anomaly: b1, beta_2_rep_decay: b2,
-            beta_3_coordination: 0.0, beta_4_systemic: 0.0,
-            sample_agents: total, flagged_agents: n_flag,
+            beta_1_anomaly: b1,
+            beta_2_rep_decay: b2,
+            beta_3_coordination: 0.0,
+            beta_4_systemic: 0.0,
+            sample_agents: total,
+            flagged_agents: n_flag,
             calibrated_at: now_secs(),
         }
     }
@@ -2428,12 +2667,18 @@ impl ReputationStore {
         drop(db);
         // In-memory fallback: scan agent anomaly from leaderboard.
         let evs = self.anomaly_leaderboard(10_000);
-        let total   = evs.len() as u32;
+        let total = evs.len() as u32;
         let flagged = evs.iter().filter(|e| e.anomaly > 0.55).count() as u32;
-        let mean    = if total > 0 {
+        let mean = if total > 0 {
             evs.iter().map(|e| e.anomaly).sum::<f64>() / total as f64
-        } else { 0.0 };
-        let sri = if total > 0 { flagged as f64 / total as f64 } else { 0.0 };
+        } else {
+            0.0
+        };
+        let sri = if total > 0 {
+            flagged as f64 / total as f64
+        } else {
+            0.0
+        };
         SriStatus {
             sri,
             circuit_breaker_active: sri > 0.50,
@@ -2455,23 +2700,27 @@ impl ReputationStore {
         let anomaly = {
             let db = self.db.lock().unwrap();
             if let Some(ref conn) = *db {
-                conn.query_latest_anomaly(agent_id).unwrap_or(None).unwrap_or(0.0)
-            } else { 0.0 }
+                conn.query_latest_anomaly(agent_id)
+                    .unwrap_or(None)
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            }
         };
         let c = self.agent_c_coefficient(agent_id);
 
         let required = BASE_STAKE_USDC * (1.0 + BETA_1 * anomaly + BETA_3 * c);
-        let deficit  = (required - BASE_STAKE_USDC).max(0.0);
+        let deficit = (required - BASE_STAKE_USDC).max(0.0);
 
         RequiredStakeResult {
-            agent_id:            agent_id.to_string(),
-            base_stake_usdc:     BASE_STAKE_USDC,
-            current_anomaly:     anomaly,
-            c_coefficient:       c,
-            beta_1:              BETA_1,
-            beta_3:              BETA_3,
+            agent_id: agent_id.to_string(),
+            base_stake_usdc: BASE_STAKE_USDC,
+            current_anomaly: anomaly,
+            c_coefficient: c,
+            beta_1: BETA_1,
+            beta_3: BETA_3,
             required_stake_usdc: required,
-            deficit_usdc:        deficit,
+            deficit_usdc: deficit,
         }
     }
 
@@ -2486,7 +2735,7 @@ impl ReputationStore {
         if let Some(ref conn) = *db {
             match conn.query_capital_flow_edges(since, limit) {
                 Ok(rows) => return rows,
-                Err(e)   => tracing::warn!("query_capital_flow_edges failed: {e}"),
+                Err(e) => tracing::warn!("query_capital_flow_edges failed: {e}"),
             }
         }
         vec![]
@@ -2507,8 +2756,11 @@ impl ReputationStore {
         let outgoing: Vec<(String, u32, i64)> = {
             let db = self.db.lock().unwrap();
             if let Some(ref conn) = *db {
-                conn.query_agent_outgoing(agent_id, since).unwrap_or_default()
-            } else { vec![] }
+                conn.query_agent_outgoing(agent_id, since)
+                    .unwrap_or_default()
+            } else {
+                vec![]
+            }
         };
 
         let total_flow: i64 = outgoing.iter().map(|(_, _, f)| f).sum();
@@ -2516,25 +2768,33 @@ impl ReputationStore {
 
         // Concentration ratio: fraction of flow to top-3 counterparties.
         let top3_flow: i64 = outgoing.iter().take(3).map(|(_, _, f)| f).sum();
-        let concentration = if total_flow > 0 { top3_flow as f64 / total_flow as f64 } else { 0.0 };
-        let top_counterparties: Vec<String> = outgoing.iter().take(5).map(|(id, _, _)| id.clone()).collect();
+        let concentration = if total_flow > 0 {
+            top3_flow as f64 / total_flow as f64
+        } else {
+            0.0
+        };
+        let top_counterparties: Vec<String> = outgoing
+            .iter()
+            .take(5)
+            .map(|(id, _, _)| id.clone())
+            .collect();
 
         // Cluster membership.
-        let edges  = self.capital_flow_edges(window_secs, 5_000);
+        let edges = self.capital_flow_edges(window_secs, 5_000);
         let (agent_cluster, clusters) = compute_clusters_from_edges(&edges);
-        let cluster_id  = agent_cluster.get(agent_id).copied();
-        let c_coeff     = cluster_id
+        let cluster_id = agent_cluster.get(agent_id).copied();
+        let c_coeff = cluster_id
             .and_then(|cid| clusters.iter().find(|c| c.cluster_id == cid))
             .map(|c| c.c_coefficient)
             .unwrap_or(0.0);
 
         AgentFlowInfo {
-            agent_id:              agent_id.to_string(),
+            agent_id: agent_id.to_string(),
             cluster_id,
-            c_coefficient:         c_coeff,
-            concentration_ratio:   concentration,
+            c_coefficient: c_coeff,
+            concentration_ratio: concentration,
             top_counterparties,
-            total_outgoing_flow:   total_flow,
+            total_outgoing_flow: total_flow,
             unique_counterparties: unique,
         }
     }
@@ -2543,7 +2803,11 @@ impl ReputationStore {
     /// Uses the Solana on-chain Capital Flow graph (GAP-02) computed by the background indexer.
     pub fn agent_c_coefficient(&self, agent_id: &str) -> f64 {
         let inner = self.inner.read().unwrap();
-        inner.solana_flow_clusters.get(agent_id).copied().unwrap_or(0.0)
+        inner
+            .solana_flow_clusters
+            .get(agent_id)
+            .copied()
+            .unwrap_or(0.0)
     }
 
     // =========================================================================
@@ -2557,7 +2821,10 @@ impl ReputationStore {
     }
 
     /// Stores the computed on-chain clusters. The C coefficient is derived from cluster size.
-    pub async fn update_capital_flow_clusters(&self, clusters: Vec<Vec<String>>) -> anyhow::Result<()> {
+    pub async fn update_capital_flow_clusters(
+        &self,
+        clusters: Vec<Vec<String>>,
+    ) -> anyhow::Result<()> {
         let mut inner = self.inner.write().unwrap();
         inner.solana_flow_clusters.clear();
 
@@ -2569,7 +2836,7 @@ impl ReputationStore {
                 inner.solana_flow_clusters.insert(agent_id, suspicion);
             }
         }
-        
+
         tracing::debug!("Updated solana_flow_clusters map with on-chain data.");
         Ok(())
     }
@@ -2597,13 +2864,7 @@ impl ReputationStore {
     /// Store a raw CBOR envelope byte slice for an agent's epoch.
     /// Called during FEEDBACK ingest when the node provides raw bytes.
     /// The seq_num is assigned by insertion order (count of existing rows for that agent+epoch).
-    pub fn store_raw_envelope(
-        &self,
-        agent_id: &str,
-        epoch:    u64,
-        ts:       u64,
-        raw_b64:  &str,
-    ) {
+    pub fn store_raw_envelope(&self, agent_id: &str, epoch: u64, ts: u64, raw_b64: &str) {
         use base64::Engine as _;
         let bytes = match base64::engine::general_purpose::STANDARD.decode(raw_b64) {
             Ok(b) => b,
@@ -2637,7 +2898,8 @@ impl ReputationStore {
         use base64::Engine as _;
         let db = self.db.lock().unwrap();
         match *db {
-            Some(ref conn) => conn.query_epoch_envelopes(agent_id, epoch, 1_000)
+            Some(ref conn) => conn
+                .query_epoch_envelopes(agent_id, epoch, 1_000)
                 .unwrap_or_default()
                 .into_iter()
                 .map(|(seq, leaf_hash, bytes)| EpochEnvelopeEntry {
@@ -2657,7 +2919,7 @@ impl ReputationStore {
         if let Some(ref conn) = *db {
             match conn.query_agents_by_capability(capability, limit) {
                 Ok(rows) => return rows,
-                Err(e)   => tracing::warn!("query_agents_by_capability failed: {e}"),
+                Err(e) => tracing::warn!("query_agents_by_capability failed: {e}"),
             }
         }
         vec![]
@@ -2669,7 +2931,7 @@ impl ReputationStore {
         if let Some(ref conn) = *db {
             match conn.query_disputes_for_agent(agent_id, limit) {
                 Ok(rows) => return rows,
-                Err(e)   => tracing::warn!("query_disputes_for_agent failed: {e}"),
+                Err(e) => tracing::warn!("query_disputes_for_agent failed: {e}"),
             }
         }
         vec![]
@@ -2680,7 +2942,7 @@ impl ReputationStore {
         if let Some(ref conn) = *db {
             match conn.get_registry() {
                 Ok(rows) => return rows,
-                Err(e)   => tracing::warn!("get_registry failed: {e}"),
+                Err(e) => tracing::warn!("get_registry failed: {e}"),
             }
         }
         vec![]
@@ -2689,36 +2951,51 @@ impl ReputationStore {
     /// Full agent profile — combines reputation, entropy, capabilities, disputes, and name
     /// into a single response to avoid multiple round trips.
     pub fn agent_profile(&self, agent_id: &str) -> AgentProfile {
-        let reputation   = self.get(agent_id);
-        let entropy      = self.entropy_latest(agent_id);
+        let reputation = self.get(agent_id);
+        let entropy = self.entropy_latest(agent_id);
         let capabilities = self.search_by_capability_for_agent(agent_id);
-        let disputes     = self.disputes_for_agent(agent_id, 5);
-        let last_seen    = reputation.as_ref().map(|r| r.last_seen);
+        let disputes = self.disputes_for_agent(agent_id, 5);
+        let last_seen = reputation.as_ref().map(|r| r.last_seen);
 
         let name = {
             let db = self.db.lock().unwrap();
-            db.as_ref().and_then(|conn| conn.query_agent_name(agent_id).ok().flatten())
+            db.as_ref()
+                .and_then(|conn| conn.query_agent_name(agent_id).ok().flatten())
         };
 
-        AgentProfile { agent_id: agent_id.to_string(), name, reputation, entropy, capabilities, disputes, last_seen }
+        AgentProfile {
+            agent_id: agent_id.to_string(),
+            name,
+            reputation,
+            entropy,
+            capabilities,
+            disputes,
+            last_seen,
+        }
     }
 
     /// Capabilities advertised by a specific agent (for use in profile assembly).
     fn search_by_capability_for_agent(&self, agent_id: &str) -> Vec<CapabilityMatch> {
         let db = self.db.lock().unwrap();
         if let Some(ref conn) = *db {
-            let res = conn.0.prepare(
-                "SELECT agent_id, capability, last_seen FROM capabilities WHERE agent_id = ?1"
-            ).and_then(|mut stmt| {
-                stmt.query_map(rusqlite::params![agent_id], |row| {
-                    Ok(CapabilityMatch {
-                        agent_id:   row.get(0)?,
-                        capability: row.get(1)?,
-                        last_seen:  row.get::<_, i64>(2)? as u64,
+            let res = conn
+                .0
+                .prepare(
+                    "SELECT agent_id, capability, last_seen FROM capabilities WHERE agent_id = ?1",
+                )
+                .and_then(|mut stmt| {
+                    stmt.query_map(rusqlite::params![agent_id], |row| {
+                        Ok(CapabilityMatch {
+                            agent_id: row.get(0)?,
+                            capability: row.get(1)?,
+                            last_seen: row.get::<_, i64>(2)? as u64,
+                        })
                     })
-                }).and_then(|rows| rows.collect())
-            });
-            if let Ok(rows) = res { return rows; }
+                    .and_then(|rows| rows.collect())
+                });
+            if let Ok(rows) = res {
+                return rows;
+            }
         }
         vec![]
     }
@@ -2729,7 +3006,7 @@ impl ReputationStore {
         if let Some(ref conn) = *db {
             match conn.query_agents_by_name(name, limit) {
                 Ok(rows) => return rows,
-                Err(e)   => tracing::warn!("query_agents_by_name failed: {e}"),
+                Err(e) => tracing::warn!("query_agents_by_name failed: {e}"),
             }
         }
         vec![]
@@ -2770,17 +3047,17 @@ impl ReputationStore {
                  GROUP BY hn.node_id
                  ORDER BY hn.last_seen DESC",
             ) {
-                Ok(s)  => s,
+                Ok(s) => s,
                 Err(_) => return vec![],
             };
             let rows = stmt.query_map([cutoff], |row| {
                 Ok(HostingNode {
-                    node_id:      row.get(0)?,
-                    name:         row.get(1)?,
-                    fee_bps:      row.get::<_, i64>(2)? as u32,
-                    api_url:      row.get(3)?,
-                    first_seen:   row.get::<_, i64>(4)? as u64,
-                    last_seen:    row.get::<_, i64>(5)? as u64,
+                    node_id: row.get(0)?,
+                    name: row.get(1)?,
+                    fee_bps: row.get::<_, i64>(2)? as u32,
+                    api_url: row.get(3)?,
+                    first_seen: row.get::<_, i64>(4)? as u64,
+                    last_seen: row.get::<_, i64>(5)? as u64,
                     hosted_count: row.get::<_, i64>(6)? as u32,
                 })
             });
@@ -2805,19 +3082,25 @@ impl ReputationStore {
             );
         }
     }
-}  // end impl ReputationStore
+} // end impl ReputationStore
 
 /// Compute trend from recent feedback scores (newest first).
 /// Splits scores in half: if the newer half averages >5 points above the older half → "rising",
 /// >5 below → "falling", otherwise "stable". Requires at least 6 samples.
 fn compute_trend(scores: &[i32]) -> &'static str {
-    if scores.len() < 6 { return "stable"; }
-    let mid    = scores.len() / 2;
+    if scores.len() < 6 {
+        return "stable";
+    }
+    let mid = scores.len() / 2;
     let recent: f64 = scores[..mid].iter().sum::<i32>() as f64 / mid as f64;
-    let older:  f64 = scores[mid..].iter().sum::<i32>() as f64 / (scores.len() - mid) as f64;
-    if      recent > older + 5.0 { "rising"  }
-    else if recent < older - 5.0 { "falling" }
-    else                         { "stable"  }
+    let older: f64 = scores[mid..].iter().sum::<i32>() as f64 / (scores.len() - mid) as f64;
+    if recent > older + 5.0 {
+        "rising"
+    } else if recent < older - 5.0 {
+        "falling"
+    } else {
+        "stable"
+    }
 }
 
 fn now_secs() -> u64 {

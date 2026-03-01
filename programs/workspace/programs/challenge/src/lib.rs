@@ -12,8 +12,7 @@ pub const TREASURY_PUBKEY: Pubkey = pubkey!("qw4hzfV7UUXTrNh3hiS9Q8KSPMXWUusNoyF
 pub const USDC_MINT: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
 /// Behavior-log program ID — batch accounts must be owned by this program.
-const BEHAVIOR_LOG_PROGRAM_ID: Pubkey =
-    pubkey!("35DAMPQVu6wsmMEGv67URFAGgyauEYD73egd74uiX1sM");
+const BEHAVIOR_LOG_PROGRAM_ID: Pubkey = pubkey!("35DAMPQVu6wsmMEGv67URFAGgyauEYD73egd74uiX1sM");
 
 /// Byte offset of `submitted_slot` in BatchAccount raw data.
 /// Layout: 8 disc + 1 version + 32 agent_id + 8 epoch_number + 32 log_merkle_root + 32 batch_hash = 113
@@ -91,17 +90,14 @@ pub mod challenge {
             !args.contradicting_entry.is_empty(),
             ChallengeError::EmptyEntry,
         );
-        require!(
-            !args.merkle_proof.is_empty(),
-            ChallengeError::EmptyProof,
-        );
+        require!(!args.merkle_proof.is_empty(), ChallengeError::EmptyProof,);
 
         // Transfer USDC stake from challenger's ATA to vault.
         let cpi_ctx = CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
-                from:      ctx.accounts.challenger_usdc.to_account_info(),
-                to:        ctx.accounts.challenge_vault.to_account_info(),
+                from: ctx.accounts.challenger_usdc.to_account_info(),
+                to: ctx.accounts.challenge_vault.to_account_info(),
                 authority: ctx.accounts.challenger.to_account_info(),
             },
         );
@@ -111,23 +107,23 @@ pub mod challenge {
             anchor_lang::solana_program::keccak::hash(&args.contradicting_entry).to_bytes();
 
         let challenge = &mut ctx.accounts.challenge_account;
-        challenge.version                 = 1;
-        challenge.agent_id                = args.agent_id;
-        challenge.epoch_number            = args.epoch_number;
-        challenge.challenger              = ctx.accounts.challenger.key();
-        challenge.entry_hash              = entry_hash;
-        challenge.leaf_index              = args.leaf_index;
-        challenge.merkle_proof_len        = args.merkle_proof.len() as u16;
-        challenge.resolved                = false;
-        challenge.succeeded               = false;
-        challenge.submitted_slot          = clock.slot;
-        challenge.bump                    = ctx.bumps.challenge_account;
-        challenge.vault_authority_bump    = ctx.bumps.challenge_vault_authority;
+        challenge.version = 1;
+        challenge.agent_id = args.agent_id;
+        challenge.epoch_number = args.epoch_number;
+        challenge.challenger = ctx.accounts.challenger.key();
+        challenge.entry_hash = entry_hash;
+        challenge.leaf_index = args.leaf_index;
+        challenge.merkle_proof_len = args.merkle_proof.len() as u16;
+        challenge.resolved = false;
+        challenge.succeeded = false;
+        challenge.submitted_slot = clock.slot;
+        challenge.bump = ctx.bumps.challenge_account;
+        challenge.vault_authority_bump = ctx.bumps.challenge_vault_authority;
 
         emit!(ChallengeSubmitted {
-            agent_id:       args.agent_id,
-            epoch_number:   args.epoch_number,
-            challenger:     ctx.accounts.challenger.key(),
+            agent_id: args.agent_id,
+            epoch_number: args.epoch_number,
+            challenger: ctx.accounts.challenger.key(),
             entry_hash,
             submitted_slot: clock.slot,
         });
@@ -153,7 +149,8 @@ pub mod challenge {
         args: ResolveChallengeArgs,
     ) -> Result<()> {
         let clock = Clock::get()?;
-        let deadline = ctx.accounts
+        let deadline = ctx
+            .accounts
             .challenge_account
             .submitted_slot
             .saturating_add(RESOLUTION_DEADLINE_SLOTS);
@@ -170,12 +167,12 @@ pub mod challenge {
         // Expired unresolved challenges are auto-refunded to the challenger so funds
         // cannot remain locked indefinitely if the resolver goes offline.
         if clock.slot > deadline {
-            let challenge_key        = ctx.accounts.challenge_account.key();
+            let challenge_key = ctx.accounts.challenge_account.key();
             let vault_authority_bump = ctx.accounts.challenge_account.vault_authority_bump;
-            let agent_id             = ctx.accounts.challenge_account.agent_id;
-            let epoch_number         = ctx.accounts.challenge_account.epoch_number;
-            let challenger           = ctx.accounts.challenge_account.challenger;
-            let vault_balance        = ctx.accounts.challenge_vault.amount;
+            let agent_id = ctx.accounts.challenge_account.agent_id;
+            let epoch_number = ctx.accounts.challenge_account.epoch_number;
+            let challenger = ctx.accounts.challenge_account.challenger;
+            let vault_balance = ctx.accounts.challenge_vault.amount;
 
             ctx.accounts.challenge_account.resolved = true;
             ctx.accounts.challenge_account.succeeded = false;
@@ -188,8 +185,8 @@ pub mod challenge {
             let cpi_ctx = CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
                 Transfer {
-                    from:      ctx.accounts.challenge_vault.to_account_info(),
-                    to:        ctx.accounts.challenger_usdc.to_account_info(),
+                    from: ctx.accounts.challenge_vault.to_account_info(),
+                    to: ctx.accounts.challenger_usdc.to_account_info(),
                     authority: ctx.accounts.challenge_vault_authority.to_account_info(),
                 },
                 signer_seeds,
@@ -199,11 +196,11 @@ pub mod challenge {
             emit!(ChallengeResolved {
                 agent_id,
                 epoch_number,
-                succeeded:         false,
+                succeeded: false,
                 challenger,
-                slash_amount:      0,
+                slash_amount: 0,
                 challenger_reward: vault_balance,
-                treasury_amount:   0,
+                treasury_amount: 0,
             });
 
             return Ok(());
@@ -251,17 +248,17 @@ pub mod challenge {
         require!(proof_valid, ChallengeError::InvalidMerkleProof);
 
         // Capture values before mutable borrow.
-        let challenge_key        = ctx.accounts.challenge_account.key();
+        let challenge_key = ctx.accounts.challenge_account.key();
         let vault_authority_bump = ctx.accounts.challenge_account.vault_authority_bump;
-        let agent_id             = ctx.accounts.challenge_account.agent_id;
-        let epoch_number         = ctx.accounts.challenge_account.epoch_number;
-        let challenger           = ctx.accounts.challenge_account.challenger;
-        let vault_balance        = ctx.accounts.challenge_vault.amount;
+        let agent_id = ctx.accounts.challenge_account.agent_id;
+        let epoch_number = ctx.accounts.challenge_account.epoch_number;
+        let challenger = ctx.accounts.challenge_account.challenger;
+        let vault_balance = ctx.accounts.challenge_vault.amount;
 
         // Succeeded = Merkle proof valid (verified above) AND entry contradicts batch.
         let succeeded = args.contradicts_batch;
 
-        ctx.accounts.challenge_account.resolved  = true;
+        ctx.accounts.challenge_account.resolved = true;
         ctx.accounts.challenge_account.succeeded = succeeded;
 
         let signer_seeds: &[&[&[u8]]] = &[&[
@@ -275,8 +272,8 @@ pub mod challenge {
             let cpi_ctx = CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
                 Transfer {
-                    from:      ctx.accounts.challenge_vault.to_account_info(),
-                    to:        ctx.accounts.challenger_usdc.to_account_info(),
+                    from: ctx.accounts.challenge_vault.to_account_info(),
+                    to: ctx.accounts.challenger_usdc.to_account_info(),
                     authority: ctx.accounts.challenge_vault_authority.to_account_info(),
                 },
                 signer_seeds,
@@ -286,40 +283,41 @@ pub mod challenge {
             emit!(ChallengeResolved {
                 agent_id,
                 epoch_number,
-                succeeded:         true,
+                succeeded: true,
                 challenger,
-                slash_amount:      MIN_STAKE_USDC,
+                slash_amount: MIN_STAKE_USDC,
                 challenger_reward: vault_balance,
-                treasury_amount:   0,
+                treasury_amount: 0,
             });
 
             // Slash the agent via StakeLock CPI.
             let cpi_program = ctx.accounts.stake_program.to_account_info();
             let cpi_accounts = stake_lock::cpi::accounts::Slash {
-                challenge_authority:   ctx.accounts.slash_authority.to_account_info(),
-                stake_account:         ctx.accounts.stake_account.to_account_info(),
+                challenge_authority: ctx.accounts.slash_authority.to_account_info(),
+                stake_account: ctx.accounts.stake_account.to_account_info(),
                 stake_vault_authority: ctx.accounts.stake_vault_authority.to_account_info(),
-                stake_vault:           ctx.accounts.stake_vault.to_account_info(),
-                recipient_usdc:        ctx.accounts.challenger_usdc.to_account_info(),
-                usdc_mint:             ctx.accounts.usdc_mint.to_account_info(),
-                token_program:         ctx.accounts.token_program.to_account_info(),
+                stake_vault: ctx.accounts.stake_vault.to_account_info(),
+                recipient_usdc: ctx.accounts.challenger_usdc.to_account_info(),
+                usdc_mint: ctx.accounts.usdc_mint.to_account_info(),
+                token_program: ctx.accounts.token_program.to_account_info(),
             };
             // Note: slash_authority PDA bump used for CPI signing.
             let slash_bump = ctx.bumps.slash_authority;
-            let slash_seeds: &[&[&[u8]]] = &[&[
-                b"slash_authority",
-                &[slash_bump],
-            ]];
+            let slash_seeds: &[&[&[u8]]] = &[&[b"slash_authority", &[slash_bump]]];
             let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, slash_seeds);
-            stake_lock::cpi::slash(cpi_ctx, stake_lock::SlashArgs { amount: MIN_STAKE_USDC })?;
-
+            stake_lock::cpi::slash(
+                cpi_ctx,
+                stake_lock::SlashArgs {
+                    amount: MIN_STAKE_USDC,
+                },
+            )?;
         } else {
             // Forfeit challenger's stake to treasury.
             let cpi_ctx = CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
                 Transfer {
-                    from:      ctx.accounts.challenge_vault.to_account_info(),
-                    to:        ctx.accounts.treasury_usdc.to_account_info(),
+                    from: ctx.accounts.challenge_vault.to_account_info(),
+                    to: ctx.accounts.treasury_usdc.to_account_info(),
                     authority: ctx.accounts.challenge_vault_authority.to_account_info(),
                 },
                 signer_seeds,
@@ -329,11 +327,11 @@ pub mod challenge {
             emit!(ChallengeResolved {
                 agent_id,
                 epoch_number,
-                succeeded:         false,
+                succeeded: false,
                 challenger,
-                slash_amount:      0,
+                slash_amount: 0,
                 challenger_reward: 0,
-                treasury_amount:   vault_balance,
+                treasury_amount: vault_balance,
             });
         }
 
@@ -349,12 +347,7 @@ const MIN_STAKE_USDC: u64 = 10_000_000; // 10 USDC
 /// Leaf hash = keccak256(0x00 || entry).
 /// Internal hashes = keccak256(0x01 || left || right), left-child when index is even.
 /// Tree is padded to next power-of-two with zero hashes (same as protocol crate).
-fn verify_inclusion(
-    entry:      &[u8],
-    proof:      &[[u8; 32]],
-    leaf_index: u64,
-    root:       [u8; 32],
-) -> bool {
+fn verify_inclusion(entry: &[u8], proof: &[[u8; 32]], leaf_index: u64, root: [u8; 32]) -> bool {
     const MERKLE_LEAF_DOMAIN: u8 = 0x00;
     const MERKLE_INTERNAL_DOMAIN: u8 = 0x01;
 
@@ -363,7 +356,7 @@ fn verify_inclusion(
     leaf_input.extend_from_slice(entry);
     let leaf_hash = anchor_lang::solana_program::keccak::hash(&leaf_input).to_bytes();
     let mut current = leaf_hash;
-    let mut idx     = leaf_index as usize;
+    let mut idx = leaf_index as usize;
 
     for sibling in proof {
         let mut combined = [0u8; 65];
@@ -443,10 +436,10 @@ pub struct SubmitChallenge<'info> {
     pub batch_account: UncheckedAccount<'info>,
 
     #[account(address = USDC_MINT)]
-    pub usdc_mint:                Account<'info, Mint>,
-    pub token_program:            Program<'info, Token>,
+    pub usdc_mint: Account<'info, Mint>,
+    pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
-    pub system_program:           Program<'info, System>,
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
@@ -508,7 +501,6 @@ pub struct ResolveChallenge<'info> {
     // ===================================
     // Accounts for StakeLock CPI (Slash)
     // ===================================
-    
     /// PDA authority for the challenge program to sign the CPI.
     /// CHECK: derived in handler
     #[account(seeds = [b"slash_authority"], bump)]
@@ -527,7 +519,7 @@ pub struct ResolveChallenge<'info> {
     pub stake_vault: Account<'info, TokenAccount>,
 
     #[account(address = USDC_MINT)]
-    pub usdc_mint:     Account<'info, Mint>,
+    pub usdc_mint: Account<'info, Mint>,
     pub token_program: Program<'info, Token>,
 }
 
@@ -538,18 +530,18 @@ pub struct ResolveChallenge<'info> {
 /// PDA: seeds = ["challenge", batch_pda_key, challenger_pubkey]
 #[account]
 pub struct ChallengeAccount {
-    pub version:               u8,
-    pub agent_id:              [u8; 32],
-    pub epoch_number:          u64,
-    pub challenger:            Pubkey,
-    pub entry_hash:            [u8; 32],
-    pub leaf_index:            u64,
-    pub merkle_proof_len:      u16,
-    pub resolved:              bool,
-    pub succeeded:             bool,
-    pub submitted_slot:        u64,
-    pub bump:                  u8,
-    pub vault_authority_bump:  u8,
+    pub version: u8,
+    pub agent_id: [u8; 32],
+    pub epoch_number: u64,
+    pub challenger: Pubkey,
+    pub entry_hash: [u8; 32],
+    pub leaf_index: u64,
+    pub merkle_proof_len: u16,
+    pub resolved: bool,
+    pub succeeded: bool,
+    pub submitted_slot: u64,
+    pub bump: u8,
+    pub vault_authority_bump: u8,
 }
 
 impl ChallengeAccount {
@@ -563,14 +555,14 @@ impl ChallengeAccount {
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct SubmitChallengeArgs {
-    pub agent_id:            [u8; 32],
-    pub epoch_number:        u64,
+    pub agent_id: [u8; 32],
+    pub epoch_number: u64,
     /// Full canonical log entry bytes (signed CBOR envelope) contradicting the batch.
     pub contradicting_entry: Vec<u8>,
     /// Merkle sibling hashes from entry leaf to log_merkle_root.
-    pub merkle_proof:        Vec<[u8; 32]>,
+    pub merkle_proof: Vec<[u8; 32]>,
     /// 0-based leaf index of the entry in the batch's Merkle tree.
-    pub leaf_index:          u64,
+    pub leaf_index: u64,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
@@ -578,9 +570,9 @@ pub struct ResolveChallengeArgs {
     /// Full canonical log entry bytes — must match entry_hash stored at submission.
     pub contradicting_entry: Vec<u8>,
     /// Merkle sibling hashes from entry leaf to log_merkle_root.
-    pub merkle_proof:        Vec<[u8; 32]>,
+    pub merkle_proof: Vec<[u8; 32]>,
     /// True if the entry contradicts the self-reported batch arrays (v1: caller-asserted).
-    pub contradicts_batch:   bool,
+    pub contradicts_batch: bool,
 }
 
 // ============================================================================
@@ -589,22 +581,22 @@ pub struct ResolveChallengeArgs {
 
 #[event]
 pub struct ChallengeSubmitted {
-    pub agent_id:       [u8; 32],
-    pub epoch_number:   u64,
-    pub challenger:     Pubkey,
-    pub entry_hash:     [u8; 32],
+    pub agent_id: [u8; 32],
+    pub epoch_number: u64,
+    pub challenger: Pubkey,
+    pub entry_hash: [u8; 32],
     pub submitted_slot: u64,
 }
 
 #[event]
 pub struct ChallengeResolved {
-    pub agent_id:          [u8; 32],
-    pub epoch_number:      u64,
-    pub succeeded:         bool,
-    pub challenger:        Pubkey,
-    pub slash_amount:      u64,
+    pub agent_id: [u8; 32],
+    pub epoch_number: u64,
+    pub succeeded: bool,
+    pub challenger: Pubkey,
+    pub slash_amount: u64,
     pub challenger_reward: u64,
-    pub treasury_amount:   u64,
+    pub treasury_amount: u64,
 }
 
 // ============================================================================

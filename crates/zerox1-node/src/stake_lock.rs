@@ -38,11 +38,15 @@ const ASSOCIATED_TOKEN_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTN
 pub const MIN_STAKE_USDC: u64 = 10_000_000;
 
 fn stake_lock_program_id() -> Pubkey {
-    STAKE_LOCK_PROGRAM_ID_STR.parse().expect("valid stakelock program ID")
+    STAKE_LOCK_PROGRAM_ID_STR
+        .parse()
+        .expect("valid stakelock program ID")
 }
 
 fn lease_program_id() -> Pubkey {
-    LEASE_PROGRAM_ID_STR.parse().expect("valid lease program ID")
+    LEASE_PROGRAM_ID_STR
+        .parse()
+        .expect("valid lease program ID")
 }
 
 fn usdc_mint() -> Pubkey {
@@ -50,11 +54,15 @@ fn usdc_mint() -> Pubkey {
 }
 
 fn spl_token_program() -> Pubkey {
-    SPL_TOKEN_PROGRAM_STR.parse().expect("valid SPL token program ID")
+    SPL_TOKEN_PROGRAM_STR
+        .parse()
+        .expect("valid SPL token program ID")
 }
 
 fn associated_token_program() -> Pubkey {
-    ASSOCIATED_TOKEN_PROGRAM_STR.parse().expect("valid ATA program ID")
+    ASSOCIATED_TOKEN_PROGRAM_STR
+        .parse()
+        .expect("valid ATA program ID")
 }
 
 // ============================================================================
@@ -62,24 +70,19 @@ fn associated_token_program() -> Pubkey {
 // ============================================================================
 
 pub fn stake_pda(agent_mint: &[u8; 32]) -> Pubkey {
-    Pubkey::find_program_address(
-        &[b"stake", agent_mint.as_ref()],
-        &stake_lock_program_id(),
-    ).0
+    Pubkey::find_program_address(&[b"stake", agent_mint.as_ref()], &stake_lock_program_id()).0
 }
 
 pub fn vault_authority_pda(agent_mint: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(
         &[b"stake_vault", agent_mint.as_ref()],
         &stake_lock_program_id(),
-    ).0
+    )
+    .0
 }
 
 pub fn lease_pda(agent_mint: &[u8; 32]) -> Pubkey {
-    Pubkey::find_program_address(
-        &[b"lease", agent_mint.as_ref()],
-        &lease_program_id(),
-    ).0
+    Pubkey::find_program_address(&[b"lease", agent_mint.as_ref()], &lease_program_id()).0
 }
 
 // ============================================================================
@@ -88,19 +91,19 @@ pub fn lease_pda(agent_mint: &[u8; 32]) -> Pubkey {
 
 /// Build and submit a `lock_stake` transaction.
 pub async fn lock_stake_onchain(
-    rpc:      &RpcClient,
+    rpc: &RpcClient,
     identity: &AgentIdentity,
-    kora:     Option<&KoraClient>,
+    kora: Option<&KoraClient>,
 ) -> anyhow::Result<()> {
-    let program_id  = stake_lock_program_id();
-    let usdc        = usdc_mint();
+    let program_id = stake_lock_program_id();
+    let usdc = usdc_mint();
     let agent_pubkey = Pubkey::new_from_array(identity.verifying_key.to_bytes());
-    let agent_mint  = Pubkey::new_from_array(identity.agent_id);
+    let agent_mint = Pubkey::new_from_array(identity.agent_id);
 
     let stake_account = stake_pda(&identity.agent_id);
-    let vault_auth    = vault_authority_pda(&identity.agent_id);
-    let vault_ata     = get_ata(&vault_auth, &usdc);
-    let owner_ata     = get_ata(&agent_pubkey, &usdc);
+    let vault_auth = vault_authority_pda(&identity.agent_id);
+    let vault_ata = get_ata(&vault_auth, &usdc);
+    let owner_ata = get_ata(&agent_pubkey, &usdc);
     let owner_sati_ata = get_ata(&agent_pubkey, &agent_mint);
 
     let recent_blockhash = rpc.get_latest_blockhash().await?;
@@ -137,7 +140,8 @@ pub async fn lock_stake_onchain(
         };
         tx.partial_sign(&[&solana_kp], recent_blockhash);
 
-        let tx_bytes = bincode::serialize(&tx).map_err(|e| anyhow::anyhow!("bincode serialize: {e}"))?;
+        let tx_bytes =
+            bincode::serialize(&tx).map_err(|e| anyhow::anyhow!("bincode serialize: {e}"))?;
         let tx_b64 = BASE64.encode(&tx_bytes);
 
         kora.sign_and_send(&tx_b64).await?;
@@ -166,7 +170,10 @@ pub async fn lock_stake_onchain(
             recent_blockhash,
         );
 
-        let sig = rpc.send_and_confirm_transaction(&tx).await.map_err(|e| anyhow::anyhow!("lock_stake: {e}"))?;
+        let sig = rpc
+            .send_and_confirm_transaction(&tx)
+            .await
+            .map_err(|e| anyhow::anyhow!("lock_stake: {e}"))?;
 
         tracing::info!(tx = %sig, agent = %hex::encode(identity.agent_id), "Stake locked directly (agent pays gas)");
     }
@@ -179,11 +186,8 @@ pub async fn lock_stake_onchain(
 // ============================================================================
 
 /// Build and submit a `queue_unlock` transaction.
-pub async fn queue_unlock_onchain(
-    rpc:      &RpcClient,
-    identity: &AgentIdentity,
-) -> anyhow::Result<()> {
-    let program_id  = stake_lock_program_id();
+pub async fn queue_unlock_onchain(rpc: &RpcClient, identity: &AgentIdentity) -> anyhow::Result<()> {
+    let program_id = stake_lock_program_id();
     let agent_pubkey = Pubkey::new_from_array(identity.verifying_key.to_bytes());
 
     let stake_account = stake_pda(&identity.agent_id);
@@ -198,12 +202,7 @@ pub async fn queue_unlock_onchain(
         Keypair::try_from(b.as_slice()).map_err(|e| anyhow::anyhow!("keypair conversion: {e}"))?
     };
 
-    let ix = build_queue_unlock_ix(
-        &agent_pubkey,
-        &stake_account,
-        &lease_account,
-        &program_id,
-    );
+    let ix = build_queue_unlock_ix(&agent_pubkey, &stake_account, &lease_account, &program_id);
 
     let tx = Transaction::new_signed_with_payer(
         &[ix],
@@ -212,7 +211,10 @@ pub async fn queue_unlock_onchain(
         recent_blockhash,
     );
 
-    let sig = rpc.send_and_confirm_transaction(&tx).await.map_err(|e| anyhow::anyhow!("queue_unlock: {e}"))?;
+    let sig = rpc
+        .send_and_confirm_transaction(&tx)
+        .await
+        .map_err(|e| anyhow::anyhow!("queue_unlock: {e}"))?;
 
     tracing::info!(tx = %sig, agent = %hex::encode(identity.agent_id), "Unlock queued on-chain");
 
@@ -230,18 +232,18 @@ fn anchor_discriminator(name: &str) -> [u8; 8] {
 
 #[allow(clippy::too_many_arguments)]
 fn build_lock_stake_ix(
-    payer:            &Pubkey,
-    owner:            &Pubkey,
-    owner_usdc:       &Pubkey,
-    stake_account:    &Pubkey,
+    payer: &Pubkey,
+    owner: &Pubkey,
+    owner_usdc: &Pubkey,
+    stake_account: &Pubkey,
     stake_vault_auth: &Pubkey,
-    stake_vault:      &Pubkey,
-    agent_mint:       &Pubkey,
+    stake_vault: &Pubkey,
+    agent_mint: &Pubkey,
     owner_sati_token: &Pubkey,
-    usdc_mint:        &Pubkey,
-    program_id:       &Pubkey,
-    agent_id:         [u8; 32],
-    amount:           u64,
+    usdc_mint: &Pubkey,
+    program_id: &Pubkey,
+    agent_id: [u8; 32],
+    amount: u64,
 ) -> Instruction {
     let mut data = Vec::with_capacity(48);
     data.extend_from_slice(&anchor_discriminator("lock_stake"));
@@ -269,10 +271,10 @@ fn build_lock_stake_ix(
 }
 
 fn build_queue_unlock_ix(
-    owner:         &Pubkey,
+    owner: &Pubkey,
     stake_account: &Pubkey,
     lease_account: &Pubkey,
-    program_id:    &Pubkey,
+    program_id: &Pubkey,
 ) -> Instruction {
     Instruction {
         program_id: *program_id,

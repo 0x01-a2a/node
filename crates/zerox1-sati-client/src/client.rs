@@ -1,8 +1,8 @@
+use crate::error::SatiClientError;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 use zerox1_protocol::constants::SATI_PROGRAM_ID;
-use crate::error::SatiClientError;
 
 /// Token-2022 program ID (same on mainnet + devnet).
 const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";

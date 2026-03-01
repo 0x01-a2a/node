@@ -1,9 +1,9 @@
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use libp2p::identity;
 use rand::rngs::OsRng;
-use std::path::Path;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 
 /// Agent identity: Ed25519 signing key + SATI mint address.
 ///
@@ -31,7 +31,12 @@ impl AgentIdentity {
         // Dev mode: derive agent_id from verifying key bytes until SATI registration
         let agent_id = sati_mint.unwrap_or_else(|| verifying_key.to_bytes());
         let libp2p_keypair = to_libp2p_keypair(&signing_key);
-        Self { signing_key, verifying_key, agent_id, libp2p_keypair }
+        Self {
+            signing_key,
+            verifying_key,
+            agent_id,
+            libp2p_keypair,
+        }
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
@@ -39,11 +44,16 @@ impl AgentIdentity {
         // mode 0o600: owner read/write only — private key must never be world-readable.
         #[cfg(unix)]
         let mut file = std::fs::OpenOptions::new()
-            .write(true).create(true).truncate(true).mode(0o600)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
             .open(path)?;
         #[cfg(not(unix))]
         let mut file = std::fs::OpenOptions::new()
-            .write(true).create(true).truncate(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
             .open(path)?;
         file.write_all(&self.signing_key.to_bytes())?;
         Ok(())
@@ -54,7 +64,10 @@ impl AgentIdentity {
         let arr: [u8; 32] = bytes
             .try_into()
             .map_err(|_| anyhow::anyhow!("invalid key file: expected 32 bytes"))?;
-        Ok(Self::from_signing_key(SigningKey::from_bytes(&arr), sati_mint))
+        Ok(Self::from_signing_key(
+            SigningKey::from_bytes(&arr),
+            sati_mint,
+        ))
     }
 
     pub fn load_or_generate(path: &Path, sati_mint: Option<[u8; 32]>) -> anyhow::Result<Self> {
@@ -67,10 +80,7 @@ impl AgentIdentity {
             );
             Ok(id)
         } else {
-            let id = Self::from_signing_key(
-                SigningKey::generate(&mut OsRng),
-                sati_mint,
-            );
+            let id = Self::from_signing_key(SigningKey::generate(&mut OsRng), sati_mint);
             id.save(path)?;
             tracing::info!(
                 peer_id = %id.libp2p_keypair.public().to_peer_id(),

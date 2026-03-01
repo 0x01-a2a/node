@@ -118,7 +118,17 @@ mod tests {
         let sibling_01 = leaves[1];
         let hash_23 = hash_internal_nodes(leaves[2], leaves[3]);
 
-        assert!(verify_merkle_proof(leaves[0], &[sibling_01, hash_23], 0, root));
-        assert!(!verify_merkle_proof(leaves[0], &[sibling_01, hash_23], 1, root));
+        assert!(verify_merkle_proof(
+            leaves[0],
+            &[sibling_01, hash_23],
+            0,
+            root
+        ));
+        assert!(!verify_merkle_proof(
+            leaves[0],
+            &[sibling_01, hash_23],
+            1,
+            root
+        ));
     }
 }

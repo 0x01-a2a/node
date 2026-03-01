@@ -22,20 +22,20 @@ use std::str::FromStr;
 #[derive(Serialize)]
 struct JsonRpcRequest<P: Serialize> {
     jsonrpc: &'static str,
-    id:      u64,
-    method:  &'static str,
-    params:  P,
+    id: u64,
+    method: &'static str,
+    params: P,
 }
 
 #[derive(Deserialize)]
 struct JsonRpcResponse<T> {
     result: Option<T>,
-    error:  Option<JsonRpcError>,
+    error: Option<JsonRpcError>,
 }
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcError {
-    code:    i64,
+    code: i64,
     message: String,
 }
 
@@ -53,7 +53,7 @@ struct GetPayerSignerResult {
 #[derive(Serialize)]
 struct SignAndSendParams<'a> {
     transaction: &'a str,
-    sig_verify:  bool,
+    sig_verify: bool,
 }
 
 #[derive(Deserialize)]
@@ -79,14 +79,14 @@ struct SignAndSendResult {
 /// kora.sign_and_send(&tx_b64).await?;
 /// ```
 pub struct KoraClient {
-    url:  String,
+    url: String,
     http: reqwest::Client,
 }
 
 impl KoraClient {
     pub fn new(url: &str) -> Self {
         Self {
-            url:  url.to_owned(),
+            url: url.to_owned(),
             http: reqwest::Client::new(),
         }
     }
@@ -98,12 +98,13 @@ impl KoraClient {
     pub async fn get_fee_payer(&self) -> anyhow::Result<Pubkey> {
         let req = JsonRpcRequest {
             jsonrpc: "2.0",
-            id:      1,
-            method:  "getPayerSigner",
-            params:  (),
+            id: 1,
+            method: "getPayerSigner",
+            params: (),
         };
 
-        let resp: JsonRpcResponse<GetPayerSignerResult> = self.http
+        let resp: JsonRpcResponse<GetPayerSignerResult> = self
+            .http
             .post(&self.url)
             .json(&req)
             .send()
@@ -114,7 +115,8 @@ impl KoraClient {
             .map_err(|e| anyhow::anyhow!("Kora response parse error: {e}"))?;
 
         let result = resp.result.ok_or_else(|| {
-            let msg = resp.error
+            let msg = resp
+                .error
                 .map(|e| format!("code={} msg={}", e.code, e.message))
                 .unwrap_or_else(|| "no result and no error".into());
             anyhow::anyhow!("Kora getPayerSigner failed: {msg}")
@@ -133,15 +135,16 @@ impl KoraClient {
     pub async fn sign_and_send(&self, tx_b64: &str) -> anyhow::Result<String> {
         let req = JsonRpcRequest {
             jsonrpc: "2.0",
-            id:      2,
-            method:  "signAndSendTransaction",
-            params:  SignAndSendParams {
+            id: 2,
+            method: "signAndSendTransaction",
+            params: SignAndSendParams {
                 transaction: tx_b64,
-                sig_verify:  false,
+                sig_verify: false,
             },
         };
 
-        let resp: JsonRpcResponse<SignAndSendResult> = self.http
+        let resp: JsonRpcResponse<SignAndSendResult> = self
+            .http
             .post(&self.url)
             .json(&req)
             .send()
@@ -152,7 +155,8 @@ impl KoraClient {
             .map_err(|e| anyhow::anyhow!("Kora response parse error: {e}"))?;
 
         let result = resp.result.ok_or_else(|| {
-            let msg = resp.error
+            let msg = resp
+                .error
                 .map(|e| format!("code={} msg={}", e.code, e.message))
                 .unwrap_or_else(|| "no result and no error".into());
             anyhow::anyhow!("Kora signAndSendTransaction failed: {msg}")

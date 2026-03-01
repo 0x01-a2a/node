@@ -11,13 +11,13 @@ use solana_sdk::signature::Keypair;
 
 use base64::Engine as _;
 
+use crate::submit::{generate_merkle_proof, resolve_challenge_onchain, submit_challenge_onchain};
 use crate::Cli;
-use crate::submit::{generate_merkle_proof, submit_challenge_onchain, resolve_challenge_onchain};
 
 #[derive(Deserialize)]
 struct EnvelopeEntry {
     #[allow(dead_code)]
-    seq:       i64,
+    seq: i64,
     leaf_hash: String,
     bytes_b64: String,
 }
@@ -31,22 +31,22 @@ struct EnvelopeEntry {
 #[allow(dead_code)] // fields populated from JSON deserialization; used selectively
 pub struct AnomalyEntry {
     pub agent_id: String,
-    pub epoch:    u64,
-    pub anomaly:  f64,
-    pub ht:       Option<f64>,
-    pub hb:       Option<f64>,
-    pub hs:       Option<f64>,
-    pub hv:       Option<f64>,
+    pub epoch: u64,
+    pub anomaly: f64,
+    pub ht: Option<f64>,
+    pub hb: Option<f64>,
+    pub hs: Option<f64>,
+    pub hv: Option<f64>,
 }
 
 /// Response from GET /entropy/{id}/rolling
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RollingEntropyResult {
-    pub agent_id:          String,
-    pub window_epochs:     u32,
-    pub epochs_found:      u32,
-    pub mean_anomaly:      f64,
-    pub anomaly_variance:  f64,
+    pub agent_id: String,
+    pub window_epochs: u32,
+    pub epochs_found: u32,
+    pub mean_anomaly: f64,
+    pub anomaly_variance: f64,
     pub low_variance_flag: bool,
     pub high_anomaly_flag: bool,
 }
@@ -54,12 +54,12 @@ pub struct RollingEntropyResult {
 /// Response from GET /stake/required/{id}
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RequiredStakeResult {
-    pub agent_id:            String,
-    pub base_stake_usdc:     f64,
-    pub current_anomaly:     f64,
-    pub beta_1:              f64,
+    pub agent_id: String,
+    pub base_stake_usdc: f64,
+    pub current_anomaly: f64,
+    pub beta_1: f64,
     pub required_stake_usdc: f64,
-    pub deficit_usdc:        f64,
+    pub deficit_usdc: f64,
 }
 
 // ============================================================================
@@ -71,16 +71,16 @@ pub struct AgentState {
     /// How many consecutive cycles has this agent been above the threshold?
     pub consecutive_high: u32,
     /// Latest anomaly score.
-    pub latest_anomaly:   f64,
+    pub latest_anomaly: f64,
     /// Whether we have already emitted a challenge-ready report this cycle.
-    pub challenge_ready:  bool,
+    pub challenge_ready: bool,
 }
 
 pub struct AgentMonitor {
     /// Per-agent tracking state.
-    agents:              HashMap<String, AgentState>,
-    anomaly_threshold:   f64,
-    consecutive_needed:  u32,
+    agents: HashMap<String, AgentState>,
+    anomaly_threshold: f64,
+    consecutive_needed: u32,
 }
 
 impl AgentMonitor {
@@ -94,11 +94,14 @@ impl AgentMonitor {
 
     /// Update state for one agent.  Returns true if newly challenge-ready.
     pub fn update(&mut self, agent_id: &str, anomaly: f64) -> bool {
-        let state = self.agents.entry(agent_id.to_string()).or_insert(AgentState {
-            consecutive_high: 0,
-            latest_anomaly:   0.0,
-            challenge_ready:  false,
-        });
+        let state = self
+            .agents
+            .entry(agent_id.to_string())
+            .or_insert(AgentState {
+                consecutive_high: 0,
+                latest_anomaly: 0.0,
+                challenge_ready: false,
+            });
 
         state.latest_anomaly = anomaly;
 
@@ -107,7 +110,7 @@ impl AgentMonitor {
         } else {
             // Reset: agent is below threshold this cycle.
             state.consecutive_high = 0;
-            state.challenge_ready  = false;
+            state.challenge_ready = false;
             return false;
         }
 
@@ -131,16 +134,16 @@ impl AgentMonitor {
 /// Full evidence package for a challenge-ready agent.
 #[derive(Debug, Clone, Serialize)]
 pub struct EvidenceReport {
-    pub agent_id:              String,
-    pub generated_at_unix:     u64,
-    pub consecutive_cycles:    u32,
-    pub latest_anomaly:        f64,
-    pub rolling:               Option<RollingEntropyResult>,
-    pub required_stake:        Option<RequiredStakeResult>,
-    pub stake_deficit_usdc:    f64,
-    pub flags:                 Vec<String>,
+    pub agent_id: String,
+    pub generated_at_unix: u64,
+    pub consecutive_cycles: u32,
+    pub latest_anomaly: f64,
+    pub rolling: Option<RollingEntropyResult>,
+    pub required_stake: Option<RequiredStakeResult>,
+    pub stake_deficit_usdc: f64,
+    pub flags: Vec<String>,
     /// Human-readable summary of why this agent should be challenged.
-    pub recommendation:        String,
+    pub recommendation: String,
 }
 
 // ============================================================================
@@ -148,11 +151,11 @@ pub struct EvidenceReport {
 // ============================================================================
 
 pub async fn run_cycle(
-    cli:        &Cli,
-    client:     &reqwest::Client,
-    mon:        &mut AgentMonitor,
+    cli: &Cli,
+    client: &reqwest::Client,
+    mon: &mut AgentMonitor,
     rpc_client: &RpcClient,
-    keypair:    Option<&Keypair>,
+    keypair: Option<&Keypair>,
 ) -> anyhow::Result<()> {
     tracing::debug!("Starting poll cycle");
 
@@ -162,15 +165,20 @@ pub async fn run_cycle(
         cli.aggregator_url.trim_end_matches('/'),
         cli.leaderboard_limit,
     );
-    let resp = fetch_json(client, &url, cli.aggregator_secret.as_deref()).await
+    let resp = fetch_json(client, &url, cli.aggregator_secret.as_deref())
+        .await
         .context("fetching anomaly leaderboard")?;
 
-    let entries: Vec<AnomalyEntry> = serde_json::from_value(resp)
-        .context("parsing anomaly leaderboard")?;
+    let entries: Vec<AnomalyEntry> =
+        serde_json::from_value(resp).context("parsing anomaly leaderboard")?;
 
-    tracing::info!("Leaderboard: {} agents, {} above threshold {}",
+    tracing::info!(
+        "Leaderboard: {} agents, {} above threshold {}",
         entries.len(),
-        entries.iter().filter(|e| e.anomaly >= cli.anomaly_threshold).count(),
+        entries
+            .iter()
+            .filter(|e| e.anomaly >= cli.anomaly_threshold)
+            .count(),
         cli.anomaly_threshold,
     );
 
@@ -215,31 +223,43 @@ pub async fn run_cycle(
 }
 
 async fn build_evidence_report(
-    cli:    &Cli,
+    cli: &Cli,
     client: &reqwest::Client,
-    entry:  &AnomalyEntry,
-    mon:    &AgentMonitor,
+    entry: &AnomalyEntry,
+    mon: &AgentMonitor,
 ) -> EvidenceReport {
-    let base   = cli.aggregator_url.trim_end_matches('/');
+    let base = cli.aggregator_url.trim_end_matches('/');
     let secret = cli.aggregator_secret.as_deref();
 
     // Rolling entropy.
     let rolling: Option<RollingEntropyResult> = fetch_json(
         client,
-        &format!("{}/entropy/{}/rolling?window={}", base, entry.agent_id, cli.rolling_window),
+        &format!(
+            "{}/entropy/{}/rolling?window={}",
+            base, entry.agent_id, cli.rolling_window
+        ),
         secret,
-    ).await.ok().and_then(|v| serde_json::from_value(v).ok());
+    )
+    .await
+    .ok()
+    .and_then(|v| serde_json::from_value(v).ok());
 
     // Required stake.
     let required_stake: Option<RequiredStakeResult> = fetch_json(
         client,
         &format!("{}/stake/required/{}", base, entry.agent_id),
         secret,
-    ).await.ok().and_then(|v| serde_json::from_value(v).ok());
+    )
+    .await
+    .ok()
+    .and_then(|v| serde_json::from_value(v).ok());
 
-    let state         = mon.get(&entry.agent_id);
-    let consecutive   = state.map(|s| s.consecutive_high).unwrap_or(0);
-    let stake_deficit = required_stake.as_ref().map(|r| r.deficit_usdc).unwrap_or(0.0);
+    let state = mon.get(&entry.agent_id);
+    let consecutive = state.map(|s| s.consecutive_high).unwrap_or(0);
+    let stake_deficit = required_stake
+        .as_ref()
+        .map(|r| r.deficit_usdc)
+        .unwrap_or(0.0);
 
     let mut flags = vec![];
 
@@ -269,27 +289,31 @@ async fn build_evidence_report(
         format!(
             "Agent {} shows low-variance high anomaly over {} epochs — \
              likely patient cartel (GAP-03). Recommend submitting challenge.",
-            &entry.agent_id[..16], consecutive,
+            &entry.agent_id[..16],
+            consecutive,
         )
     } else if stake_deficit > 1.0 {
         format!(
             "Agent {} has stake deficit of {:.2} USDC. \
              Recommend calling top_up_stake on-chain.",
-            &entry.agent_id[..16], stake_deficit,
+            &entry.agent_id[..16],
+            stake_deficit,
         )
     } else {
         format!(
             "Agent {} flagged for {} consecutive cycles with anomaly {:.3}. \
              Accumulating evidence.",
-            &entry.agent_id[..16], consecutive, entry.anomaly,
+            &entry.agent_id[..16],
+            consecutive,
+            entry.anomaly,
         )
     };
 
     EvidenceReport {
-        agent_id:           entry.agent_id.clone(),
-        generated_at_unix:  unix_now(),
+        agent_id: entry.agent_id.clone(),
+        generated_at_unix: unix_now(),
         consecutive_cycles: consecutive,
-        latest_anomaly:     entry.anomaly,
+        latest_anomaly: entry.anomaly,
         rolling,
         required_stake,
         stake_deficit_usdc: stake_deficit,
@@ -321,15 +345,18 @@ async fn emit_report(cli: &Cli, report: &EvidenceReport) {
 // ============================================================================
 
 async fn execute_challenge(
-    cli:        &Cli,
-    client:     &reqwest::Client,
-    rpc:        &RpcClient,
-    signer:     &Keypair,
-    entry:      &AnomalyEntry,
+    cli: &Cli,
+    client: &reqwest::Client,
+    rpc: &RpcClient,
+    signer: &Keypair,
+    entry: &AnomalyEntry,
 ) -> anyhow::Result<()> {
     let base = cli.aggregator_url.trim_end_matches('/');
-    let url = format!("{}/epochs/{}/{}/envelopes", base, entry.agent_id, entry.epoch);
-    
+    let url = format!(
+        "{}/epochs/{}/{}/envelopes",
+        base, entry.agent_id, entry.epoch
+    );
+
     // Fetch raw envelopes for the epoch.
     let env_resp: Vec<EnvelopeEntry> = fetch_json(client, &url, cli.aggregator_secret.as_deref())
         .await
@@ -337,7 +364,11 @@ async fn execute_challenge(
         .and_then(|v| serde_json::from_value(v).context("parsing envelopes"))?;
 
     if env_resp.is_empty() {
-        anyhow::bail!("No envelopes found for agent {} epoch {}", entry.agent_id, entry.epoch);
+        anyhow::bail!(
+            "No envelopes found for agent {} epoch {}",
+            entry.agent_id,
+            entry.epoch
+        );
     }
 
     // Build leaf hash array from hex-encoded hashes (avoids re-hashing).
@@ -358,7 +389,11 @@ async fn execute_challenge(
 
     let proof = generate_merkle_proof(target_idx, &leaves);
 
-    tracing::info!("Submitting on-chain challenge for agent {} epoch {}", entry.agent_id, entry.epoch);
+    tracing::info!(
+        "Submitting on-chain challenge for agent {} epoch {}",
+        entry.agent_id,
+        entry.epoch
+    );
 
     submit_challenge_onchain(
         rpc,
@@ -368,9 +403,14 @@ async fn execute_challenge(
         target_idx,
         &raw_entry,
         &proof,
-    ).await?;
+    )
+    .await?;
 
-    tracing::info!("Resolving on-chain challenge for agent {} epoch {}", entry.agent_id, entry.epoch);
+    tracing::info!(
+        "Resolving on-chain challenge for agent {} epoch {}",
+        entry.agent_id,
+        entry.epoch
+    );
 
     resolve_challenge_onchain(
         rpc,
@@ -379,7 +419,8 @@ async fn execute_challenge(
         entry.epoch,
         &raw_entry,
         &proof,
-    ).await
+    )
+    .await
 }
 
 // ============================================================================
@@ -388,7 +429,7 @@ async fn execute_challenge(
 
 async fn fetch_json(
     client: &reqwest::Client,
-    url:    &str,
+    url: &str,
     secret: Option<&str>,
 ) -> anyhow::Result<Value> {
     let mut req = client.get(url);

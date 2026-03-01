@@ -1,7 +1,7 @@
+use anyhow::Result;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use zerox1_protocol::{envelope::Envelope, hash::hash_merkle_leaf};
-use anyhow::Result;
 
 /// Append-only per-epoch CBOR envelope log (doc 5, §8.1).
 ///
@@ -11,11 +11,11 @@ use anyhow::Result;
 /// Leaf hash for each entry = keccak256(0x00 || CBOR bytes), used to build the merkle tree
 /// that yields `log_merkle_root` in the BehaviorBatch.
 pub struct EnvelopeLogger {
-    log_dir:     PathBuf,
-    epoch:       u64,
+    log_dir: PathBuf,
+    epoch: u64,
     leaf_hashes: Vec<[u8; 32]>,
-    buffer:      Vec<u8>,
-    msg_count:   u32,
+    buffer: Vec<u8>,
+    msg_count: u32,
 }
 
 impl EnvelopeLogger {
@@ -24,8 +24,8 @@ impl EnvelopeLogger {
             log_dir,
             epoch,
             leaf_hashes: Vec::new(),
-            buffer:      Vec::new(),
-            msg_count:   0,
+            buffer: Vec::new(),
+            msg_count: 0,
         }
     }
 
@@ -64,14 +64,23 @@ impl EnvelopeLogger {
         self.flush()?;
         let leaves = std::mem::take(&mut self.leaf_hashes);
         self.buffer.clear();
-        self.epoch    = new_epoch;
+        self.epoch = new_epoch;
         self.msg_count = 0;
         Ok(leaves)
     }
 
-    #[allow(dead_code)] pub fn leaf_hashes(&self) -> &[[u8; 32]] { &self.leaf_hashes }
-    #[allow(dead_code)] pub fn message_count(&self) -> u32       { self.msg_count }
-    #[allow(dead_code)] pub fn epoch(&self) -> u64               { self.epoch }
+    #[allow(dead_code)]
+    pub fn leaf_hashes(&self) -> &[[u8; 32]] {
+        &self.leaf_hashes
+    }
+    #[allow(dead_code)]
+    pub fn message_count(&self) -> u32 {
+        self.msg_count
+    }
+    #[allow(dead_code)]
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
 
     fn epoch_path(&self, epoch: u64) -> PathBuf {
         self.log_dir.join(format!("zerox1-epoch-{epoch:06}.cbor"))

@@ -1,6 +1,6 @@
 //! Capital Flow Graph Indexer (GAP-02)
 //!
-//! Mitigates Sybil attacks at the identity layer by discovering off-chain ownership 
+//! Mitigates Sybil attacks at the identity layer by discovering off-chain ownership
 //! clusters via on-chain transaction capital flows.
 //!
 //! How it works:
@@ -11,13 +11,15 @@
 //! 5. Computes Connected Components. Set of agents in a single component are assigned to the same cluster.
 //! 6. The `C` (clustering) multiplier is derived from the size of the cluster and applied to required stake.
 
-use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use petgraph::graph::UnGraph;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
-use solana_transaction_status::{UiTransactionEncoding, EncodedConfirmedTransactionWithStatusMeta, UiMessage};
-use petgraph::graph::UnGraph;
+use solana_transaction_status::{
+    EncodedConfirmedTransactionWithStatusMeta, UiMessage, UiTransactionEncoding,
+};
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use crate::api::AppState;
 
@@ -34,7 +36,7 @@ pub async fn run_indexer(rpc_url: String, state: AppState) {
         if let Err(e) = index_capital_flows(&rpc, &state).await {
             tracing::error!("Capital flow indexer cycle failed: {}", e);
         }
-        
+
         tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
     }
 }
@@ -43,13 +45,16 @@ async fn index_capital_flows(rpc: &RpcClient, state: &AppState) -> anyhow::Resul
     // 1. Get all active agents registered in the store
     // This assumes the store has a way to get active agents. If not, we'll need to add it.
     let active_agents = state.store.get_active_agent_pubkeys().await?;
-    
+
     if active_agents.is_empty() {
         tracing::debug!("No active agents found, skipping indexer cycle.");
         return Ok(());
     }
 
-    tracing::info!("Indexing capital flows for {} active agents", active_agents.len());
+    tracing::info!(
+        "Indexing capital flows for {} active agents",
+        active_agents.len()
+    );
 
     let mut agent_to_externals: HashMap<String, HashSet<String>> = HashMap::new();
 
@@ -61,7 +66,10 @@ async fn index_capital_flows(rpc: &RpcClient, state: &AppState) -> anyhow::Resul
         };
 
         let sigs = match rpc.get_signatures_for_address(&pk).await {
-            Ok(s) => s.into_iter().take(MAX_SIGNATURES_PER_POLL).collect::<Vec<_>>(),
+            Ok(s) => s
+                .into_iter()
+                .take(MAX_SIGNATURES_PER_POLL)
+                .collect::<Vec<_>>(),
             Err(e) => {
                 tracing::warn!("Failed to fetch signatures for {}: {}", agent_pubkey_str, e);
                 continue;
@@ -82,7 +90,7 @@ async fn index_capital_flows(rpc: &RpcClient, state: &AppState) -> anyhow::Resul
                     continue;
                 }
             };
-            
+
             // Extract external interacting wallets
             extract_external_wallets(&tx, &agent_pubkey_str, &mut agent_to_externals);
         }
@@ -93,10 +101,10 @@ async fn index_capital_flows(rpc: &RpcClient, state: &AppState) -> anyhow::Resul
 
     // 3. Build the graph and compute clusters
     let clusters = compute_clusters(&agent_to_externals);
-    
+
     // 4. Update the state with the new clusters
     state.store.update_capital_flow_clusters(clusters).await?;
-    
+
     tracing::info!("Capital flow indexing cycle complete.");
 
     Ok(())
@@ -107,13 +115,13 @@ async fn index_capital_flows(rpc: &RpcClient, state: &AppState) -> anyhow::Resul
 fn extract_external_wallets(
     tx: &EncodedConfirmedTransactionWithStatusMeta,
     agent_pubkey: &str,
-    agent_to_externals: &mut HashMap<String, HashSet<String>>
+    agent_to_externals: &mut HashMap<String, HashSet<String>>,
 ) {
     let meta = match &tx.transaction.meta {
         Some(m) => m,
         None => return,
     };
-    
+
     let message = match &tx.transaction.transaction {
         solana_transaction_status::EncodedTransaction::Json(ui_tx) => &ui_tx.message,
         _ => return, // Only handling JSON encoded for now
@@ -122,26 +130,32 @@ fn extract_external_wallets(
     let _accounts = match message {
         UiMessage::Raw(raw) => &raw.account_keys,
         UiMessage::Parsed(_parsed) => {
-             // We can extract keys from parsed instructions, but for simplicity we rely on meta
+            // We can extract keys from parsed instructions, but for simplicity we rely on meta
             // or just use pre_balances/post_balances to find real actors.
             &vec![] // Placeholder, better logic needed if parsed is used extensively
         }
     };
 
-    // A very rough extraction: Look for accounts with balance changes 
+    // A very rough extraction: Look for accounts with balance changes
     // that are not the agent itself. This signifies a flow of capital.
-    for (i, (pre, post)) in meta.pre_balances.iter().zip(meta.post_balances.iter()).enumerate() {
+    for (i, (pre, post)) in meta
+        .pre_balances
+        .iter()
+        .zip(meta.post_balances.iter())
+        .enumerate()
+    {
         if pre != post {
             let acc = if let UiMessage::Raw(raw) = message {
                 raw.account_keys.get(i).cloned()
             } else {
                 // If parsed, we need to extract from account keys list
-                 None // Fallback
+                None // Fallback
             };
 
             if let Some(acc_pubkey) = acc {
                 if acc_pubkey != agent_pubkey && acc_pubkey != "11111111111111111111111111111111" {
-                    agent_to_externals.entry(agent_pubkey.to_string())
+                    agent_to_externals
+                        .entry(agent_pubkey.to_string())
                         .or_default()
                         .insert(acc_pubkey);
                 }
@@ -158,10 +172,14 @@ fn compute_clusters(agent_to_externals: &HashMap<String, HashSet<String>>) -> Ve
 
     // Add nodes and edges
     for (agent, externals) in agent_to_externals {
-        let agent_idx = *node_indices.entry(agent.clone()).or_insert_with(|| graph.add_node(agent.clone()));
-        
+        let agent_idx = *node_indices
+            .entry(agent.clone())
+            .or_insert_with(|| graph.add_node(agent.clone()));
+
         for ext in externals {
-            let ext_idx = *node_indices.entry(ext.clone()).or_insert_with(|| graph.add_node(ext.clone()));
+            let ext_idx = *node_indices
+                .entry(ext.clone())
+                .or_insert_with(|| graph.add_node(ext.clone()));
             graph.add_edge(agent_idx, ext_idx, ());
         }
     }
@@ -169,7 +187,7 @@ fn compute_clusters(agent_to_externals: &HashMap<String, HashSet<String>>) -> Ve
     // Find connected components using Tarjan's or simple BFS
     // `petgraph`'s connected_components just returns the *number* of components.
     // To get the actual clusters, we need a simple traversal.
-    
+
     let mut visited = HashSet::new();
     let mut clusters: Vec<Vec<String>> = Vec::new();
 
@@ -181,7 +199,7 @@ fn compute_clusters(agent_to_externals: &HashMap<String, HashSet<String>>) -> Ve
             while let Some(nx) = bfs.next(&graph) {
                 visited.insert(nx);
                 let weight = graph.node_weight(nx).unwrap().clone();
-                
+
                 // Only include the Agents in the final cluster output, not the external wallets
                 if agent_to_externals.contains_key(&weight) {
                     cluster_agents.push(weight);

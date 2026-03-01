@@ -1,6 +1,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use zerox1_protocol::{envelope::Envelope, hash::keccak256};
+use zerox1_protocol::{envelope::Envelope, hash::hash_merkle_leaf};
 use anyhow::Result;
 
 /// Append-only per-epoch CBOR envelope log (doc 5, §8.1).
@@ -8,7 +8,7 @@ use anyhow::Result;
 /// Each entry is length-prefixed (4-byte LE u32) followed by CBOR envelope bytes.
 /// At epoch end: flush to `zerox1-epoch-{N:06}.cbor`, return leaf hashes for merkle tree.
 ///
-/// Leaf hash for each entry = keccak256(CBOR bytes), used to build the merkle tree
+/// Leaf hash for each entry = keccak256(0x00 || CBOR bytes), used to build the merkle tree
 /// that yields `log_merkle_root` in the BehaviorBatch.
 pub struct EnvelopeLogger {
     log_dir:     PathBuf,
@@ -29,10 +29,10 @@ impl EnvelopeLogger {
         }
     }
 
-    /// Log a validated envelope. Returns keccak256(CBOR) = leaf hash.
+    /// Log a validated envelope. Returns keccak256(0x00 || CBOR) = leaf hash.
     pub fn log(&mut self, env: &Envelope) -> Result<[u8; 32]> {
         let cbor = env.to_cbor()?;
-        let leaf = keccak256(&cbor);
+        let leaf = hash_merkle_leaf(&cbor);
 
         let len = (cbor.len() as u32).to_le_bytes();
         self.buffer.extend_from_slice(&len);

@@ -2616,6 +2616,8 @@ impl ReputationStore {
             use tiny_keccak::{Hasher, Keccak};
             let mut k = Keccak::v256();
             let mut out = [0u8; 32];
+            // Merkle leaf domain separation: keccak256(0x00 || raw_cbor).
+            k.update(&[0x00]);
             k.update(&bytes);
             k.finalize(&mut out);
             hex::encode(out)

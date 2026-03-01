@@ -18,7 +18,7 @@ use axum::{
         Path, Query, State,
     },
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -26,7 +26,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 
 use zerox1_protocol::{
     envelope::{Envelope, BROADCAST_RECIPIENT},
@@ -162,6 +162,13 @@ const MAX_HOSTED_SESSIONS: usize = 10_000;
 const SESSION_TTL_SECS: u64 = 7 * 24 * 3600;
 /// Maximum outbound sends per 60-second window per session.
 const MAX_SENDS_PER_MINUTE: u32 = 60;
+/// Maximum API `/envelopes/send` requests per 60-second window.
+const MAX_API_SENDS_PER_MINUTE: u32 = 120;
+
+struct RateLimitWindow {
+    window_start: u64,
+    count:        u32,
+}
 
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -229,6 +236,8 @@ struct ApiInner {
     hosting_fee_bps:    u32,
     /// Pre-signed envelopes from hosted-agent send handler → node loop.
     hosted_outbound_tx: mpsc::Sender<Envelope>,
+    /// Global rate limit window for `/envelopes/send`.
+    send_rate_limit:    Mutex<RateLimitWindow>,
 }
 
 /// Cheaply cloneable shared state passed to all axum handlers.
@@ -262,6 +271,10 @@ impl ApiState {
             hosted_sessions:    Arc::new(RwLock::new(HashMap::new())),
             hosting_fee_bps,
             hosted_outbound_tx,
+            send_rate_limit: Mutex::new(RateLimitWindow {
+                window_start: now_secs(),
+                count:        0,
+            }),
         }));
 
         (state, outbound_rx, hosted_outbound_rx)
@@ -441,43 +454,58 @@ async fn ws_events_task(mut socket: WebSocket, state: ApiState) {
     }
 }
 
-async fn get_peers(State(state): State<ApiState>) -> impl IntoResponse {
+async fn get_peers(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+) -> Response {
+    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
+        return resp;
+    }
     let peers = state.0.peers.read().await;
     let list: Vec<_> = peers.values().cloned().collect();
-    Json(serde_json::to_value(list).unwrap_or_default())
+    Json(serde_json::to_value(list).unwrap_or_default()).into_response()
 }
 
 async fn get_reputation(
     Path(agent_id_hex): Path<String>,
+    headers:            HeaderMap,
     State(state):       State<ApiState>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
+        return resp;
+    }
     let Ok(bytes) = hex::decode(&agent_id_hex) else {
-        return Json(serde_json::json!({ "error": "invalid agent_id hex" }));
+        return Json(serde_json::json!({ "error": "invalid agent_id hex" })).into_response();
     };
     let Ok(arr) = bytes.try_into() as Result<[u8; 32], _> else {
-        return Json(serde_json::json!({ "error": "agent_id must be 32 bytes" }));
+        return Json(serde_json::json!({ "error": "agent_id must be 32 bytes" })).into_response();
     };
     let rep = state.0.reputation.read().await;
     match rep.get(&arr) {
-        Some(snap) => Json(serde_json::to_value(snap).unwrap_or_default()),
-        None       => Json(serde_json::json!({ "agent_id": agent_id_hex, "score": null })),
+        Some(snap) => Json(serde_json::to_value(snap).unwrap_or_default()).into_response(),
+        None => Json(serde_json::json!({ "agent_id": agent_id_hex, "score": null }))
+            .into_response(),
     }
 }
 
 async fn get_batch(
     Path((agent_id_hex, epoch)): Path<(String, u64)>,
+    headers:                     HeaderMap,
     State(state):                State<ApiState>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
+        return resp;
+    }
     let self_hex = hex::encode(state.0.self_agent);
     if agent_id_hex != self_hex {
         return Json(serde_json::json!({
             "error": "batch history is only available for this node's own agent_id"
-        }));
+        })).into_response();
     }
     let batches = state.0.batches.read().await;
     match batches.iter().find(|b| b.epoch == epoch) {
-        Some(snap) => Json(serde_json::to_value(snap).unwrap_or_default()),
-        None       => Json(serde_json::json!({ "error": "epoch not found" })),
+        Some(snap) => Json(serde_json::to_value(snap).unwrap_or_default()).into_response(),
+        None => Json(serde_json::json!({ "error": "epoch not found" })).into_response(),
     }
 }
 
@@ -503,6 +531,23 @@ async fn send_envelope(
                 Json(serde_json::json!({ "error": "unauthorized" })),
             );
         }
+    }
+
+    // Shared API-level rate limit to reduce flooding impact if credentials leak.
+    {
+        let now = now_secs();
+        let mut rl = state.0.send_rate_limit.lock().await;
+        if now.saturating_sub(rl.window_start) >= 60 {
+            rl.window_start = now;
+            rl.count = 0;
+        }
+        if rl.count >= MAX_API_SENDS_PER_MINUTE {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({ "error": "rate limit exceeded" })),
+            );
+        }
+        rl.count += 1;
     }
 
     // Parse msg_type.
@@ -646,6 +691,12 @@ async fn hosted_ping() -> impl IntoResponse {
 /// Generates a fresh ed25519 sub-keypair for the hosted agent.
 /// Returns `{ "agent_id": "<hex64>", "token": "<hex64>" }`.
 async fn hosted_register(State(state): State<ApiState>) -> impl IntoResponse {
+    if state.0.api_secret.is_none() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "hosting requires api_secret" })),
+        );
+    }
     let now = now_secs();
 
     let mut sessions = state.0.hosted_sessions.write().await;
@@ -878,6 +929,19 @@ async fn ws_hosted_inbox_task(mut socket: WebSocket, state: ApiState, token: Str
 
     let mut rx = state.0.inbox_tx.subscribe();
     loop {
+        // Re-check TTL on each loop to avoid long-lived sockets after expiry.
+        {
+            let sessions = state.0.hosted_sessions.read().await;
+            match sessions.get(&token) {
+                Some(s) if now_secs().saturating_sub(s.created_at) < SESSION_TTL_SECS => {}
+                _ => {
+                    let _ = socket.send(Message::Text(
+                        r#"{"error":"session expired"}"#.into()
+                    )).await;
+                    break;
+                }
+            }
+        }
         match rx.recv().await {
             Ok(env) => {
                 // Only forward envelopes addressed to this hosted agent.
@@ -925,13 +989,30 @@ fn ct_eq(a: &str, b: &str) -> bool {
     let a = a.as_bytes();
     let b = b.as_bytes();
     let len = a.len().max(b.len());
-    let mut diff: u8 = (a.len() ^ b.len()) as u8;
+    let mut diff: usize = a.len() ^ b.len();
     for i in 0..len {
         let x = a.get(i).copied().unwrap_or(0);
         let y = b.get(i).copied().unwrap_or(0);
-        diff |= x ^ y;
+        diff |= usize::from(x ^ y);
     }
     diff == 0
+}
+
+fn require_api_secret_or_unauthorized(state: &ApiState, headers: &HeaderMap) -> Option<Response> {
+    if let Some(ref secret) = state.0.api_secret {
+        let expected = format!("Bearer {secret}");
+        let provided = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !ct_eq(provided, &expected) {
+            return Some((
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "unauthorized" })),
+            ).into_response());
+        }
+    }
+    None
 }
 
 /// Extract the Bearer token from an `Authorization: Bearer <token>` header.

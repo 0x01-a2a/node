@@ -26,6 +26,8 @@ declare_id!("Dvf1qPzzvW1BkSUogRMaAvxZpXrmeTqYutTCBKpzHB1A");
 
 /// 10 USDC minimum stake (6 decimal places — USDC on Solana has 6 decimals).
 pub const MIN_STAKE_USDC: u64 = 10_000_000;
+/// Canonical USDC mint enforced by stake-lock flows.
+pub const USDC_MINT: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 /// ~2 days at 400ms/slot before stake can be claimed after unlock queue.
 pub const UNLOCK_DELAY_SLOTS: u64 = 432_000;
 /// Challenge program ID — only this program can call slash().
@@ -82,6 +84,7 @@ pub mod stake_lock {
         );
         token::transfer(cpi_ctx, args.amount)?;
 
+        stake.version                = 1;
         stake.agent_mint             = args.agent_mint;
         stake.owner                  = ctx.accounts.owner.key();
         stake.stake_usdc             = args.amount;
@@ -312,7 +315,10 @@ pub mod stake_lock {
         );
         token::transfer(cpi_ctx, amount)?;
 
-        ctx.accounts.stake_account.stake_usdc += amount;
+        ctx.accounts.stake_account.stake_usdc = ctx.accounts.stake_account
+            .stake_usdc
+            .checked_add(amount)
+            .ok_or(StakeLockError::Overflow)?;
 
         emit!(StakeToppedUp {
             agent_mint: ctx.accounts.stake_account.agent_mint,
@@ -342,6 +348,10 @@ pub mod stake_lock {
         require!(
             args.amount <= stake.stake_usdc,
             StakeLockError::InsufficientStakeToSlash,
+        );
+        require!(
+            ctx.accounts.recipient_usdc.mint == ctx.accounts.usdc_mint.key(),
+            StakeLockError::InvalidRecipientMint,
         );
 
         stake.stake_usdc -= args.amount;
@@ -439,7 +449,6 @@ pub struct LockStake<'info> {
 
     /// Token program for SATI NFTs (Token-2022).
     pub sati_token_program: Interface<'info, TokenInterface>,
-
     #[account(address = USDC_MINT)]
     pub usdc_mint:                Account<'info, Mint>,
     pub token_program:            Program<'info, Token>,
@@ -627,7 +636,7 @@ pub struct Slash<'info> {
     )]
     pub stake_vault: Account<'info, TokenAccount>,
 
-    /// Recipient USDC ATA — challenger or treasury.
+    /// Recipient USDC token account — challenger or treasury.
     #[account(mut)]
     pub recipient_usdc: Account<'info, TokenAccount>,
 
@@ -767,4 +776,8 @@ pub enum StakeLockError {
     InvalidLeaseAccount,
     #[msg("Agent mint argument does not match provided SATI mint account")]
     MintMismatch,
+    #[msg("Arithmetic overflow")]
+    Overflow,
+    #[msg("recipient_usdc mint must match usdc_mint")]
+    InvalidRecipientMint,
 }

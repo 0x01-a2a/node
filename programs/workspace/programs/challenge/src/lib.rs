@@ -8,6 +8,8 @@ declare_id!("7FoisCiS1gyUx7osQkCLk4A1zNKGq37yHpVhL2BFgk1Y");
 
 /// Protocol treasury wallet — receives forfeited challenge stake.
 pub const TREASURY_PUBKEY: Pubkey = pubkey!("qw4hzfV7UUXTrNh3hiS9Q8KSPMXWUusNoyFKLvtcMMX");
+/// Canonical USDC mint enforced by challenge flows.
+pub const USDC_MINT: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
 /// Behavior-log program ID — batch accounts must be owned by this program.
 const BEHAVIOR_LOG_PROGRAM_ID: Pubkey =
@@ -41,6 +43,8 @@ pub const CHALLENGE_STAKE_USDC: u64 = 10_000_000;
 pub const CHALLENGE_REWARD_BPS: u64 = 5_000;
 /// Challenge window: ~2 days at 400ms/slot.
 pub const CHALLENGE_WINDOW_SLOTS: u64 = 432_000;
+/// Resolution deadline after submission: ~2 days at 400ms/slot.
+pub const RESOLUTION_DEADLINE_SLOTS: u64 = 432_000;
 
 #[program]
 pub mod challenge {
@@ -143,11 +147,16 @@ pub mod challenge {
     ///
     /// On success: challenger's stake refunded from vault.
     /// On failure: challenger's stake transferred to protocol treasury.
+    /// If unresolved past deadline: stake auto-refunded to challenger.
     pub fn resolve_challenge(
         ctx: Context<ResolveChallenge>,
         args: ResolveChallengeArgs,
     ) -> Result<()> {
         let clock = Clock::get()?;
+        let deadline = ctx.accounts
+            .challenge_account
+            .submitted_slot
+            .saturating_add(RESOLUTION_DEADLINE_SLOTS);
 
         require!(
             !ctx.accounts.challenge_account.resolved,
@@ -158,12 +167,65 @@ pub mod challenge {
             ChallengeError::TooEarlyToResolve,
         );
 
+        // Expired unresolved challenges are auto-refunded to the challenger so funds
+        // cannot remain locked indefinitely if the resolver goes offline.
+        if clock.slot > deadline {
+            let challenge_key        = ctx.accounts.challenge_account.key();
+            let vault_authority_bump = ctx.accounts.challenge_account.vault_authority_bump;
+            let agent_id             = ctx.accounts.challenge_account.agent_id;
+            let epoch_number         = ctx.accounts.challenge_account.epoch_number;
+            let challenger           = ctx.accounts.challenge_account.challenger;
+            let vault_balance        = ctx.accounts.challenge_vault.amount;
+
+            ctx.accounts.challenge_account.resolved = true;
+            ctx.accounts.challenge_account.succeeded = false;
+
+            let signer_seeds: &[&[&[u8]]] = &[&[
+                b"challenge_vault",
+                challenge_key.as_ref(),
+                &[vault_authority_bump],
+            ]];
+            let cpi_ctx = CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from:      ctx.accounts.challenge_vault.to_account_info(),
+                    to:        ctx.accounts.challenger_usdc.to_account_info(),
+                    authority: ctx.accounts.challenge_vault_authority.to_account_info(),
+                },
+                signer_seeds,
+            );
+            token::transfer(cpi_ctx, vault_balance)?;
+
+            emit!(ChallengeResolved {
+                agent_id,
+                epoch_number,
+                succeeded:         false,
+                challenger,
+                slash_amount:      0,
+                challenger_reward: vault_balance,
+                treasury_amount:   0,
+            });
+
+            return Ok(());
+        }
+
+        // Before deadline, only protocol treasury resolver can finalize.
+        require!(
+            ctx.accounts.resolver.key() == TREASURY_PUBKEY,
+            ChallengeError::UnauthorizedResolver,
+        );
+
         // Verify the contradicting entry matches the hash stored at submission.
         let entry_hash =
             anchor_lang::solana_program::keccak::hash(&args.contradicting_entry).to_bytes();
         require!(
             entry_hash == ctx.accounts.challenge_account.entry_hash,
             ChallengeError::EntryHashMismatch,
+        );
+
+        require!(
+            ctx.accounts.batch_account.owner == &BEHAVIOR_LOG_PROGRAM_ID,
+            ChallengeError::InvalidBatchAccount,
         );
 
         // Read log_merkle_root from BatchAccount raw bytes at offset 48.
@@ -284,8 +346,8 @@ const MIN_STAKE_USDC: u64 = 10_000_000; // 10 USDC
 
 /// Verify Merkle inclusion of `entry` at `leaf_index` against `root`.
 ///
-/// Leaf hash = keccak256(entry).
-/// Internal hashes = keccak256(left || right), left-child when index is even.
+/// Leaf hash = keccak256(0x00 || entry).
+/// Internal hashes = keccak256(0x01 || left || right), left-child when index is even.
 /// Tree is padded to next power-of-two with zero hashes (same as protocol crate).
 fn verify_inclusion(
     entry:      &[u8],
@@ -293,19 +355,25 @@ fn verify_inclusion(
     leaf_index: u64,
     root:       [u8; 32],
 ) -> bool {
-    let leaf_hash =
-        anchor_lang::solana_program::keccak::hash(entry).to_bytes();
+    const MERKLE_LEAF_DOMAIN: u8 = 0x00;
+    const MERKLE_INTERNAL_DOMAIN: u8 = 0x01;
+
+    let mut leaf_input = Vec::with_capacity(1 + entry.len());
+    leaf_input.push(MERKLE_LEAF_DOMAIN);
+    leaf_input.extend_from_slice(entry);
+    let leaf_hash = anchor_lang::solana_program::keccak::hash(&leaf_input).to_bytes();
     let mut current = leaf_hash;
     let mut idx     = leaf_index as usize;
 
     for sibling in proof {
-        let mut combined = [0u8; 64];
-        if idx % 2 == 0 {
-            combined[..32].copy_from_slice(&current);
-            combined[32..].copy_from_slice(sibling);
+        let mut combined = [0u8; 65];
+        combined[0] = MERKLE_INTERNAL_DOMAIN;
+        if idx.is_multiple_of(2) {
+            combined[1..33].copy_from_slice(&current);
+            combined[33..65].copy_from_slice(sibling);
         } else {
-            combined[..32].copy_from_slice(sibling);
-            combined[32..].copy_from_slice(&current);
+            combined[1..33].copy_from_slice(sibling);
+            combined[33..65].copy_from_slice(&current);
         }
         current = anchor_lang::solana_program::keccak::hash(&combined).to_bytes();
         idx /= 2;
@@ -374,6 +442,7 @@ pub struct SubmitChallenge<'info> {
     /// CHECK: PDA seeds verified in handler.
     pub batch_account: UncheckedAccount<'info>,
 
+    #[account(address = USDC_MINT)]
     pub usdc_mint:                Account<'info, Mint>,
     pub token_program:            Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
@@ -382,8 +451,8 @@ pub struct SubmitChallenge<'info> {
 
 #[derive(Accounts)]
 pub struct ResolveChallenge<'info> {
-    /// Protocol oracle/treasury. Off-chain bot resolves v1.
-    #[account(mut, address = TREASURY_PUBKEY)]
+    /// Resolver signer. Before deadline must equal TREASURY_PUBKEY.
+    #[account(mut)]
     pub resolver: Signer<'info>,
 
     #[account(
@@ -457,6 +526,7 @@ pub struct ResolveChallenge<'info> {
     #[account(mut)]
     pub stake_vault: Account<'info, TokenAccount>,
 
+    #[account(address = USDC_MINT)]
     pub usdc_mint:     Account<'info, Mint>,
     pub token_program: Program<'info, Token>,
 }
@@ -553,6 +623,8 @@ pub enum ChallengeError {
     AlreadyResolved,
     #[msg("Too early to resolve — wait for finality")]
     TooEarlyToResolve,
+    #[msg("Only protocol treasury may resolve before deadline")]
+    UnauthorizedResolver,
     #[msg("Batch account data is invalid or too short")]
     InvalidBatchAccount,
     #[msg("Merkle inclusion proof is invalid — entry not found in batch log")]

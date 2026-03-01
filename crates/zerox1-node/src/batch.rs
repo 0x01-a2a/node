@@ -117,7 +117,7 @@ impl BatchAccumulator {
 
     /// Finalise the epoch batch.
     ///
-    /// `leaf_hashes` = keccak256 of each logged CBOR envelope (from EnvelopeLogger).
+    /// `leaf_hashes` = keccak256(0x00 || CBOR) of each logged envelope (from EnvelopeLogger).
     /// Computes log_merkle_root, applies overflow cap, returns (BehaviorBatch, message_slots).
     /// `message_slots` is the ordered list of Solana slots for all messages this epoch —
     /// pass it to `zerox1_protocol::entropy::compute` for timing entropy (Ht).

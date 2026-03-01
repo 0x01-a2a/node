@@ -13,6 +13,7 @@
 
 use ed25519_dalek::{Signer, SigningKey};
 use serde::Deserialize;
+use std::net::IpAddr;
 
 // ============================================================================
 // Types
@@ -48,7 +49,8 @@ pub async fn register_fcm_token(
     signing_key:    &SigningKey,
     client:         &reqwest::Client,
 ) -> anyhow::Result<()> {
-    let url  = format!("{aggregator_url}/fcm/register");
+    let base = validated_aggregator_url(aggregator_url).await?;
+    let url  = format!("{base}/fcm/register");
     let body = serde_json::json!({
         "agent_id":  agent_id_hex,
         "fcm_token": fcm_token,
@@ -82,7 +84,8 @@ pub async fn set_sleep_mode(
     signing_key:    &SigningKey,
     client:         &reqwest::Client,
 ) -> anyhow::Result<()> {
-    let url  = format!("{aggregator_url}/fcm/sleep");
+    let base = validated_aggregator_url(aggregator_url).await?;
+    let url  = format!("{base}/fcm/sleep");
     let body = serde_json::json!({
         "agent_id": agent_id_hex,
         "sleeping": sleeping,
@@ -115,7 +118,8 @@ pub async fn pull_pending_messages(
     signing_key:    &SigningKey,
     client:         &reqwest::Client,
 ) -> anyhow::Result<Vec<PendingMessage>> {
-    let url  = format!("{aggregator_url}/agents/{agent_id_hex}/pending");
+    let base = validated_aggregator_url(aggregator_url).await?;
+    let url  = format!("{base}/agents/{agent_id_hex}/pending");
     
     // For GET /pending, we sign the path "agents/{id}/pending"
     let msg = format!("agents/{agent_id_hex}/pending");
@@ -134,4 +138,62 @@ pub async fn pull_pending_messages(
     }
     let msgs: Vec<PendingMessage> = resp.json().await?;
     Ok(msgs)
+}
+
+async fn validated_aggregator_url(raw: &str) -> anyhow::Result<String> {
+    let parsed = reqwest::Url::parse(raw)
+        .map_err(|e| anyhow::anyhow!("invalid aggregator URL '{raw}': {e}"))?;
+
+    if parsed.scheme() != "https" {
+        anyhow::bail!("aggregator URL must use https://");
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("aggregator URL is missing a host"))?
+        .to_ascii_lowercase();
+
+    if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
+        anyhow::bail!("aggregator URL host is local/private");
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_private_or_local_ip(ip) {
+            anyhow::bail!("aggregator URL host is local/private");
+        }
+    } else {
+        let port = parsed.port_or_known_default().unwrap_or(443);
+        let addrs: Vec<_> = tokio::net::lookup_host((host.as_str(), port))
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to resolve aggregator host '{host}': {e}"))?
+            .collect();
+        if addrs.is_empty() {
+            anyhow::bail!("aggregator host '{host}' resolved to no addresses");
+        }
+        if addrs.iter().any(|addr| is_private_or_local_ip(addr.ip())) {
+            anyhow::bail!("aggregator host '{host}' resolves to local/private IP");
+        }
+    }
+
+    Ok(parsed.to_string().trim_end_matches('/').to_string())
+}
+
+fn is_private_or_local_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_unspecified()
+                || v4.octets()[0] == 0
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+                || v6.is_multicast()
+        }
+    }
 }

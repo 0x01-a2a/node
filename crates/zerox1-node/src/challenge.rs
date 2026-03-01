@@ -438,11 +438,12 @@ fn build_resolve_challenge_ix(
 ///
 /// Uses the same tree construction as `zerox1_protocol::hash::merkle_root`:
 /// - keccak256 leaves, next_power_of_two padding with zero hashes
-/// - Internal hash: keccak256(left || right)
+/// - Internal hash: keccak256(0x01 || left || right)
 ///
 /// Returns sibling hashes from leaf level up to (but not including) root.
 pub fn build_merkle_proof(leaves: &[[u8; 32]], leaf_index: usize) -> Vec<[u8; 32]> {
     use zerox1_protocol::hash::keccak256;
+    const MERKLE_INTERNAL_DOMAIN: u8 = 0x01;
 
     if leaves.len() <= 1 {
         return vec![];
@@ -462,9 +463,10 @@ pub fn build_merkle_proof(leaves: &[[u8; 32]], leaf_index: usize) -> Vec<[u8; 32
 
         let mut next = Vec::with_capacity(layer.len() / 2);
         for chunk in layer.chunks_exact(2) {
-            let mut combined = [0u8; 64];
-            combined[..32].copy_from_slice(&chunk[0]);
-            combined[32..].copy_from_slice(&chunk[1]);
+            let mut combined = [0u8; 65];
+            combined[0] = MERKLE_INTERNAL_DOMAIN;
+            combined[1..33].copy_from_slice(&chunk[0]);
+            combined[33..65].copy_from_slice(&chunk[1]);
             next.push(keccak256(&combined));
         }
         layer = next;

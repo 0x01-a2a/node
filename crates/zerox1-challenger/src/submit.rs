@@ -58,6 +58,7 @@ fn anchor_discriminator(name: &str) -> [u8; 8] {
 /// Generate a Merkle inclusion proof for the leaf at `leaf_index` in `leaves`.
 /// Pads `leaves` to the next power of two with zero hashes [0u8; 32].
 pub fn generate_merkle_proof(leaf_index: usize, leaves: &[[u8; 32]]) -> Vec<[u8; 32]> {
+    const MERKLE_INTERNAL_DOMAIN: u8 = 0x01;
     if leaves.is_empty() {
         return vec![];
     }
@@ -75,9 +76,10 @@ pub fn generate_merkle_proof(leaf_index: usize, leaves: &[[u8; 32]]) -> Vec<[u8;
 
         let mut next = Vec::with_capacity(layer.len() / 2);
         for chunk in layer.chunks_exact(2) {
-            let mut combined = [0u8; 64];
-            combined[..32].copy_from_slice(&chunk[0]);
-            combined[32..].copy_from_slice(&chunk[1]);
+            let mut combined = [0u8; 65];
+            combined[0] = MERKLE_INTERNAL_DOMAIN;
+            combined[1..33].copy_from_slice(&chunk[0]);
+            combined[33..65].copy_from_slice(&chunk[1]);
             next.push(keccak256(&combined));
         }
         layer = next;

@@ -77,6 +77,9 @@ pub mod behavior_log {
         let registry = &mut ctx.accounts.registry;
         registry.version = 1;
         registry.agent_id = args.agent_id;
+        if registry.bump == 0 {
+            registry.bump = ctx.bumps.registry;
+        }
         // Advance registry epoch counter
         registry.next_epoch += 1;
 

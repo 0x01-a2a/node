@@ -1,4 +1,6 @@
 use tiny_keccak::{Hasher, Keccak};
+const MERKLE_LEAF_DOMAIN: u8 = 0x00;
+const MERKLE_INTERNAL_DOMAIN: u8 = 0x01;
 
 /// Keccak-256 hash of the input bytes.
 pub fn keccak256(data: &[u8]) -> [u8; 32] {
@@ -9,10 +11,18 @@ pub fn keccak256(data: &[u8]) -> [u8; 32] {
     out
 }
 
+/// Domain-separated Merkle leaf hash: keccak256(0x00 || leaf_bytes).
+pub fn hash_merkle_leaf(leaf_bytes: &[u8]) -> [u8; 32] {
+    let mut prefixed = Vec::with_capacity(1 + leaf_bytes.len());
+    prefixed.push(MERKLE_LEAF_DOMAIN);
+    prefixed.extend_from_slice(leaf_bytes);
+    keccak256(&prefixed)
+}
+
 /// Merkle tree over a slice of leaf data blobs.
 ///
-/// - Leaf hash:     keccak256(canonical_cbor_encode(entry))
-/// - Internal hash: keccak256(left || right)
+/// - Leaf hash:     keccak256(0x00 || canonical_cbor_encode(entry))
+/// - Internal hash: keccak256(0x01 || left || right)
 /// - Non-power-of-2 counts are padded with zero-hashes on the right.
 ///
 /// Returns the 32-byte merkle root, or [0u8; 32] for an empty input.
@@ -30,10 +40,7 @@ pub fn merkle_root(leaves: &[[u8; 32]]) -> [u8; 32] {
     while layer.len() > 1 {
         let mut next = Vec::with_capacity(layer.len() / 2);
         for chunk in layer.chunks_exact(2) {
-            let mut combined = [0u8; 64];
-            combined[..32].copy_from_slice(&chunk[0]);
-            combined[32..].copy_from_slice(&chunk[1]);
-            next.push(keccak256(&combined));
+            next.push(hash_internal_nodes(chunk[0], chunk[1]));
         }
         layer = next;
     }
@@ -43,7 +50,7 @@ pub fn merkle_root(leaves: &[[u8; 32]]) -> [u8; 32] {
 
 /// Verify a merkle inclusion proof.
 ///
-/// `leaf_hash`  — keccak256 of the leaf data
+/// `leaf_hash`  — keccak256(0x00 || leaf data)
 /// `proof`      — sibling hashes from leaf to root
 /// `index`      — 0-based leaf index
 /// `root`       — expected root
@@ -57,19 +64,23 @@ pub fn verify_merkle_proof(
     let mut idx = index;
 
     for sibling in proof {
-        let mut combined = [0u8; 64];
         if idx.is_multiple_of(2) {
-            combined[..32].copy_from_slice(&current);
-            combined[32..].copy_from_slice(sibling);
+            current = hash_internal_nodes(current, *sibling);
         } else {
-            combined[..32].copy_from_slice(sibling);
-            combined[32..].copy_from_slice(&current);
+            current = hash_internal_nodes(*sibling, current);
         }
-        current = keccak256(&combined);
         idx /= 2;
     }
 
     current == root
+}
+
+fn hash_internal_nodes(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
+    let mut combined = [0u8; 65];
+    combined[0] = MERKLE_INTERNAL_DOMAIN;
+    combined[1..33].copy_from_slice(&left);
+    combined[33..65].copy_from_slice(&right);
+    keccak256(&combined)
 }
 
 #[cfg(test)]
@@ -83,35 +94,29 @@ mod tests {
 
     #[test]
     fn single_leaf_root_equals_leaf() {
-        let leaf = keccak256(b"hello");
+        let leaf = hash_merkle_leaf(b"hello");
         assert_eq!(merkle_root(&[leaf]), leaf);
     }
 
     #[test]
     fn two_leaf_root() {
-        let a = keccak256(b"a");
-        let b = keccak256(b"b");
+        let a = hash_merkle_leaf(b"a");
+        let b = hash_merkle_leaf(b"b");
         let root = merkle_root(&[a, b]);
 
-        let mut combined = [0u8; 64];
-        combined[..32].copy_from_slice(&a);
-        combined[32..].copy_from_slice(&b);
-        let expected = keccak256(&combined);
+        let expected = hash_internal_nodes(a, b);
 
         assert_eq!(root, expected);
     }
 
     #[test]
     fn merkle_proof_verification() {
-        let leaves: Vec<[u8; 32]> = (0u8..4).map(|i| keccak256(&[i])).collect();
+        let leaves: Vec<[u8; 32]> = (0u8..4).map(|i| hash_merkle_leaf(&[i])).collect();
         let root = merkle_root(&leaves);
 
         // Proof for leaf 0: sibling is leaf 1, then hash(leaf2||leaf3)
         let sibling_01 = leaves[1];
-        let mut c23 = [0u8; 64];
-        c23[..32].copy_from_slice(&leaves[2]);
-        c23[32..].copy_from_slice(&leaves[3]);
-        let hash_23 = keccak256(&c23);
+        let hash_23 = hash_internal_nodes(leaves[2], leaves[3]);
 
         assert!(verify_merkle_proof(leaves[0], &[sibling_01, hash_23], 0, root));
         assert!(!verify_merkle_proof(leaves[0], &[sibling_01, hash_23], 1, root));

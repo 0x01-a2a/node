@@ -13,6 +13,8 @@ declare_id!("5P8uXqavnQFGXbHKE3tQDezh41D7ZutHsT2jY6gZ3C3x");
 /// Protocol treasury wallet — receives all lease fees.
 /// Replace with the actual treasury pubkey before mainnet deploy.
 pub const TREASURY_PUBKEY: Pubkey = pubkey!("qw4hzfV7UUXTrNh3hiS9Q8KSPMXWUusNoyFKLvtcMMX");
+/// Canonical USDC mint enforced by all lease flows.
+pub const USDC_MINT: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
 // ============================================================================
 // Lease Program (doc 5, §10.3)
@@ -223,7 +225,6 @@ pub struct InitLease<'info> {
 
     /// Token program for SATI NFTs (Token-2022).
     pub sati_token_program: Interface<'info, TokenInterface>,
-
     pub usdc_mint:                Account<'info, Mint>,
     pub token_program:            Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
@@ -265,6 +266,7 @@ pub struct PayLease<'info> {
     #[account(address = TREASURY_PUBKEY)]
     pub treasury: UncheckedAccount<'info>,
 
+    #[account(address = USDC_MINT)]
     pub usdc_mint:                Account<'info, Mint>,
     pub token_program:            Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,

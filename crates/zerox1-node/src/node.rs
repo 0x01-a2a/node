@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::net::IpAddr;
+use std::net::ToSocketAddrs;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -91,6 +93,7 @@ pub struct Zx01Node {
     current_slot:  u64,
     current_epoch: u64,
     conversations: HashMap<[u8; 16], PeerId>,
+    conversation_lru: VecDeque<[u8; 16]>,
 
     /// Receives outbound envelope requests from the Agent API (POST /envelopes/send).
     outbound_rx: tokio::sync::mpsc::Receiver<OutboundRequest>,
@@ -132,7 +135,7 @@ impl Zx01Node {
         };
         let dev_mode       = config.sati_mint.is_none();
         let usdc_mint         = config.usdc_mint_pubkey().ok().flatten();
-        let aggregator_url    = config.aggregator_url.clone();
+        let aggregator_url    = validated_aggregator_url(config.aggregator_url.clone());
         let aggregator_secret = config.aggregator_secret.clone();
         let (api, outbound_rx, hosted_outbound_rx) = ApiState::new(
             identity.agent_id,
@@ -171,6 +174,7 @@ impl Zx01Node {
             current_slot:  0,
             current_epoch: epoch,
             conversations: HashMap::new(),
+            conversation_lru: VecDeque::new(),
             outbound_rx,
             hosted_outbound_rx,
             usdc_mint,
@@ -203,7 +207,7 @@ impl Zx01Node {
         // ── Hosting registration heartbeat ────────────────────────────────────
         // When --hosting is set, advertise this node to the aggregator every 60s.
         if self.config.hosting {
-            if let Some(ref agg_url) = self.config.aggregator_url.clone() {
+            if let Some(ref agg_url) = self.aggregator_url.clone() {
                 let agg_url_log      = agg_url.clone();
                 let agg_url          = agg_url.clone();
                 let public_url       = self.config.public_api_url.clone().unwrap_or_default();
@@ -264,7 +268,7 @@ impl Zx01Node {
         // aggregator and pull any messages that arrived while sleeping.
         if let (Some(ref fcm_token), Some(ref agg_url)) = (
             self.config.fcm_token.clone(),
-            self.config.aggregator_url.clone(),
+            self.aggregator_url.clone(),
         ) {
             let agent_id_hex = hex::encode(self.identity.agent_id);
             // Register token.
@@ -741,6 +745,11 @@ impl Zx01Node {
 
         let topic_str = message.topic.as_str();
 
+        if let Err(e) = Envelope::check_size(message.data.len()) {
+            tracing::debug!("Pubsub envelope too large from {source_peer}: {e}");
+            return;
+        }
+
         let env = match Envelope::from_cbor(&message.data) {
             Ok(e)  => e,
             Err(e) => {
@@ -790,7 +799,9 @@ impl Zx01Node {
             if self.peer_states.sati_status(&env.sender).is_none() {
                 self.verify_sati_registration(env.sender).await;
             }
-            if self.peer_states.lease_status(&env.sender).is_none() {
+            if self.peer_states.lease_status(&env.sender).is_none()
+                || self.peer_states.last_active_epoch(&env.sender) < self.current_epoch
+            {
                 self.verify_peer_lease(env.sender).await;
             }
         } else {
@@ -919,6 +930,11 @@ impl Zx01Node {
             .request_response
             .send_response(channel, b"ACK".to_vec());
 
+        if let Err(e) = Envelope::check_size(data.len()) {
+            tracing::debug!("Bilateral envelope too large from {peer_id}: {e}");
+            return;
+        }
+
         let env = match Envelope::from_cbor(&data) {
             Ok(e)  => e,
             Err(e) => {
@@ -953,6 +969,9 @@ impl Zx01Node {
             );
             return;
         }
+        if self.peer_states.last_active_epoch(&env.sender) < self.current_epoch {
+            self.verify_peer_lease(env.sender).await;
+        }
         if !self.lease_gate_allows(&env.sender) {
             tracing::warn!(
                 "Dropping bilateral {} from deactivated agent {}",
@@ -971,13 +990,7 @@ impl Zx01Node {
         }
 
         self.batch.record_message(env.msg_type, env.sender, self.current_slot);
-        // Cap conversation map to prevent memory exhaustion from message floods.
-        if self.conversations.len() >= MAX_ACTIVE_CONVERSATIONS {
-            if let Some(&oldest_id) = self.conversations.keys().next() {
-                self.conversations.remove(&oldest_id);
-            }
-        }
-        self.conversations.insert(env.conversation_id, peer_id);
+        self.track_conversation_peer(env.conversation_id, peer_id);
 
         // Push to agent inbox.
         self.api.push_inbound(&env, self.current_slot);
@@ -1289,8 +1302,6 @@ impl Zx01Node {
         swarm: &mut Swarm<Zx01Behaviour>,
         req:   OutboundRequest,
     ) {
-        self.nonce += 1;
-
         let env = self.build_envelope(
             req.msg_type,
             req.recipient,
@@ -1700,6 +1711,28 @@ impl Zx01Node {
         });
     }
 
+    fn track_conversation_peer(&mut self, conversation_id: [u8; 16], peer_id: PeerId) {
+        if let std::collections::hash_map::Entry::Occupied(mut entry) =
+            self.conversations.entry(conversation_id)
+        {
+            entry.insert(peer_id);
+            self.conversation_lru.retain(|cid| *cid != conversation_id);
+            self.conversation_lru.push_back(conversation_id);
+            return;
+        }
+
+        while self.conversations.len() >= MAX_ACTIVE_CONVERSATIONS {
+            if let Some(oldest) = self.conversation_lru.pop_front() {
+                self.conversations.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+
+        self.conversations.insert(conversation_id, peer_id);
+        self.conversation_lru.push_back(conversation_id);
+    }
+
     // ========================================================================
     // Per-peer rate limiting
     // ========================================================================
@@ -1719,6 +1752,85 @@ impl Zx01Node {
         } else {
             entry.0 += 1;
             true
+        }
+    }
+}
+
+fn validated_aggregator_url(url: Option<String>) -> Option<String> {
+    let raw = url?;
+
+    let parsed = match reqwest::Url::parse(&raw) {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::warn!("Ignoring invalid --aggregator-url '{raw}': {e}");
+            return None;
+        }
+    };
+
+    if parsed.scheme() != "https" {
+        tracing::warn!("Ignoring non-HTTPS aggregator URL: {raw}");
+        return None;
+    }
+
+    let host = match parsed.host_str() {
+        Some(h) => h.to_ascii_lowercase(),
+        None => {
+            tracing::warn!("Ignoring aggregator URL without host: {raw}");
+            return None;
+        }
+    };
+
+    if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
+        tracing::warn!("Ignoring aggregator URL with local/private host: {raw}");
+        return None;
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_private_or_local_ip(ip) {
+            tracing::warn!("Ignoring aggregator URL with local/private host: {raw}");
+            return None;
+        }
+    } else {
+        let port = parsed.port_or_known_default().unwrap_or(443);
+        let addrs: Vec<_> = match (host.as_str(), port).to_socket_addrs() {
+            Ok(iter) => iter.collect(),
+            Err(e) => {
+                tracing::warn!("Ignoring aggregator URL; failed to resolve host '{host}': {e}");
+                return None;
+            }
+        };
+        if addrs.is_empty() {
+            tracing::warn!("Ignoring aggregator URL; host '{host}' resolved to no addresses");
+            return None;
+        }
+        if addrs
+            .iter()
+            .any(|addr| is_private_or_local_ip(addr.ip()))
+        {
+            tracing::warn!("Ignoring aggregator URL with host resolving to local/private IPs: {raw}");
+            return None;
+        }
+    }
+
+    Some(parsed.to_string())
+}
+
+fn is_private_or_local_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_unspecified()
+                || v4.octets()[0] == 0
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+                || v6.is_multicast()
         }
     }
 }

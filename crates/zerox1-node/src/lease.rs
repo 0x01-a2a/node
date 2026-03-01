@@ -19,6 +19,7 @@ use solana_sdk::{
 };
 
 use crate::{identity::AgentIdentity, kora::KoraClient};
+use zerox1_protocol::constants::GRACE_PERIOD_EPOCHS;
 
 // ============================================================================
 // Constants
@@ -103,7 +104,12 @@ pub struct LeaseStatus {
 impl LeaseStatus {
     /// True if the lease is still valid (not deactivated, not in grace period).
     pub fn is_active(&self) -> bool {
-        !self.deactivated
+        if self.deactivated {
+            return false;
+        }
+        // Treat stale active flags conservatively: if epochs are already beyond
+        // grace, the lease is effectively inactive even before tick_lease runs.
+        self.current_epoch <= self.paid_through_epoch + GRACE_PERIOD_EPOCHS
     }
 
     /// True if renewal is needed soon (within RENEWAL_THRESHOLD epochs).
@@ -141,6 +147,10 @@ pub async fn get_lease_status(
             let d = &account.data;
             if d.len() < 100 {
                 anyhow::bail!("LeaseAccount data too short: {} bytes", d.len());
+            }
+            let expected_disc = anchor_account_discriminator("LeaseAccount");
+            if d[..8] != expected_disc {
+                anyhow::bail!("LeaseAccount discriminator mismatch for {}", pda);
             }
             Ok(Some(LeaseStatus {
                 paid_through_epoch: u64::from_le_bytes(d[73..81].try_into().unwrap()),
@@ -357,6 +367,11 @@ pub async fn pay_lease_onchain(
 /// Compute an Anchor instruction discriminator: sha256("global:<name>")[..8].
 fn anchor_discriminator(name: &str) -> [u8; 8] {
     let hash = Sha256::digest(format!("global:{name}").as_bytes());
+    hash[..8].try_into().unwrap()
+}
+
+fn anchor_account_discriminator(name: &str) -> [u8; 8] {
+    let hash = Sha256::digest(format!("account:{name}").as_bytes());
     hash[..8].try_into().unwrap()
 }
 

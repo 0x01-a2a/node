@@ -3,7 +3,7 @@
 use axum::{
     extract::{Path, Query, State, WebSocketUpgrade},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    response::IntoResponse,
     Json,
 };
 use serde::Deserialize;
@@ -668,9 +668,7 @@ pub async fn fcm_register(
     let body: FcmRegisterBody = serde_json::from_str(body_str).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     if let Some(s) = sig {
-        if let Err(e) = verify_request_signature(&body.agent_id, s, &body_bytes) {
-            return Err(e);
-        }
+        verify_request_signature(&body.agent_id, s, &body_bytes)?;
     } else {
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -698,9 +696,7 @@ pub async fn fcm_sleep(
     let body: FcmSleepBody = serde_json::from_str(body_str).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     if let Some(s) = sig {
-        if let Err(e) = verify_request_signature(&body.agent_id, s, &body_bytes) {
-            return Err(e);
-        }
+        verify_request_signature(&body.agent_id, s, &body_bytes)?;
     } else {
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -743,9 +739,7 @@ pub async fn get_pending(
     if let Some(s) = sig {
         // For GET, we sign the path "agents/{agent_id}/pending"
         let msg = format!("agents/{agent_id}/pending");
-        if let Err(e) = verify_request_signature(&agent_id, s, msg.as_bytes()) {
-            return Err(e);
-        }
+        verify_request_signature(&agent_id, s, msg.as_bytes())?;
     } else {
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -774,9 +768,7 @@ pub async fn post_pending(
 
     if let Some(s) = sig {
         // HIGH-9: Signature MUST match the sender (body.from)
-        if let Err(e) = verify_request_signature(&body.from, s, &body_bytes) {
-            return Err(e);
-        }
+        verify_request_signature(&body.from, s, &body_bytes)?;
     } else {
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -1044,9 +1036,7 @@ pub async fn post_hosting_register(
 
     if let Some(s) = sig {
         // HIGH-6: Signature MUST match the node_id
-        if let Err(e) = verify_request_signature(&body.node_id, s, &body_bytes) {
-            return Err(e);
-        }
+        verify_request_signature(&body.node_id, s, &body_bytes)?;
     } else {
         return Err(StatusCode::UNAUTHORIZED);
     }

@@ -93,8 +93,11 @@ cargo check
 # Run protocol tests
 cargo test -p zerox1-protocol
 
-# Build release binaries
-cargo build --release -p zerox1-node -p zerox1-aggregator
+# Build release binaries (Mainnet)
+cargo build --release -p zerox1-node
+
+# Build release binaries (Devnet)
+cargo build --release -p zerox1-node --features devnet
 
 # TypeScript typecheck
 cd sdk && npx tsc --noEmit
@@ -116,7 +119,14 @@ zerox1-node \
   --api-addr     127.0.0.1:8080
 ```
 
-The node connects to the 0x01 bootstrap fleet automatically. To run a private mesh:
+The node connects to the 0x01 bootstrap fleet automatically. 
+
+**Devnet/Mainnet Switching:**
+The node uses a centralized constant system in `src/constants.rs`. 
+- By default, it builds for **Mainnet** (using standard USDC mint).
+- Build with `--features devnet` to use **Devnet** USDC and program IDs.
+
+To run a private mesh:
 ```bash
 zerox1-node --no-default-bootstrap --bootstrap <multiaddr>
 ```

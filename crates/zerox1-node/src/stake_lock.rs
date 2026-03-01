@@ -18,52 +18,44 @@ use solana_sdk::{
 };
 
 use crate::{identity::AgentIdentity, kora::KoraClient, lease::get_ata};
-use zerox1_protocol::SATI_PROGRAM_ID;
 
 // ============================================================================
 // Constants
 // ============================================================================
 
-/// StakeLock program ID (doc 5, §10.5).
-const STAKE_LOCK_PROGRAM_ID_STR: &str = "Dvf1qPzzvW1BkSUogRMaAvxZpXrmeTqYutTCBKpzHB1A";
-/// Lease program ID.
-const LEASE_PROGRAM_ID_STR: &str = "5P8uXqavnQFGXbHKE3tQDezh41D7ZutHsT2jY6gZ3C3x";
-/// USDC mainnet mint.
-const USDC_MINT_STR: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+use crate::constants;
 /// SPL Token program.
 const SPL_TOKEN_PROGRAM_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 /// Associated Token Program.
 const ASSOCIATED_TOKEN_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bJo";
+/// Token-2022 Program (used for SATI NFTs).
+const TOKEN_2022_PROGRAM_STR: &str = "TokenzQdBNbLqP5VEE3N7HBD3eB3FS8JqcshLxib8";
 
 /// 10 USDC stake (6 decimal places).
 pub const MIN_STAKE_USDC: u64 = 10_000_000;
 
 pub fn stake_lock_program_id() -> Pubkey {
-    STAKE_LOCK_PROGRAM_ID_STR
-        .parse()
-        .expect("valid stakelock program ID")
+    constants::stake_lock_program_id()
 }
 
 fn lease_program_id() -> Pubkey {
-    LEASE_PROGRAM_ID_STR
-        .parse()
-        .expect("valid lease program ID")
+    constants::lease_program_id()
 }
 
 fn usdc_mint() -> Pubkey {
-    USDC_MINT_STR.parse().expect("valid USDC mint")
+    constants::usdc_mint()
 }
 
 fn spl_token_program() -> Pubkey {
-    SPL_TOKEN_PROGRAM_STR
-        .parse()
-        .expect("valid SPL token program ID")
+    constants::spl_token_program_id()
 }
 
 fn associated_token_program() -> Pubkey {
-    ASSOCIATED_TOKEN_PROGRAM_STR
-        .parse()
-        .expect("valid ATA program ID")
+    constants::associated_token_program_id()
+}
+
+fn token_2022_program() -> Pubkey {
+    constants::token_2022_program_id()
 }
 
 // ============================================================================
@@ -87,6 +79,20 @@ pub fn lease_pda(agent_mint: &[u8; 32]) -> Pubkey {
 }
 
 // ============================================================================
+// Stake account existence check
+// ============================================================================
+
+/// Check whether the stake PDA for `agent_id` exists on-chain.
+pub async fn stake_exists(rpc: &RpcClient, agent_id: &[u8; 32]) -> anyhow::Result<bool> {
+    let pda = stake_pda(agent_id);
+    let mut accounts = rpc
+        .get_multiple_accounts(&[pda])
+        .await
+        .map_err(|e| anyhow::anyhow!("RPC error checking stake: {e}"))?;
+    Ok(accounts.pop().flatten().is_some())
+}
+
+// ============================================================================
 // lock_stake instruction
 // ============================================================================
 
@@ -103,9 +109,9 @@ pub async fn lock_stake_onchain(
 
     let stake_account = stake_pda(&identity.agent_id);
     let vault_auth = vault_authority_pda(&identity.agent_id);
-    let vault_ata = get_ata(&vault_auth, &usdc);
-    let owner_ata = get_ata(&agent_pubkey, &usdc);
-    let owner_sati_ata = get_ata(&agent_pubkey, &agent_mint);
+    let vault_ata = get_ata(&vault_auth, &usdc, &spl_token_program());
+    let owner_ata = get_ata(&agent_pubkey, &usdc, &spl_token_program());
+    let owner_sati_ata = get_ata(&agent_pubkey, &agent_mint, &token_2022_program());
 
     let recent_blockhash = rpc.get_latest_blockhash().await?;
 
@@ -262,7 +268,7 @@ fn build_lock_stake_ix(
             AccountMeta::new(*stake_vault, false),
             AccountMeta::new_readonly(*agent_mint, false),
             AccountMeta::new_readonly(*owner_sati_token, false),
-            AccountMeta::new_readonly(SATI_PROGRAM_ID.parse().expect("valid SATI program ID"), false), // sati_token_program
+            AccountMeta::new_readonly(token_2022_program(), false), // sati_token_program (Token-2022)
             AccountMeta::new_readonly(*usdc_mint, false),
             AccountMeta::new_readonly(spl_token_program(), false),
             AccountMeta::new_readonly(associated_token_program(), false),
@@ -281,7 +287,7 @@ fn build_queue_unlock_ix(
     Instruction {
         program_id: *program_id,
         accounts: vec![
-            AccountMeta::new(*owner, true),
+            AccountMeta::new_readonly(*owner, true),
             AccountMeta::new(*stake_account, false),
             AccountMeta::new_readonly(*lease_account, false),
         ],

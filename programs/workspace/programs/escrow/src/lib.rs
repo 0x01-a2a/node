@@ -434,6 +434,7 @@ pub struct ApprovePayment<'info> {
 
     #[account(
         mut,
+        close = requester,
         seeds = [
             b"escrow",
             escrow_account.requester.as_ref(),
@@ -443,6 +444,10 @@ pub struct ApprovePayment<'info> {
         bump  = escrow_account.bump,
     )]
     pub escrow_account: Account<'info, EscrowAccount>,
+
+    /// CHECK: Payer/Requester who will receive the rent lamports upon account closing.
+    #[account(mut, address = escrow_account.requester)]
+    pub requester: UncheckedAccount<'info>,
 
     #[account(
         seeds = [b"escrow_vault", escrow_account.key().as_ref()],
@@ -493,6 +498,7 @@ pub struct ClaimTimeout<'info> {
 
     #[account(
         mut,
+        close = requester,
         seeds = [
             b"escrow",
             escrow_account.requester.as_ref(),
@@ -502,6 +508,10 @@ pub struct ClaimTimeout<'info> {
         bump  = escrow_account.bump,
     )]
     pub escrow_account: Account<'info, EscrowAccount>,
+
+    /// CHECK: Payer/Requester who will receive the rent lamports upon account closing.
+    #[account(mut, address = escrow_account.requester)]
+    pub requester: UncheckedAccount<'info>,
 
     #[account(
         seeds = [b"escrow_vault", escrow_account.key().as_ref()],
@@ -546,6 +556,7 @@ pub struct CancelEscrow<'info> {
 
     #[account(
         mut,
+        close = requester,
         seeds = [
             b"escrow",
             escrow_account.requester.as_ref(),
@@ -555,6 +566,7 @@ pub struct CancelEscrow<'info> {
         bump  = escrow_account.bump,
     )]
     pub escrow_account: Account<'info, EscrowAccount>,
+
 
     #[account(
         seeds = [b"escrow_vault", escrow_account.key().as_ref()],

@@ -19,22 +19,15 @@ use solana_sdk::{
 };
 
 use crate::{identity::AgentIdentity, kora::KoraClient};
-use zerox1_protocol::constants::{GRACE_PERIOD_EPOCHS, SATI_PROGRAM_ID};
+use zerox1_protocol::constants::GRACE_PERIOD_EPOCHS;
 
 // ============================================================================
 // Constants
 // ============================================================================
 
-/// Lease program ID (doc 5, §10.3).
-const LEASE_PROGRAM_ID_STR: &str = "5P8uXqavnQFGXbHKE3tQDezh41D7ZutHsT2jY6gZ3C3x";
-/// USDC mainnet mint (also devnet via Circle's cross-chain USDC).
-pub const USDC_MINT_STR: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+use crate::constants;
+
 /// SPL Token program.
-const SPL_TOKEN_PROGRAM_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-/// Associated Token Program.
-const ASSOCIATED_TOKEN_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bJo";
-/// Treasury.
-pub const TREASURY_PUBKEY_STR: &str = "qw4hzfV7UUXTrNh3hiS9Q8KSPMXWUusNoyFKLvtcMMX";
 
 /// Pay 7 epochs when renewing (one week).
 pub const RENEWAL_EPOCHS: u64 = 7;
@@ -42,29 +35,27 @@ pub const RENEWAL_EPOCHS: u64 = 7;
 pub const RENEWAL_THRESHOLD: u64 = 2;
 
 fn lease_program_id() -> Pubkey {
-    LEASE_PROGRAM_ID_STR
-        .parse()
-        .expect("valid lease program ID")
+    constants::lease_program_id()
 }
 
 fn treasury_pubkey() -> Pubkey {
-    TREASURY_PUBKEY_STR.parse().expect("valid treasury pubkey")
+    constants::treasury_pubkey()
 }
 
 fn usdc_mint() -> Pubkey {
-    USDC_MINT_STR.parse().expect("valid USDC mint")
+    constants::usdc_mint()
 }
 
 fn spl_token_program() -> Pubkey {
-    SPL_TOKEN_PROGRAM_STR
-        .parse()
-        .expect("valid SPL token program ID")
+    constants::spl_token_program_id()
 }
 
 fn associated_token_program() -> Pubkey {
-    ASSOCIATED_TOKEN_PROGRAM_STR
-        .parse()
-        .expect("valid ATA program ID")
+    constants::associated_token_program_id()
+}
+
+fn token_2022_program() -> Pubkey {
+    constants::token_2022_program_id()
 }
 
 /// Derive the Associated Token Address for (wallet, mint).
@@ -73,9 +64,9 @@ fn associated_token_program() -> Pubkey {
 ///   &[wallet, token_program, mint],
 ///   &associated_token_program
 /// )
-pub fn get_ata(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
+pub fn get_ata(wallet: &Pubkey, mint: &Pubkey, token_program: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(
-        &[wallet.as_ref(), spl_token_program().as_ref(), mint.as_ref()],
+        &[wallet.as_ref(), token_program.as_ref(), mint.as_ref()],
         &associated_token_program(),
     )
     .0
@@ -181,11 +172,11 @@ pub async fn init_lease_onchain(
     let agent_mint = Pubkey::new_from_array(identity.agent_id);
 
     let (lease_pda, _) = Pubkey::find_program_address(&[b"lease", &identity.agent_id], &program_id);
-    let owner_ata = get_ata(&agent_pubkey, &usdc);
-    let owner_sati_ata = get_ata(&agent_pubkey, &agent_mint);
+    let owner_ata = get_ata(&agent_pubkey, &usdc, &spl_token_program());
+    let owner_sati_ata = get_ata(&agent_pubkey, &agent_mint, &token_2022_program());
 
     let treasury = treasury_pubkey();
-    let treasury_ata = get_ata(&treasury, &usdc);
+    let treasury_ata = get_ata(&treasury, &usdc, &spl_token_program());
 
     let recent_blockhash = rpc.get_latest_blockhash().await?;
 
@@ -285,8 +276,8 @@ pub async fn pay_lease_onchain(
     let agent_pubkey = Pubkey::new_from_array(identity.verifying_key.to_bytes());
 
     let (lease_pda, _) = Pubkey::find_program_address(&[b"lease", &identity.agent_id], &program_id);
-    let owner_ata = get_ata(&agent_pubkey, &usdc);
-    let treasury_ata = get_ata(&treasury, &usdc);
+    let owner_ata = get_ata(&agent_pubkey, &usdc, &spl_token_program());
+    let treasury_ata = get_ata(&treasury, &usdc, &spl_token_program());
 
     let recent_blockhash = rpc.get_latest_blockhash().await?;
 
@@ -403,7 +394,7 @@ fn build_init_lease_ix(
             AccountMeta::new(*lease_account, false),
             AccountMeta::new(*treasury_usdc, false),
             AccountMeta::new_readonly(*treasury, false),
-            AccountMeta::new_readonly(SATI_PROGRAM_ID.parse().expect("valid SATI program ID"), false), // sati_token_program
+            AccountMeta::new_readonly(token_2022_program(), false), // sati_token_program (Token-2022)
             AccountMeta::new_readonly(*usdc_mint, false),
             AccountMeta::new_readonly(spl_token_program(), false),
             AccountMeta::new_readonly(associated_token_program(), false),

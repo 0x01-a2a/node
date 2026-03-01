@@ -405,7 +405,7 @@ pub struct LockStake<'info> {
         associated_token::mint      = usdc_mint,
         associated_token::authority = owner,
     )]
-    pub owner_usdc: Account<'info, TokenAccount>,
+    pub owner_usdc: Box<Account<'info, TokenAccount>>,
 
     /// Stake state PDA. seeds = ["stake", agent_mint]
     #[account(
@@ -415,7 +415,7 @@ pub struct LockStake<'info> {
         seeds = [b"stake", args.agent_mint.as_ref()],
         bump
     )]
-    pub stake_account: Account<'info, StakeLockAccount>,
+    pub stake_account: Box<Account<'info, StakeLockAccount>>,
 
     /// Vault authority PDA — owns the vault token account.
     /// seeds = ["stake_vault", agent_mint]
@@ -433,7 +433,7 @@ pub struct LockStake<'info> {
         associated_token::mint      = usdc_mint,
         associated_token::authority = stake_vault_authority,
     )]
-    pub stake_vault: Account<'info, TokenAccount>,
+    pub stake_vault: Box<Account<'info, TokenAccount>>,
 
     /// The agent's SATI NFT mint (Token-2022).
     pub agent_mint_account: InterfaceAccount<'info, MintInterface>,
@@ -445,7 +445,7 @@ pub struct LockStake<'info> {
         token::token_program = sati_token_program,
         constraint = owner_sati_token.amount == 1 @ StakeLockError::NotOwner,
     )]
-    pub owner_sati_token: InterfaceAccount<'info, TokenAccountInterface>,
+    pub owner_sati_token: Box<InterfaceAccount<'info, TokenAccountInterface>>,
 
     /// Token program for SATI NFTs (Token-2022).
     pub sati_token_program: Interface<'info, TokenInterface>,
@@ -528,7 +528,7 @@ pub struct SlashInactive<'info> {
         associated_token::mint      = usdc_mint,
         associated_token::authority = caller,
     )]
-    pub caller_usdc: Account<'info, TokenAccount>,
+    pub caller_usdc: Box<Account<'info, TokenAccount>>,
 
     /// Stake account for the inactive agent.
     #[account(
@@ -536,7 +536,7 @@ pub struct SlashInactive<'info> {
         seeds = [b"stake", stake_account.agent_mint.as_ref()],
         bump  = stake_account.bump,
     )]
-    pub stake_account: Account<'info, StakeLockAccount>,
+    pub stake_account: Box<Account<'info, StakeLockAccount>>,
 
     /// CHECK: PDA authority for vault ATA.
     #[account(
@@ -551,7 +551,7 @@ pub struct SlashInactive<'info> {
         associated_token::mint      = usdc_mint,
         associated_token::authority = stake_vault_authority,
     )]
-    pub stake_vault: Account<'info, TokenAccount>,
+    pub stake_vault: Box<Account<'info, TokenAccount>>,
 
     /// AgentBatchRegistry PDA from BehaviorLog — may be uninitialized.
     /// PDA seeds = ["agent_registry", agent_mint] under BehaviorLog program.

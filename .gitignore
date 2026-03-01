@@ -21,6 +21,8 @@ sdk/*.tsbuildinfo
 *.key
 *.pem
 *.json.bak
+my-phantom-key.key
+zerox1-identity.key
 
 # Deploy — generated secrets and runtime config
 deploy/gcp/.secrets
@@ -42,3 +44,8 @@ Thumbs.db
 *.log
 logs/
 zerox1-epoch-*.cbor
+
+# Testing/Local development
+.gemini/
+.agents/
+/tmp/

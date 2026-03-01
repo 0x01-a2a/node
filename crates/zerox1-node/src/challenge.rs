@@ -23,52 +23,33 @@ use crate::{identity::AgentIdentity, kora::KoraClient, lease::get_ata, stake_loc
 // Constants
 // ============================================================================
 
-/// Challenge program ID (doc 5, §10.4).
-const CHALLENGE_PROGRAM_ID_STR: &str = "7FoisCiS1gyUx7osQkCLk4A1zNKGq37yHpVhL2BFgk1Y";
-
-const BEHAVIOR_LOG_PROGRAM_ID_STR: &str = "35DAMPQVu6wsmMEGv67URFAGgyauEYD73egd74uiX1sM";
-/// USDC mainnet mint.
-const USDC_MINT_STR: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-/// SPL Token program.
-const SPL_TOKEN_PROGRAM_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-/// Associated Token Program.
-const ASSOCIATED_TOKEN_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bJo";
-/// Treasury pubkey (receives forfeited stake).
-pub const TREASURY_PUBKEY_STR: &str = "qw4hzfV7UUXTrNh3hiS9Q8KSPMXWUusNoyFKLvtcMMX";
+use crate::constants;
 
 /// 10 USDC challenge stake (6 decimal places).
 pub const CHALLENGE_STAKE_USDC: u64 = 10_000_000;
 
 fn challenge_program_id() -> Pubkey {
-    CHALLENGE_PROGRAM_ID_STR
-        .parse()
-        .expect("valid challenge program ID")
+    constants::challenge_program_id()
 }
 
 fn behavior_log_program_id() -> Pubkey {
-    BEHAVIOR_LOG_PROGRAM_ID_STR
-        .parse()
-        .expect("valid behavior-log program ID")
+    constants::behavior_log_program_id()
 }
 
 fn treasury_pubkey() -> Pubkey {
-    TREASURY_PUBKEY_STR.parse().expect("valid treasury pubkey")
+    constants::treasury_pubkey()
 }
 
 fn usdc_mint() -> Pubkey {
-    USDC_MINT_STR.parse().expect("valid USDC mint")
+    constants::usdc_mint()
 }
 
 fn spl_token_program() -> Pubkey {
-    SPL_TOKEN_PROGRAM_STR
-        .parse()
-        .expect("valid SPL token program ID")
+    constants::spl_token_program_id()
 }
 
 fn associated_token_program() -> Pubkey {
-    ASSOCIATED_TOKEN_PROGRAM_STR
-        .parse()
-        .expect("valid ATA program ID")
+    constants::associated_token_program_id()
 }
 
 // ============================================================================
@@ -140,8 +121,8 @@ pub async fn submit_challenge_onchain(
     let batch_key = batch_pda(&args.target_agent_id, args.epoch_number);
     let challenge_key = challenge_pda(&batch_key, &challenger_pubkey);
     let (vault_auth, _) = vault_authority_pda(&challenge_key);
-    let vault_ata = get_ata(&vault_auth, &usdc);
-    let challenger_ata = get_ata(&challenger_pubkey, &usdc);
+    let vault_ata = get_ata(&vault_auth, &usdc, &spl_token_program());
+    let challenger_ata = get_ata(&challenger_pubkey, &usdc, &spl_token_program());
 
     let recent_blockhash = rpc.get_latest_blockhash().await?;
 
@@ -256,17 +237,17 @@ pub async fn resolve_challenge_onchain(
     let batch_key = batch_pda(&target_agent_id, epoch_number);
     let challenge_key = challenge_pda(&batch_key, challenger);
     let (vault_auth, _) = vault_authority_pda(&challenge_key);
-    let vault_ata = get_ata(&vault_auth, &usdc);
-    let challenger_ata = get_ata(challenger, &usdc);
+    let vault_ata = get_ata(&vault_auth, &usdc, &spl_token_program());
+    let challenger_ata = get_ata(challenger, &usdc, &spl_token_program());
 
-    let stake_program = stake_lock_program_id();
+    let stake_program = constants::stake_lock_program_id();
     let (slash_auth, _) = Pubkey::find_program_address(&[b"slash_authority"], &program_id);
     let stake_account = crate::stake_lock::stake_pda(&target_agent_id);
     let stake_vault_auth = crate::stake_lock::vault_authority_pda(&target_agent_id);
-    let stake_vault = get_ata(&stake_vault_auth, &usdc);
+    let stake_vault = get_ata(&stake_vault_auth, &usdc, &spl_token_program());
 
     let treasury = treasury_pubkey();
-    let treasury_ata = get_ata(&treasury, &usdc);
+    let treasury_ata = get_ata(&treasury, &usdc, &spl_token_program());
 
     let recent_blockhash = rpc.get_latest_blockhash().await?;
 
@@ -452,7 +433,7 @@ fn build_resolve_challenge_ix(
             AccountMeta::new_readonly(*slash_authority, false),
             AccountMeta::new_readonly(*stake_program, false),
             AccountMeta::new(*stake_account, false),
-            AccountMeta::new(*stake_vault_authority, false),
+            AccountMeta::new_readonly(*stake_vault_authority, false),
             AccountMeta::new(*stake_vault, false),
             AccountMeta::new_readonly(*usdc, false),
             AccountMeta::new_readonly(spl_token_program(), false),

@@ -34,14 +34,14 @@ const SPL_TOKEN_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const SPL_ATA_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1brs";
 
 // AgentBatchRegistry raw layout (under BehaviorLog).
-// 8 (disc) + 32 (agent_id) + 8 (next_epoch) + 1 (bump) = 49 bytes
-const REGISTRY_NEXT_EPOCH_OFFSET: usize = 40;
-const REGISTRY_MIN_LEN: usize = 49;
+// 8 (disc) + 1 (version) + 32 (agent_id) + 8 (next_epoch) + 1 (bump) = 50 bytes
+const REGISTRY_NEXT_EPOCH_OFFSET: usize = 41;
+const REGISTRY_MIN_LEN: usize = 50;
 
-// StakeLockAccount: inactive_slashed bool is the last byte at offset 99
-// Layout: 8+32+32+8+8+1+8+1+1+1 = 100 bytes
-const STAKE_INACTIVE_SLASHED_OFFSET: usize = 99;
-const STAKE_ACCOUNT_MIN_LEN: usize = 100;
+// StakeLockAccount: inactive_slashed bool is the last byte at offset 100
+// Layout: 8+1+32+32+8+8+1+8+1+1+1 = 101 bytes
+const STAKE_INACTIVE_SLASHED_OFFSET: usize = 100;
+const STAKE_ACCOUNT_MIN_LEN: usize = 101;
 
 // Protocol constants (must match stake-lock program)
 const GENESIS_TIMESTAMP: i64 = 1_750_000_000;
@@ -123,10 +123,10 @@ pub async fn check_and_slash_inactive(
 
         // Bounty goes to this node's USDC ATA.
         let node_pubkey = solana_sdk::pubkey::Pubkey::from(identity.verifying_key.to_bytes());
-        let caller_ata = get_ata(&node_pubkey, usdc_mint);
+        let caller_ata = get_ata(&node_pubkey, usdc_mint, &spl_token_program());
 
         // Derive vault ATA (source of slash funds).
-        let vault_ata = get_ata(&vault_authority_pda, usdc_mint);
+        let vault_ata = get_ata(&vault_authority_pda, usdc_mint, &spl_token_program());
 
         if let Err(e) = submit_slash_inactive(
             rpc,

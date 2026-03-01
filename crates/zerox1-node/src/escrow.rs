@@ -20,38 +20,26 @@ use crate::lease::get_ata;
 // Constants
 // ============================================================================
 
-/// Escrow program ID — placeholder until mainnet deploy.
-const ESCROW_PROGRAM_ID_STR: &str = "Es69yGQ7XnwhHjoj3TRv5oigUsQzCvbRYGXJTFcJrT9F";
-
-const USDC_MINT_STR: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-const SPL_TOKEN_PROGRAM_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-const ASSOCIATED_TOKEN_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bJo";
-const TREASURY_PUBKEY_STR: &str = "qw4hzfV7UUXTrNh3hiS9Q8KSPMXWUusNoyFKLvtcMMX";
+use crate::constants;
 
 fn escrow_program_id() -> Pubkey {
-    ESCROW_PROGRAM_ID_STR
-        .parse()
-        .expect("valid escrow program ID")
+    constants::escrow_program_id()
 }
 
 fn usdc_mint() -> Pubkey {
-    USDC_MINT_STR.parse().expect("valid USDC mint")
+    constants::usdc_mint()
 }
 
 fn spl_token_program() -> Pubkey {
-    SPL_TOKEN_PROGRAM_STR
-        .parse()
-        .expect("valid SPL token program")
+    constants::spl_token_program_id()
 }
 
 fn associated_token_program() -> Pubkey {
-    ASSOCIATED_TOKEN_PROGRAM_STR
-        .parse()
-        .expect("valid ATA program")
+    constants::associated_token_program_id()
 }
 
 fn treasury() -> Pubkey {
-    TREASURY_PUBKEY_STR.parse().expect("valid treasury pubkey")
+    constants::treasury_pubkey()
 }
 
 // ============================================================================
@@ -109,8 +97,8 @@ pub async fn lock_payment_onchain(
 
     let (escrow_key, _) = escrow_pda(&requester_pubkey, &provider_pubkey, &conversation_id);
     let (vault_auth, _) = vault_authority_pda(&escrow_key);
-    let vault_ata = get_ata(&vault_auth, &usdc);
-    let requester_ata = get_ata(&requester_pubkey, &usdc);
+    let vault_ata = get_ata(&vault_auth, &usdc, &spl_token_program());
+    let requester_ata = get_ata(&requester_pubkey, &usdc, &spl_token_program());
 
     let ix = build_lock_payment_ix(
         &requester_pubkey,
@@ -170,14 +158,15 @@ pub async fn approve_payment_onchain(
 
     let (escrow_key, _) = escrow_pda(&requester_pubkey, &provider_pubkey, &conversation_id);
     let (vault_auth, _) = vault_authority_pda(&escrow_key);
-    let vault_ata = get_ata(&vault_auth, &usdc);
-    let provider_ata = get_ata(&provider_pubkey, &usdc);
-    let treasury_ata = get_ata(&treasury_key, &usdc);
-    let notary_ata = get_ata(&notary_pubkey, &usdc);
+    let vault_ata = get_ata(&vault_auth, &usdc, &spl_token_program());
+    let provider_ata = get_ata(&provider_pubkey, &usdc, &spl_token_program());
+    let treasury_ata = get_ata(&treasury_key, &usdc, &spl_token_program());
+    let notary_ata = get_ata(&notary_pubkey, &usdc, &spl_token_program());
 
     let ix = build_approve_payment_ix(ApprovePaymentAccounts {
         approver: &approver_pubkey,
         escrow_key: &escrow_key,
+        requester_key: &requester_pubkey,
         vault_auth: &vault_auth,
         vault_ata: &vault_ata,
         provider_ata: &provider_ata,
@@ -224,6 +213,7 @@ pub struct LockPaymentAccounts<'a> {
 pub struct ApprovePaymentAccounts<'a> {
     pub approver: &'a Pubkey,
     pub escrow_key: &'a Pubkey,
+    pub requester_key: &'a Pubkey,
     pub vault_auth: &'a Pubkey,
     pub vault_ata: &'a Pubkey,
     pub provider_ata: &'a Pubkey,
@@ -286,13 +276,14 @@ fn build_approve_payment_ix(accs: ApprovePaymentAccounts) -> Instruction {
     // Account order must match ApprovePayment<'info> struct field order.
     let accounts = vec![
         AccountMeta::new_readonly(*accs.approver, true), // approver (signer)
-        AccountMeta::new(*accs.escrow_key, false),       // escrow_account (writable)
+        AccountMeta::new(*accs.escrow_key, false),       // escrow_account (writable, close=requester)
+        AccountMeta::new(*accs.requester_key, false),    // requester (writable, target for close)
         AccountMeta::new_readonly(*accs.vault_auth, false), // escrow_vault_authority
         AccountMeta::new(*accs.vault_ata, false),        // escrow_vault (writable)
         AccountMeta::new(*accs.provider_ata, false),     // provider_usdc (writable)
         AccountMeta::new(*accs.treasury_ata, false),     // treasury_usdc (writable)
         AccountMeta::new_readonly(*accs.treasury_key, false), // treasury
-        AccountMeta::new(*accs.notary_ata, false), // notary_usdc (writable; skip when notary_fee=0)
+        AccountMeta::new(*accs.notary_ata, false), // notary_usdc (writable)
         AccountMeta::new_readonly(*accs.usdc, false), // usdc_mint
         AccountMeta::new_readonly(spl_token_program(), false), // token_program
     ];

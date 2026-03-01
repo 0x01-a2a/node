@@ -364,7 +364,7 @@ fn verify_inclusion(entry: &[u8], proof: &[[u8; 32]], leaf_index: u64, root: [u8
     for sibling in proof {
         let mut combined = [0u8; 65];
         combined[0] = MERKLE_INTERNAL_DOMAIN;
-        if idx % 2 == 0 {
+        if idx.is_multiple_of(2) {
             combined[1..33].copy_from_slice(&current);
             combined[33..65].copy_from_slice(sibling);
         } else {

@@ -29,13 +29,10 @@ use zerox1_protocol::batch::BehaviorBatch;
 
 use crate::{identity::AgentIdentity, kora::KoraClient};
 
-/// BehaviorLog program ID on devnet (doc 5, §10.2).
-const BEHAVIOR_LOG_PROGRAM_ID_STR: &str = "35DAMPQVu6wsmMEGv67URFAGgyauEYD73egd74uiX1sM";
+use crate::constants;
 
 fn behavior_log_program_id() -> Pubkey {
-    BEHAVIOR_LOG_PROGRAM_ID_STR
-        .parse()
-        .expect("static program ID is valid base58")
+    constants::behavior_log_program_id()
 }
 
 // ============================================================================
@@ -57,12 +54,12 @@ pub async fn submit_batch_onchain(
     epoch_number: u64,
     kora: Option<&KoraClient>,
 ) -> anyhow::Result<()> {
-    // 1. Serialize batch and compute hash.
-    let batch_cbor = batch.to_cbor()?;
+    // 1. Compute batch hash.
     let batch_hash = batch.batch_hash()?;
 
-    // 2. Sign the CBOR with the agent's Ed25519 key.
-    let dalek_sig: ed25519_dalek::Signature = identity.signing_key.sign(&batch_cbor);
+    // 2. Sign the batch_hash with the agent's Ed25519 key.
+    // Doc 5 §9 step 6: The signed message is the 32-byte keccak256(CBOR).
+    let dalek_sig: ed25519_dalek::Signature = identity.signing_key.sign(&batch_hash);
     let sig_bytes: [u8; 64] = dalek_sig.to_bytes();
     let vk_bytes: [u8; 32] = identity.verifying_key.to_bytes();
 
@@ -76,7 +73,8 @@ pub async fn submit_batch_onchain(
         Pubkey::find_program_address(&[b"agent_registry", &identity.agent_id], &program_id);
 
     // 4. Build instructions.
-    let verify_ix = build_ed25519_verify_ix(&vk_bytes, &sig_bytes, &batch_cbor);
+    // We verify the signature over the batch_hash (32 bytes).
+    let verify_ix = build_ed25519_verify_ix(&vk_bytes, &sig_bytes, &batch_hash);
 
     let recent_blockhash = rpc.get_latest_blockhash().await?;
 

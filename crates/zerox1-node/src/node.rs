@@ -265,6 +265,9 @@ impl Zx01Node {
             }
         }
 
+        // ── Auto-onboard: stake + lease ───────────────────────────────────────
+        self.ensure_stake_and_lease().await;
+
         // ── Startup lease check ───────────────────────────────────────────────
         // Verify our own agent's lease before joining the mesh.
         self.check_own_lease().await?;
@@ -378,6 +381,55 @@ impl Zx01Node {
     // ========================================================================
     // Own lease management
     // ========================================================================
+
+    /// Ensure this agent has both a stake lock and an initialized lease.
+    /// Called once at startup before check_own_lease().
+    /// In dev mode, skip entirely.
+    async fn ensure_stake_and_lease(&mut self) {
+        if self.dev_mode {
+            tracing::debug!("Dev mode — skipping auto-onboard.");
+            return;
+        }
+
+        // GAP-1: Auto-stake if no stake account exists.
+        match crate::stake_lock::stake_exists(&self.rpc, &self.identity.agent_id).await {
+            Ok(false) => {
+                tracing::info!(
+                    "No stake account found — auto-staking {} USDC...",
+                    crate::stake_lock::MIN_STAKE_USDC as f64 / 1_000_000.0
+                );
+                if let Err(e) = crate::stake_lock::lock_stake_onchain(
+                    &self.rpc,
+                    &self.identity,
+                    self.kora.as_ref(),
+                )
+                .await
+                {
+                    tracing::warn!("Auto-stake failed: {e}. Agent may not pass peer verification.");
+                }
+            }
+            Ok(true) => tracing::debug!("Stake account exists."),
+            Err(e) => tracing::warn!("Stake check failed: {e}. Continuing optimistically."),
+        }
+
+        // GAP-2: Auto-init lease if no lease account exists.
+        match crate::lease::get_lease_status(&self.rpc, &self.identity.agent_id).await {
+            Ok(None) => {
+                tracing::info!("No lease account found — auto-initializing lease...");
+                if let Err(e) = crate::lease::init_lease_onchain(
+                    &self.rpc,
+                    &self.identity,
+                    self.kora.as_ref(),
+                )
+                .await
+                {
+                    tracing::warn!("Auto-init lease failed: {e}. Agent may be rejected by peers.");
+                }
+            }
+            Ok(Some(_)) => {} // Lease exists — check_own_lease() will handle renewal
+            Err(e) => tracing::warn!("Lease status check failed: {e}. Continuing optimistically."),
+        }
+    }
 
     /// Check this agent's own lease on startup.
     ///
@@ -1337,6 +1389,16 @@ impl Zx01Node {
     // ========================================================================
 
     async fn handle_outbound(&mut self, swarm: &mut Swarm<Zx01Behaviour>, req: OutboundRequest) {
+        // Save bid value before payload is moved into build_envelope (needed for GAP-3 escrow lock).
+        let accept_bid_value: Option<u64> = if req.msg_type == MsgType::Accept
+            && req.payload.len() >= BID_VALUE_LEN
+        {
+            let v = i128::from_le_bytes(req.payload[..BID_VALUE_LEN].try_into().unwrap());
+            if v > 0 { Some(v as u64) } else { None }
+        } else {
+            None
+        };
+
         let env = self.build_envelope(
             req.msg_type,
             req.recipient,
@@ -1439,6 +1501,36 @@ impl Zx01Node {
                 // This populates batch.verifier_ids, making hv (GAP-04) non-None.
                 if req.msg_type == MsgType::Accept {
                     self.try_assign_notary(swarm, req.conversation_id);
+
+                    // GAP-3: Lock escrow funds now that we (requester) have accepted the bid.
+                    if let Some(amount) = accept_bid_value {
+                        let rpc_url = self.config.rpc_url.clone();
+                        let sk_bytes = self.identity.signing_key.to_bytes();
+                        let vk_bytes = self.identity.verifying_key.to_bytes();
+                        let provider_bytes = req.recipient;
+                        let conv_id = req.conversation_id;
+                        // 10% notary fee, 1000 slot timeout; notary assigned via try_assign_notary.
+                        let notary_fee = amount / 10;
+                        let timeout_slots = 1000_u64;
+                        tokio::spawn(async move {
+                            use solana_rpc_client::nonblocking::rpc_client::RpcClient as SolanaRpc;
+                            if let Err(e) = crate::escrow::lock_payment_onchain(
+                                &SolanaRpc::new(rpc_url),
+                                sk_bytes,
+                                vk_bytes,
+                                provider_bytes,
+                                conv_id,
+                                amount,
+                                notary_fee,
+                                None,
+                                timeout_slots,
+                            )
+                            .await
+                            {
+                                tracing::warn!("Escrow lock_payment failed: {e}");
+                            }
+                        });
+                    }
                 }
             }
             Err(e) => tracing::warn!("Outbound send failed: {e}"),

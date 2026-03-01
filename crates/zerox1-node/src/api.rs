@@ -373,7 +373,18 @@ pub async fn serve(state: ApiState, addr: SocketAddr) {
         .route("/hosted/register",        post(hosted_register))
         .route("/hosted/send",            post(hosted_send))
         .route("/ws/hosted/inbox",        get(ws_hosted_inbox_handler))
-        .layer(tower_http::cors::CorsLayer::permissive())
+        .layer(
+            // INFO-2: Local API — only allow loopback origins (zeroclaw, React Native).
+            tower_http::cors::CorsLayer::new()
+                .allow_origin([
+                    "http://127.0.0.1".parse::<axum::http::HeaderValue>()
+                        .expect("hardcoded CORS origin '127.0.0.1' failed to parse"),
+                    "http://localhost".parse::<axum::http::HeaderValue>()
+                        .expect("hardcoded CORS origin 'localhost' failed to parse"),
+                ])
+                .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+                .allow_headers(tower_http::cors::Any),
+        )
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(addr)
@@ -393,8 +404,22 @@ pub async fn serve(state: ApiState, addr: SocketAddr) {
 
 async fn ws_events_handler(
     ws:           WebSocketUpgrade,
+    headers:      HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
     State(state): State<ApiState>,
 ) -> impl IntoResponse {
+    if let Some(ref secret) = state.0.api_secret {
+        let provided = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .or_else(|| params.get("token").map(|s| s.as_str()))
+            .unwrap_or("");
+        
+        if !ct_eq(provided, secret.as_str()) {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+    }
     ws.on_upgrade(|socket| ws_events_task(socket, state))
 }
 
@@ -570,8 +595,22 @@ async fn send_envelope(
 
 async fn ws_inbox_handler(
     ws:           WebSocketUpgrade,
+    headers:      HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
     State(state): State<ApiState>,
 ) -> impl IntoResponse {
+    if let Some(ref secret) = state.0.api_secret {
+        let provided = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .or_else(|| params.get("token").map(|s| s.as_str()))
+            .unwrap_or("");
+        
+        if !ct_eq(provided, secret.as_str()) {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+    }
     ws.on_upgrade(|socket| ws_inbox_task(socket, state))
 }
 

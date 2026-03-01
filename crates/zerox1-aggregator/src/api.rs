@@ -123,7 +123,7 @@ pub async fn ingest_envelope(
             ).into_response();
         }
     }
-    tracing::info!("Ingest: received event: {:?}", event);
+    tracing::debug!("Ingest: received event: {:?}", event);
     if let Some(activity) = state.store.ingest(event) {
         let _ = state.activity_tx.send(activity);
     }
@@ -628,32 +628,85 @@ pub struct PostPendingBody {
     pub payload:  String,
 }
 
+/// Helper to verify Ed25519 signature from headers.
+fn verify_request_signature(
+    agent_id:  &str,
+    signature: &str,
+    body:      &[u8],
+) -> Result<(), StatusCode> {
+    use ed25519_dalek::{VerifyingKey, Signature, Verifier};
+
+    let pubkey_bytes = hex::decode(agent_id)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if pubkey_bytes.len() != 32 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let pubkey = VerifyingKey::from_bytes(&pubkey_bytes.try_into().unwrap())
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let sig_bytes = hex::decode(signature)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let sig = Signature::from_slice(&sig_bytes)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    pubkey.verify(body, &sig)
+        .map_err(|_| StatusCode::UNAUTHORIZED)
+}
+
 /// POST /fcm/register
 ///
 /// Register or update the FCM device token for an agent.
 /// Called by a mobile node on startup to enable push-wake behaviour.
+/// Requirement: Must be signed by the agent (HIGH-7).
 pub async fn fcm_register(
     State(state): State<AppState>,
-    Json(body):   Json<FcmRegisterBody>,
-) -> impl IntoResponse {
+    headers:      axum::http::HeaderMap,
+    body_bytes:   axum::body::Bytes,
+) -> Result<impl IntoResponse, StatusCode> {
+    let sig      = headers.get("X-Signature").and_then(|h| h.to_str().ok());
+    let body_str = std::str::from_utf8(&body_bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let body: FcmRegisterBody = serde_json::from_str(body_str).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    if let Some(s) = sig {
+        if let Err(e) = verify_request_signature(&body.agent_id, s, &body_bytes) {
+            return Err(e);
+        }
+    } else {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
     if body.agent_id.len() != 64 || !body.agent_id.chars().all(|c| c.is_ascii_hexdigit()) {
-        return StatusCode::BAD_REQUEST.into_response();
+        return Err(StatusCode::BAD_REQUEST);
     }
     state.store.store_fcm_token(body.agent_id.clone(), body.fcm_token);
     tracing::debug!("FCM token registered for agent {}", body.agent_id);
-    StatusCode::OK.into_response()
+    Ok(StatusCode::OK)
 }
 
 /// POST /fcm/sleep
 ///
 /// Mark an agent as sleeping (offline) or awake.
 /// Called by a mobile node before backgrounding and on wakeup.
+/// Requirement: Must be signed by the agent (HIGH-7).
 pub async fn fcm_sleep(
     State(state): State<AppState>,
-    Json(body):   Json<FcmSleepBody>,
-) -> impl IntoResponse {
+    headers:      axum::http::HeaderMap,
+    body_bytes:   axum::body::Bytes,
+) -> Result<impl IntoResponse, StatusCode> {
+    let sig      = headers.get("X-Signature").and_then(|h| h.to_str().ok());
+    let body_str = std::str::from_utf8(&body_bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let body: FcmSleepBody = serde_json::from_str(body_str).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    if let Some(s) = sig {
+        if let Err(e) = verify_request_signature(&body.agent_id, s, &body_bytes) {
+            return Err(e);
+        }
+    } else {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
     if body.agent_id.len() != 64 || !body.agent_id.chars().all(|c| c.is_ascii_hexdigit()) {
-        return StatusCode::BAD_REQUEST.into_response();
+        return Err(StatusCode::BAD_REQUEST);
     }
     state.store.set_sleeping(&body.agent_id, body.sleeping);
     tracing::debug!(
@@ -661,7 +714,7 @@ pub async fn fcm_sleep(
         body.agent_id,
         if body.sleeping { "sleeping" } else { "awake" }
     );
-    StatusCode::OK.into_response()
+    Ok(StatusCode::OK)
 }
 
 /// GET /agents/{agent_id}/sleeping
@@ -680,14 +733,27 @@ pub async fn get_sleep_status(
 /// Drain and return all pending messages held for this agent.
 /// The queue is cleared on retrieval — messages are delivered exactly once.
 /// Returns 200 with an empty array when there are no pending messages.
+/// Requirement: Only the agent (pubkey) can drain its own queue (HIGH-8).
 pub async fn get_pending(
     State(state):   State<AppState>,
     Path(agent_id): Path<String>,
-) -> impl IntoResponse {
+    headers:        axum::http::HeaderMap,
+) -> Result<impl IntoResponse, StatusCode> {
+    let sig = headers.get("X-Signature").and_then(|h| h.to_str().ok());
+    if let Some(s) = sig {
+        // For GET, we sign the path "agents/{agent_id}/pending"
+        let msg = format!("agents/{agent_id}/pending");
+        if let Err(e) = verify_request_signature(&agent_id, s, msg.as_bytes()) {
+            return Err(e);
+        }
+    } else {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
     let msgs = state.store.drain_pending(&agent_id);
     // Mark the agent as awake now that it is polling.
     state.store.set_sleeping(&agent_id, false);
-    Json(msgs)
+    Ok(Json(msgs))
 }
 
 /// POST /agents/{agent_id}/pending
@@ -695,13 +761,28 @@ pub async fn get_pending(
 /// Submit a message to be held for a sleeping agent.
 /// If the agent has a registered FCM token and is sleeping, a push
 /// notification is fired immediately to wake the app.
+/// Requirement: Validate that the sender (body.from) matches the signature (HIGH-9).
 pub async fn post_pending(
     State(state):   State<AppState>,
     Path(agent_id): Path<String>,
-    Json(body):     Json<PostPendingBody>,
-) -> impl IntoResponse {
+    headers:        axum::http::HeaderMap,
+    body_bytes:     axum::body::Bytes,
+) -> Result<impl IntoResponse, StatusCode> {
+    let sig      = headers.get("X-Signature").and_then(|h| h.to_str().ok());
+    let body_str = std::str::from_utf8(&body_bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let body: PostPendingBody = serde_json::from_str(body_str).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    if let Some(s) = sig {
+        // HIGH-9: Signature MUST match the sender (body.from)
+        if let Err(e) = verify_request_signature(&body.from, s, &body_bytes) {
+            return Err(e);
+        }
+    } else {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
     if agent_id.len() != 64 || !agent_id.chars().all(|c| c.is_ascii_hexdigit()) {
-        return StatusCode::BAD_REQUEST.into_response();
+        return Err(StatusCode::BAD_REQUEST);
     }
 
     let ts = std::time::SystemTime::now()
@@ -735,7 +816,7 @@ pub async fn post_pending(
         }
     }
 
-    StatusCode::ACCEPTED.into_response()
+    Ok(StatusCode::ACCEPTED.into_response())
 }
 
 // ============================================================================
@@ -766,12 +847,28 @@ pub async fn get_activity(
 /// GET /ws/activity
 ///
 /// WebSocket endpoint that streams activity events in real-time.
-/// Sends JSON-encoded ActivityEvent frames as they are ingested.
+/// Requires `Authorization: Bearer <secret>` or `token=<secret>` query param (HIGH-10).
 pub async fn ws_activity(
     ws:           WebSocketUpgrade,
+    headers:      axum::http::HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
     State(state): State<AppState>,
-) -> Response {
-    ws.on_upgrade(move |mut socket| async move {
+) -> Result<impl IntoResponse, StatusCode> {
+    // Authenticate.
+    if let Some(ref secret) = state.ingest_secret {
+        let provided = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .or_else(|| params.get("token").map(|s: &String| s.as_str()))
+            .unwrap_or("");
+        
+        if !ct_eq(provided, secret) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    Ok(ws.on_upgrade(move |mut socket| async move {
         use axum::extract::ws::Message;
         let mut rx = state.activity_tx.subscribe();
         loop {
@@ -790,7 +887,7 @@ pub async fn ws_activity(
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
-    })
+    }))
 }
 
 /// Fire a Firebase Cloud Messaging push to wake a sleeping node.
@@ -919,33 +1016,48 @@ fn is_rfc1918_172(host: &str) -> bool {
 /// Requires `Authorization: Bearer <hosting_secret>` when `--hosting-secret`
 /// is configured on the aggregator. Validates `api_url` format to prevent
 /// SSRF vectors from reaching mobile clients.
+/// POST /hosting/register — called by host nodes on startup and every 60s.
+///
+/// Requirement: Must be signed by the node (HIGH-6).
 pub async fn post_hosting_register(
     State(state): State<AppState>,
     headers:      HeaderMap,
-    Json(body):   Json<HostingRegisterBody>,
-) -> impl IntoResponse {
-    // Bearer token auth (if configured).
+    body_bytes:   axum::body::Bytes,
+) -> Result<impl IntoResponse, StatusCode> {
+    // When --hosting-secret is configured, require Bearer token as a first gate.
+    // This prevents nodes that don't know the secret from registering at all,
+    // even if they hold a valid signing key.
     if let Some(ref secret) = state.hosting_secret {
+        let expected = format!("Bearer {secret}");
         let provided = headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "))
             .unwrap_or("");
-        if !ct_eq(provided, secret) {
-            return StatusCode::UNAUTHORIZED.into_response();
+        if !ct_eq(provided, &expected) {
+            return Err(StatusCode::UNAUTHORIZED);
         }
     }
 
+    let sig      = headers.get("X-Signature").and_then(|h| h.to_str().ok());
+    let body_str = std::str::from_utf8(&body_bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let body: HostingRegisterBody = serde_json::from_str(body_str).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    if let Some(s) = sig {
+        // HIGH-6: Signature MUST match the node_id
+        if let Err(e) = verify_request_signature(&body.node_id, s, &body_bytes) {
+            return Err(e);
+        }
+    } else {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
     // Validate api_url before persisting.
-    if let Err(e) = validate_host_api_url(&body.api_url) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": e })),
-        ).into_response();
+    if let Err(_e) = validate_host_api_url(&body.api_url) {
+        return Err(StatusCode::BAD_REQUEST);
     }
 
     state.store.register_hosting_node(&body.node_id, &body.name, body.fee_bps, &body.api_url);
-    StatusCode::OK.into_response()
+    Ok(StatusCode::OK)
 }
 
 /// GET /hosting/nodes — returns hosting nodes seen within the last 120 seconds.
@@ -1105,7 +1217,7 @@ pub async fn post_blob(
     };
 
     // Clock skew check (+/- 30s)
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     if timestamp < now.saturating_sub(60) || timestamp > now + 60 {
         return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "timestamp out of sync" }))).into_response();
     }

@@ -11,6 +11,7 @@
 //!   4. Aggregator sends FCM push → phone wakes, app re-establishes relay reservation
 //!   5. Sender retries the bilateral PROPOSE → normal protocol flow resumes
 
+use ed25519_dalek::{Signer, SigningKey};
 use serde::Deserialize;
 
 // ============================================================================
@@ -39,22 +40,26 @@ pub struct PendingMessage {
 
 /// Register this node's FCM device token with the aggregator.
 ///
-/// Called on startup when `--fcm-token` is set. The aggregator stores the
-/// token so it can send a push notification when this agent receives a PROPOSE
-/// while sleeping.
+/// Requirement: Must be signed by the agent (HIGH-7).
 pub async fn register_fcm_token(
     aggregator_url: &str,
     agent_id_hex:   &str,
     fcm_token:      &str,
+    signing_key:    &SigningKey,
     client:         &reqwest::Client,
 ) -> anyhow::Result<()> {
     let url  = format!("{aggregator_url}/fcm/register");
+    let body = serde_json::json!({
+        "agent_id":  agent_id_hex,
+        "fcm_token": fcm_token,
+    });
+    let body_bytes = serde_json::to_vec(&body)?;
+    let signature  = signing_key.sign(&body_bytes);
+
     let resp = client
         .post(&url)
-        .json(&serde_json::json!({
-            "agent_id":  agent_id_hex,
-            "fcm_token": fcm_token,
-        }))
+        .header("X-Signature", hex::encode(signature.to_bytes()))
+        .body(body_bytes)
         .send()
         .await?;
     if !resp.status().is_success() {
@@ -69,21 +74,26 @@ pub async fn register_fcm_token(
 
 /// Notify the aggregator that this agent is sleeping (offline) or awake.
 ///
-/// Call with `sleeping = false` on startup (after relay reservation) and
-/// `sleeping = true` before graceful shutdown or backgrounding.
+/// Requirement: Must be signed by the agent (HIGH-7).
 pub async fn set_sleep_mode(
     aggregator_url: &str,
     agent_id_hex:   &str,
     sleeping:       bool,
+    signing_key:    &SigningKey,
     client:         &reqwest::Client,
 ) -> anyhow::Result<()> {
     let url  = format!("{aggregator_url}/fcm/sleep");
+    let body = serde_json::json!({
+        "agent_id": agent_id_hex,
+        "sleeping": sleeping,
+    });
+    let body_bytes = serde_json::to_vec(&body)?;
+    let signature  = signing_key.sign(&body_bytes);
+
     let resp = client
         .post(&url)
-        .json(&serde_json::json!({
-            "agent_id": agent_id_hex,
-            "sleeping": sleeping,
-        }))
+        .header("X-Signature", hex::encode(signature.to_bytes()))
+        .body(body_bytes)
         .send()
         .await?;
     if !resp.status().is_success() {
@@ -98,16 +108,24 @@ pub async fn set_sleep_mode(
 
 /// Pull messages the aggregator held while this agent was sleeping.
 ///
-/// Called on startup before entering the main event loop. Returns an empty
-/// vec if there are no pending messages or if the aggregator returns 404.
-/// The aggregator drains the queue on pull (messages are delivered once).
+/// Requirement: Must be signed by the agent (HIGH-8).
 pub async fn pull_pending_messages(
     aggregator_url: &str,
     agent_id_hex:   &str,
+    signing_key:    &SigningKey,
     client:         &reqwest::Client,
 ) -> anyhow::Result<Vec<PendingMessage>> {
     let url  = format!("{aggregator_url}/agents/{agent_id_hex}/pending");
-    let resp = client.get(&url).send().await?;
+    
+    // For GET /pending, we sign the path "agents/{id}/pending"
+    let msg = format!("agents/{agent_id_hex}/pending");
+    let signature = signing_key.sign(msg.as_bytes());
+
+    let resp = client
+        .get(&url)
+        .header("X-Signature", hex::encode(signature.to_bytes()))
+        .send()
+        .await?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(vec![]);
     }

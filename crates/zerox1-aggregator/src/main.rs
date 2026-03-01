@@ -167,7 +167,13 @@ async fn main() -> anyhow::Result<()> {
         // buffer a multi-GB payload before rejecting it.  Max tier is 10 MB.
         .route("/blobs",       post(api::post_blob).layer(DefaultBodyLimit::max(10 * 1024 * 1024)))
         .route("/blobs/{cid}", get(api::get_blob))
-        .layer(tower_http::cors::CorsLayer::permissive())
+        // INFO-2: Allow any origin but deny credential sharing (no allow_credentials).
+        .layer(
+            tower_http::cors::CorsLayer::new()
+                .allow_origin(tower_http::cors::Any)
+                .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
+                .allow_headers([axum::http::header::AUTHORIZATION, axum::http::header::CONTENT_TYPE]),
+        )
         .with_state(state);
 
     tracing::info!("zerox1-aggregator listening on {}", config.listen);

@@ -4,7 +4,7 @@ use std::time::Duration;
 use base64::Engine as _;
 
 use zerox1_sati_client::client::SatiClient;
-use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{VerifyingKey, Signer};
 use futures::StreamExt;
 use libp2p::{
     autonat, dcutr, gossipsub, identify, kad, mdns, relay, request_response,
@@ -211,6 +211,7 @@ impl Zx01Node {
                 let name             = self.config.agent_name.clone();
                 let fee_bps          = self.config.hosting_fee_bps;
                 let aggregator_secret = self.config.aggregator_secret.clone();
+                let signing_key       = self.identity.signing_key.clone();
 
                 tokio::spawn(async move {
                     let client = reqwest::Client::new();
@@ -221,9 +222,20 @@ impl Zx01Node {
                             "fee_bps": fee_bps,
                             "api_url": public_url,
                         });
+                        let body_bytes = match serde_json::to_vec(&body) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                tracing::error!("Failed to serialize hosting heartbeat body: {e}");
+                                break;
+                            }
+                        };
+                        let signature = signing_key.sign(&body_bytes);
+
                         let mut req = client
                             .post(format!("{agg_url}/hosting/register"))
-                            .json(&body);
+                            .header("X-Signature", hex::encode(signature.to_bytes()))
+                            .body(body_bytes);
+                        
                         if let Some(ref secret) = aggregator_secret {
                             req = req.header("Authorization", format!("Bearer {secret}"));
                         }
@@ -257,7 +269,7 @@ impl Zx01Node {
             let agent_id_hex = hex::encode(self.identity.agent_id);
             // Register token.
             if let Err(e) = push_notary::register_fcm_token(
-                agg_url, &agent_id_hex, fcm_token, &self.http_client,
+                agg_url, &agent_id_hex, fcm_token, &self.identity.signing_key, &self.http_client,
             ).await {
                 tracing::warn!("FCM token registration failed: {e}");
             } else {
@@ -265,15 +277,15 @@ impl Zx01Node {
             }
             // Mark this node as awake.
             if let Err(e) = push_notary::set_sleep_mode(
-                agg_url, &agent_id_hex, false, &self.http_client,
+                agg_url, &agent_id_hex, false, &self.identity.signing_key, &self.http_client,
             ).await {
                 tracing::warn!("FCM wake notification failed: {e}");
             }
             // Pull any messages held while sleeping.
             match push_notary::pull_pending_messages(
-                agg_url, &agent_id_hex, &self.http_client,
+                agg_url, &agent_id_hex, &self.identity.signing_key, &self.http_client,
             ).await {
-                Ok(msgs) if !msgs.is_empty() => {
+                Ok::<Vec<push_notary::PendingMessage>, _>(msgs) if !msgs.is_empty() => {
                     tracing::info!(
                         "{} pending message(s) retrieved from aggregator while sleeping.",
                         msgs.len()

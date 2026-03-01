@@ -50,7 +50,7 @@ pub mod behavior_log {
         require!(ed25519_ix.data.len() >= 16 + 32 + 64, BehaviorLogError::InvalidSignatureInstruction);
         require!(ed25519_ix.data[0] == 1, BehaviorLogError::InvalidSignatureInstruction); // num_signatures = 1
 
-        let pubkey_offset = u16::from_le_bytes([ed25519_ix.data[4], ed25519_ix.data[5]]) as usize;
+        let pubkey_offset = u16::from_le_bytes([ed25519_ix.data[6], ed25519_ix.data[7]]) as usize;
         let msg_offset = u16::from_le_bytes([ed25519_ix.data[10], ed25519_ix.data[11]]) as usize;
         let msg_size = u16::from_le_bytes([ed25519_ix.data[12], ed25519_ix.data[13]]) as usize;
 

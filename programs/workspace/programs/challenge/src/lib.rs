@@ -14,12 +14,12 @@ const BEHAVIOR_LOG_PROGRAM_ID: Pubkey =
     pubkey!("35DAMPQVu6wsmMEGv67URFAGgyauEYD73egd74uiX1sM");
 
 /// Byte offset of `submitted_slot` in BatchAccount raw data.
-/// Layout: 8 disc + 32 agent_id + 8 epoch_number + 32 log_merkle_root + 32 batch_hash = 112
-const BATCH_SUBMITTED_SLOT_OFFSET: usize = 112;
+/// Layout: 8 disc + 1 version + 32 agent_id + 8 epoch_number + 32 log_merkle_root + 32 batch_hash = 113
+const BATCH_SUBMITTED_SLOT_OFFSET: usize = 113;
 
 /// Byte offset of `log_merkle_root` in BatchAccount raw data.
-/// Layout: 8 disc + 32 agent_id + 8 epoch_number = 48
-const BATCH_MERKLE_ROOT_OFFSET: usize = 48;
+/// Layout: 8 disc + 1 version + 32 agent_id + 8 epoch_number = 49
+const BATCH_MERKLE_ROOT_OFFSET: usize = 49;
 
 // ============================================================================
 // Challenge Program (doc 5, §10.4)

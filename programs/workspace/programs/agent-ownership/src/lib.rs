@@ -1,4 +1,8 @@
 use anchor_lang::prelude::*;
+use anchor_spl::token_interface::{
+    Mint as MintInterface, TokenAccount as TokenAccountInterface,
+    TokenInterface,
+};
 
 declare_id!("9GYVDTgc345bBa2k7j9a15aJSeKjzC75eyxdL3XCYVS9");
 
@@ -42,6 +46,14 @@ pub mod agent_ownership {
         );
 
         let invite = &mut ctx.accounts.claim_invitation;
+
+        if invite.proposed_at != 0 {
+            require!(
+                ctx.accounts.proposer.key() == invite.proposer,
+                OwnershipError::NotOriginalProposer,
+            );
+        }
+
         invite.version        = 1;
         invite.agent_id       = agent_id;
         invite.proposed_owner = proposed_owner;
@@ -94,9 +106,22 @@ pub mod agent_ownership {
 #[derive(Accounts)]
 #[instruction(agent_id: [u8; 32], proposed_owner: Pubkey)]
 pub struct ProposeOwnership<'info> {
-    /// Proposer — typically the agent's operator wallet or the agent itself.
+    /// Proposer — must hold the SATI NFT for this agent.
     #[account(mut)]
     pub proposer: Signer<'info>,
+
+    /// The agent's SATI NFT mint — must match agent_id (Token-2022).
+    #[account(constraint = agent_mint.key().to_bytes() == agent_id @ OwnershipError::AgentMintMismatch)]
+    pub agent_mint: InterfaceAccount<'info, MintInterface>,
+
+    /// Proposer's token account proving SATI NFT ownership.
+    #[account(
+        token::mint = agent_mint,
+        token::authority = proposer,
+        token::token_program = sati_token_program,
+        constraint = proposer_sati_token.amount == 1 @ OwnershipError::NotAgentHolder,
+    )]
+    pub proposer_sati_token: InterfaceAccount<'info, TokenAccountInterface>,
 
     /// Claim invitation PDA — created on first call, overwritten on re-proposal.
     /// PDA: seeds = ["claim_invite", agent_id]
@@ -114,6 +139,9 @@ pub struct ProposeOwnership<'info> {
     /// CHECK: only used for lamport check — no reads or writes.
     #[account(seeds = [b"agent_owner", agent_id.as_ref()], bump)]
     pub agent_ownership_check: UncheckedAccount<'info>,
+
+    /// Token program for SATI NFTs (Token-2022).
+    pub sati_token_program: Interface<'info, TokenInterface>,
 
     pub system_program: Program<'info, System>,
 }
@@ -221,4 +249,10 @@ pub enum OwnershipError {
     NotProposedOwner,
     #[msg("This agent already has an accepted owner — ownership is immutable")]
     AlreadyClaimed,
+    #[msg("Only the original proposer may overwrite a pending proposal")]
+    NotOriginalProposer,
+    #[msg("agent_mint does not match the provided agent_id")]
+    AgentMintMismatch,
+    #[msg("Proposer must hold the SATI NFT for this agent")]
+    NotAgentHolder,
 }

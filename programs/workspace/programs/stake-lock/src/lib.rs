@@ -2,6 +2,10 @@ use anchor_lang::prelude::*;
 use anchor_spl::{
     associated_token::AssociatedToken,
     token::{self, CloseAccount, Mint, Token, TokenAccount, Transfer},
+    token_interface::{
+        Mint as MintInterface, TokenAccount as TokenAccountInterface,
+        TokenInterface,
+    },
 };
 
 declare_id!("Dvf1qPzzvW1BkSUogRMaAvxZpXrmeTqYutTCBKpzHB1A");
@@ -33,6 +37,11 @@ const LEASE_PROGRAM_ID: Pubkey =
 /// BehaviorLog program ID — AgentBatchRegistry accounts must be owned by this.
 const BEHAVIOR_LOG_PROGRAM_ID: Pubkey =
     pubkey!("35DAMPQVu6wsmMEGv67URFAGgyauEYD73egd74uiX1sM");
+/// USDC mint address — constrain all token operations to real USDC.
+#[cfg(feature = "devnet")]
+pub const USDC_MINT: Pubkey = pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
+#[cfg(not(feature = "devnet"))]
+pub const USDC_MINT: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 /// 0x01 genesis Unix timestamp. Update to actual mainnet launch timestamp before deploy.
 pub const GENESIS_TIMESTAMP: i64 = 1_750_000_000;
 /// Epoch length in seconds (1 day).
@@ -40,9 +49,9 @@ pub const EPOCH_SECONDS: u64 = 86_400;
 /// Grace period in epochs before an inactive agent can be slashed.
 pub const INACTIVITY_GRACE_EPOCHS: u64 = 3;
 /// AgentBatchRegistry raw byte offset for the next_epoch field.
-/// Layout: 8 (disc) + 32 (agent_id) = 40 → next_epoch (u64)
-const REGISTRY_NEXT_EPOCH_OFFSET: usize = 40;
-const REGISTRY_MIN_LEN: usize = 49; // 8 + 32 + 8 + 1
+/// Layout: 8 (disc) + 1 (version) + 32 (agent_id) = 41 → next_epoch (u64)
+const REGISTRY_NEXT_EPOCH_OFFSET: usize = 41;
+const REGISTRY_MIN_LEN: usize = 50; // 8 + 1 + 32 + 8 + 1
 
 #[program]
 pub mod stake_lock {
@@ -416,17 +425,22 @@ pub struct LockStake<'info> {
     )]
     pub stake_vault: Account<'info, TokenAccount>,
 
-    /// The agent's SATI NFT mint.
-    pub agent_mint_account: Account<'info, Mint>,
+    /// The agent's SATI NFT mint (Token-2022).
+    pub agent_mint_account: InterfaceAccount<'info, MintInterface>,
 
     /// The owner's token account for the SATI NFT, proving they own the agent.
     #[account(
         token::mint = agent_mint_account,
         token::authority = owner,
+        token::token_program = sati_token_program,
         constraint = owner_sati_token.amount == 1 @ StakeLockError::NotOwner,
     )]
-    pub owner_sati_token: Account<'info, TokenAccount>,
+    pub owner_sati_token: InterfaceAccount<'info, TokenAccountInterface>,
 
+    /// Token program for SATI NFTs (Token-2022).
+    pub sati_token_program: Interface<'info, TokenInterface>,
+
+    #[account(address = USDC_MINT)]
     pub usdc_mint:                Account<'info, Mint>,
     pub token_program:            Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
@@ -487,6 +501,7 @@ pub struct ClaimStake<'info> {
     )]
     pub stake_vault: Account<'info, TokenAccount>,
 
+    #[account(address = USDC_MINT)]
     pub usdc_mint:                Account<'info, Mint>,
     pub token_program:            Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
@@ -534,6 +549,7 @@ pub struct SlashInactive<'info> {
     /// CHECK: Owner and PDA seeds verified in handler.
     pub agent_registry: UncheckedAccount<'info>,
 
+    #[account(address = USDC_MINT)]
     pub usdc_mint:                Account<'info, Mint>,
     pub token_program:            Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
@@ -577,6 +593,7 @@ pub struct TopUpStake<'info> {
     )]
     pub stake_vault: Account<'info, TokenAccount>,
 
+    #[account(address = USDC_MINT)]
     pub usdc_mint:                Account<'info, Mint>,
     pub token_program:            Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
@@ -614,6 +631,7 @@ pub struct Slash<'info> {
     #[account(mut)]
     pub recipient_usdc: Account<'info, TokenAccount>,
 
+    #[account(address = USDC_MINT)]
     pub usdc_mint:     Account<'info, Mint>,
     pub token_program: Program<'info, Token>,
 }

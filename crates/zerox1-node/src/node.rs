@@ -749,30 +749,39 @@ impl Zx01Node {
             }
         };
 
-        // BEACON: extract + register VK before VK lookup (self-authenticating).
-        // The SATI check is deferred to after signature validation so we don't
-        // pay RPC latency on malformed / unvalidatable BEACONs.
+        // Resolve VK and validate envelope.
+        // BEACONs are self-authenticating: extract VK from payload, validate
+        // FIRST, then store only if the signature is valid. This prevents
+        // attackers from overwriting a legitimate agent's VK with a forged one.
+        let last_nonce = self.peer_states.last_nonce(&env.sender);
         if env.msg_type == MsgType::Beacon {
-            self.process_beacon_payload(&env, source_peer);
-        }
-
-        // VK gate — only BEACON can register a VK; no fallback.
-        let vk = match self.peer_states.verifying_key(&env.sender) {
-            Some(vk) => *vk,
-            None => {
-                tracing::debug!(
-                    "No VK for {} — dropping (BEACON required first)",
-                    hex::encode(env.sender),
-                );
+            let vk = match self.extract_beacon_vk(&env) {
+                Some(vk) => vk,
+                None => {
+                    tracing::debug!("BEACON from {source_peer}: invalid VK in payload");
+                    return;
+                }
+            };
+            if let Err(e) = env.validate(last_nonce, &vk, now_micros()) {
+                tracing::debug!("BEACON validation failed from {source_peer}: {e}");
                 return;
             }
-        };
-
-        // Validate envelope signature + nonce + timestamp.
-        let last_nonce = self.peer_states.last_nonce(&env.sender);
-        if let Err(e) = env.validate(last_nonce, &vk, now_micros()) {
-            tracing::debug!("Envelope validation failed from {source_peer}: {e}");
-            return;
+            self.process_beacon_payload(&env, source_peer);
+        } else {
+            let vk = match self.peer_states.verifying_key(&env.sender) {
+                Some(vk) => *vk,
+                None => {
+                    tracing::debug!(
+                        "No VK for {} — dropping (BEACON required first)",
+                        hex::encode(env.sender),
+                    );
+                    return;
+                }
+            };
+            if let Err(e) = env.validate(last_nonce, &vk, now_micros()) {
+                tracing::debug!("Envelope validation failed from {source_peer}: {e}");
+                return;
+            }
         }
 
         // SATI + Lease gates — checked after signature validation.
@@ -1127,6 +1136,16 @@ impl Zx01Node {
     // ========================================================================
     // BEACON processing
     // ========================================================================
+
+    fn extract_beacon_vk(&self, env: &Envelope) -> Option<VerifyingKey> {
+        let p = &env.payload;
+        if p.len() < BEACON_NAME_OFFSET {
+            return None;
+        }
+        let mut vk_bytes = [0u8; 32];
+        vk_bytes.copy_from_slice(&p[BEACON_VK_OFFSET..BEACON_VK_OFFSET + 32]);
+        VerifyingKey::from_bytes(&vk_bytes).ok()
+    }
 
     fn process_beacon_payload(&mut self, env: &Envelope, source_peer: PeerId) {
         let p = &env.payload;

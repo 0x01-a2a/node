@@ -2,6 +2,10 @@ use anchor_lang::prelude::*;
 use anchor_spl::{
     associated_token::AssociatedToken,
     token::{self, Mint, Token, TokenAccount, Transfer},
+    token_interface::{
+        Mint as MintInterface, TokenAccount as TokenAccountInterface,
+        TokenInterface,
+    },
 };
 
 declare_id!("5P8uXqavnQFGXbHKE3tQDezh41D7ZutHsT2jY6gZ3C3x");
@@ -45,13 +49,14 @@ pub mod lease {
             LeaseError::MintMismatch
         );
 
+        let current_epoch = clock.unix_timestamp as u64 / EPOCH_LENGTH_SECS;
+
         lease.version            = 1;
         lease.agent_id           = args.agent_id;
         lease.owner              = ctx.accounts.owner.key();
-        // Pre-paid for 1 epoch (covers the current day).
-        lease.paid_through_epoch = 1;
+        lease.paid_through_epoch = current_epoch + 1;
         lease.last_paid_slot     = clock.slot;
-        lease.current_epoch      = 0;
+        lease.current_epoch      = current_epoch;
         lease.in_grace_period    = false;
         lease.deactivated        = false;
         lease.bump               = ctx.bumps.lease_account;
@@ -181,16 +186,17 @@ pub struct InitLease<'info> {
     )]
     pub owner_usdc: Account<'info, TokenAccount>,
 
-    /// The agent's SATI NFT mint.
-    pub agent_mint: Account<'info, Mint>,
+    /// The agent's SATI NFT mint (Token-2022).
+    pub agent_mint: InterfaceAccount<'info, MintInterface>,
 
     /// The owner's token account for the SATI NFT, proving they own the agent.
     #[account(
         token::mint = agent_mint,
         token::authority = owner,
+        token::token_program = sati_token_program,
         constraint = owner_sati_token.amount == 1 @ LeaseError::NotOwner,
     )]
-    pub owner_sati_token: Account<'info, TokenAccount>,
+    pub owner_sati_token: InterfaceAccount<'info, TokenAccountInterface>,
 
     /// Lease state PDA. seeds = ["lease", agent_id]
     #[account(
@@ -214,6 +220,9 @@ pub struct InitLease<'info> {
     /// CHECK: verified via associated_token constraint on treasury_usdc.
     #[account(address = TREASURY_PUBKEY)]
     pub treasury: UncheckedAccount<'info>,
+
+    /// Token program for SATI NFTs (Token-2022).
+    pub sati_token_program: Interface<'info, TokenInterface>,
 
     pub usdc_mint:                Account<'info, Mint>,
     pub token_program:            Program<'info, Token>,

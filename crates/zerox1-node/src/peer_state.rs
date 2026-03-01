@@ -54,12 +54,15 @@ impl PeerStateMap {
     }
 
     fn entry(&mut self, agent_id: [u8; 32]) -> &mut PeerEntry {
-        // Evict one entry if at capacity before inserting a new key.
         if !self.by_agent_id.contains_key(&agent_id)
             && self.by_agent_id.len() >= MAX_PEERS
         {
-            if let Some(&evict_key) = self.by_agent_id.keys().next() {
-                // Also clean up the reverse-lookup map.
+            // Prefer evicting peers that are NOT SATI-confirmed to protect
+            // established agents from being displaced by BEACON floods.
+            let evict_key = self.by_agent_id.iter()
+                .find(|(_, e)| !matches!(e.sati_status, Some(true)))
+                .map(|(k, _)| *k);
+            if let Some(evict_key) = evict_key {
                 if let Some(pid) = self.by_agent_id[&evict_key].peer_id {
                     self.peer_to_agent.remove(&pid);
                 }

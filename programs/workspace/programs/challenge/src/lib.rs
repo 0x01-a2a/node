@@ -9,6 +9,9 @@ declare_id!("7FoisCiS1gyUx7osQkCLk4A1zNKGq37yHpVhL2BFgk1Y");
 /// Protocol treasury wallet — receives forfeited challenge stake.
 pub const TREASURY_PUBKEY: Pubkey = pubkey!("qw4hzfV7UUXTrNh3hiS9Q8KSPMXWUusNoyFKLvtcMMX");
 /// Canonical USDC mint enforced by challenge flows.
+#[cfg(feature = "devnet")]
+pub const USDC_MINT: Pubkey = pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
+#[cfg(not(feature = "devnet"))]
 pub const USDC_MINT: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
 /// Behavior-log program ID — batch accounts must be owned by this program.
@@ -361,7 +364,7 @@ fn verify_inclusion(entry: &[u8], proof: &[[u8; 32]], leaf_index: u64, root: [u8
     for sibling in proof {
         let mut combined = [0u8; 65];
         combined[0] = MERKLE_INTERNAL_DOMAIN;
-        if idx.is_multiple_of(2) {
+        if idx % 2 == 0 {
             combined[1..33].copy_from_slice(&current);
             combined[33..65].copy_from_slice(sibling);
         } else {

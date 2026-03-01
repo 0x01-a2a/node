@@ -21,7 +21,7 @@ use crate::lease::get_ata;
 // ============================================================================
 
 /// Escrow program ID — placeholder until mainnet deploy.
-const ESCROW_PROGRAM_ID_STR: &str = "Cb7QtsWXEWZSNcdLMyd4xhiDX9XbQrjwh87g4T9WhqUR";
+const ESCROW_PROGRAM_ID_STR: &str = "Es69yGQ7XnwhHjoj3TRv5oigUsQzCvbRYGXJTFcJrT9F";
 
 const USDC_MINT_STR: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const SPL_TOKEN_PROGRAM_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
@@ -91,8 +91,63 @@ fn anchor_discriminator(name: &str) -> [u8; 8] {
 // Public entry point
 // ============================================================================
 
+/// Call escrow `lock_payment` to initiate a payment to a provider.
+pub async fn lock_payment_onchain(
+    rpc: &RpcClient,
+    sk_bytes: [u8; 32],
+    vk_bytes: [u8; 32],
+    provider_bytes: [u8; 32],
+    conversation_id: [u8; 16],
+    amount: u64,
+    notary_fee: u64,
+    notary_pubkey: Option<Pubkey>,
+    timeout_slots: u64,
+) -> anyhow::Result<()> {
+    let usdc = usdc_mint();
+    let requester_pubkey = Pubkey::new_from_array(vk_bytes);
+    let provider_pubkey = Pubkey::new_from_array(provider_bytes);
+
+    let (escrow_key, _) = escrow_pda(&requester_pubkey, &provider_pubkey, &conversation_id);
+    let (vault_auth, _) = vault_authority_pda(&escrow_key);
+    let vault_ata = get_ata(&vault_auth, &usdc);
+    let requester_ata = get_ata(&requester_pubkey, &usdc);
+
+    let ix = build_lock_payment_ix(
+        &requester_pubkey,
+        &provider_pubkey,
+        &escrow_key,
+        &vault_auth,
+        &vault_ata,
+        &requester_ata,
+        &usdc,
+        conversation_id,
+        amount,
+        notary_fee,
+        notary_pubkey,
+        timeout_slots,
+    );
+
+    let mut kp_bytes = [0u8; 64];
+    kp_bytes[..32].copy_from_slice(&sk_bytes);
+    kp_bytes[32..].copy_from_slice(&vk_bytes);
+    let kp = Keypair::try_from(kp_bytes.as_slice()).map_err(|e| anyhow::anyhow!("keypair: {e}"))?;
+
+    let blockhash = rpc.get_latest_blockhash().await?;
+    let msg = Message::new_with_blockhash(&[ix], Some(&requester_pubkey), &blockhash);
+    let mut tx = Transaction::new_unsigned(msg);
+    tx.sign(&[&kp], blockhash);
+
+    let sig = rpc.send_and_confirm_transaction(&tx).await?;
+    tracing::info!(
+        "Escrow lock_payment confirmed: {} (provider={}, amount={})",
+        sig,
+        hex::encode(provider_bytes),
+        amount
+    );
+    Ok(())
+}
+
 /// Call escrow `approve_payment` on behalf of the notary/requester.
-///
 /// `notary_bytes` — agent_id of the notary (needed to derive their USDC ATA for the fee).
 ///   Pass the same bytes as `vk_bytes` (self) when the requester is approving and no
 ///   separate notary was designated.
@@ -156,6 +211,16 @@ pub async fn approve_payment_onchain(
 // Instruction builder
 // ============================================================================
 
+pub struct LockPaymentAccounts<'a> {
+    pub requester: &'a Pubkey,
+    pub provider: &'a Pubkey,
+    pub escrow_account: &'a Pubkey,
+    pub escrow_vault_authority: &'a Pubkey,
+    pub escrow_vault: &'a Pubkey,
+    pub requester_usdc: &'a Pubkey,
+    pub usdc_mint: &'a Pubkey,
+}
+
 pub struct ApprovePaymentAccounts<'a> {
     pub approver: &'a Pubkey,
     pub escrow_key: &'a Pubkey,
@@ -166,6 +231,55 @@ pub struct ApprovePaymentAccounts<'a> {
     pub treasury_key: &'a Pubkey,
     pub notary_ata: &'a Pubkey,
     pub usdc: &'a Pubkey,
+}
+
+fn build_lock_payment_ix(
+    requester: &Pubkey,
+    provider: &Pubkey,
+    escrow_account: &Pubkey,
+    vault_auth: &Pubkey,
+    vault_ata: &Pubkey,
+    requester_ata: &Pubkey,
+    usdc: &Pubkey,
+    conversation_id: [u8; 16],
+    amount: u64,
+    notary_fee: u64,
+    notary: Option<Pubkey>,
+    timeout_slots: u64,
+) -> Instruction {
+    let mut data = Vec::with_capacity(8 + 16 + 8 + 8 + 33 + 8);
+    data.extend_from_slice(&anchor_discriminator("lock_payment"));
+    data.extend_from_slice(&conversation_id);
+    data.extend_from_slice(&amount.to_le_bytes());
+    data.extend_from_slice(&notary_fee.to_le_bytes());
+    // Option<Pubkey> Borsh encoding: [1, 32 bytes] or [0]
+    match notary {
+        Some(pk) => {
+            data.push(1);
+            data.extend_from_slice(pk.as_ref());
+        }
+        None => {
+            data.push(0);
+        }
+    }
+    data.extend_from_slice(&timeout_slots.to_le_bytes());
+
+    Instruction {
+        program_id: escrow_program_id(),
+        accounts: vec![
+            AccountMeta::new(*requester, true),
+            AccountMeta::new_readonly(*provider, false),
+            AccountMeta::new(*escrow_account, false),
+            AccountMeta::new_readonly(*vault_auth, false),
+            AccountMeta::new(*vault_ata, false),
+            AccountMeta::new(*requester_ata, false),
+            AccountMeta::new_readonly(*usdc, false),
+            AccountMeta::new_readonly(spl_token_program(), false),
+            AccountMeta::new_readonly(associated_token_program(), false),
+            AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+        ],
+        data,
+    }
 }
 
 fn build_approve_payment_ix(accs: ApprovePaymentAccounts) -> Instruction {

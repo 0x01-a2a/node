@@ -17,7 +17,7 @@ use solana_sdk::{
     transaction::Transaction,
 };
 
-use crate::{identity::AgentIdentity, kora::KoraClient, lease::get_ata};
+use crate::{identity::AgentIdentity, kora::KoraClient, lease::get_ata, stake_lock::stake_lock_program_id};
 
 // ============================================================================
 // Constants
@@ -259,6 +259,12 @@ pub async fn resolve_challenge_onchain(
     let vault_ata = get_ata(&vault_auth, &usdc);
     let challenger_ata = get_ata(challenger, &usdc);
 
+    let stake_program = stake_lock_program_id();
+    let (slash_auth, _) = Pubkey::find_program_address(&[b"slash_authority"], &program_id);
+    let stake_account = crate::stake_lock::stake_pda(&target_agent_id);
+    let stake_vault_auth = crate::stake_lock::vault_authority_pda(&target_agent_id);
+    let stake_vault = get_ata(&stake_vault_auth, &usdc);
+
     let treasury = treasury_pubkey();
     let treasury_ata = get_ata(&treasury, &usdc);
 
@@ -280,6 +286,11 @@ pub async fn resolve_challenge_onchain(
         &treasury_ata,
         &treasury,
         &batch_key,
+        &slash_auth,
+        &stake_program,
+        &stake_account,
+        &stake_vault_auth,
+        &stake_vault,
         &usdc,
         &program_id,
         contradicting_entry,
@@ -400,6 +411,11 @@ fn build_resolve_challenge_ix(
     treasury_usdc: &Pubkey,
     treasury: &Pubkey,
     batch_account: &Pubkey,
+    slash_authority: &Pubkey,
+    stake_program: &Pubkey,
+    stake_account: &Pubkey,
+    stake_vault_authority: &Pubkey,
+    stake_vault: &Pubkey,
     usdc: &Pubkey,
     program_id: &Pubkey,
     contradicting_entry: Vec<u8>,
@@ -433,6 +449,11 @@ fn build_resolve_challenge_ix(
             AccountMeta::new(*treasury_usdc, false),
             AccountMeta::new_readonly(*treasury, false),
             AccountMeta::new_readonly(*batch_account, false),
+            AccountMeta::new_readonly(*slash_authority, false),
+            AccountMeta::new_readonly(*stake_program, false),
+            AccountMeta::new(*stake_account, false),
+            AccountMeta::new(*stake_vault_authority, false),
+            AccountMeta::new(*stake_vault, false),
             AccountMeta::new_readonly(*usdc, false),
             AccountMeta::new_readonly(spl_token_program(), false),
         ],

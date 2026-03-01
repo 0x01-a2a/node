@@ -38,8 +38,8 @@ const BEHAVIOR_LOG_PROGRAM_ID: Pubkey = pubkey!("35DAMPQVu6wsmMEGv67URFAGgyauEYD
 pub const USDC_MINT: Pubkey = pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
 #[cfg(not(feature = "devnet"))]
 pub const USDC_MINT: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
-/// 0x01 genesis Unix timestamp. Update to actual mainnet launch timestamp before deploy.
-pub const GENESIS_TIMESTAMP: i64 = 1_750_000_000;
+/// 0x01 genesis Unix timestamp. March 1, 2026.
+pub const GENESIS_TIMESTAMP: i64 = 1_772_313_600;
 /// Epoch length in seconds (1 day).
 pub const EPOCH_SECONDS: u64 = 86_400;
 /// Grace period in epochs before an inactive agent can be slashed.
@@ -112,10 +112,10 @@ pub mod stake_lock {
         // Read `deactivated` from LeaseAccount raw bytes.
         // Layout (after 8-byte discriminator): agent_id[32], owner[32],
         // paid_through_epoch[8], last_paid_slot[8], current_epoch[8],
-        // in_grace_period[1], deactivated[1]  => offset 97.
+        // in_grace_period[1], deactivated[1]  => offset 98.
         {
             let data = ctx.accounts.lease_account.try_borrow_data()?;
-            require!(data.len() > 97, StakeLockError::AgentNotDeactivated);
+            require!(data.len() > 98, StakeLockError::AgentNotDeactivated);
             require!(
                 ctx.accounts.lease_account.owner == &LEASE_PROGRAM_ID,
                 StakeLockError::InvalidLeaseAccount
@@ -130,7 +130,7 @@ pub mod stake_lock {
                 StakeLockError::InvalidLeaseAccount
             );
 
-            let deactivated = data[97] != 0;
+            let deactivated = data[98] != 0;
             require!(deactivated, StakeLockError::AgentNotDeactivated);
         }
         require!(!stake.in_unlock_queue, StakeLockError::AlreadyQueued);

@@ -19,7 +19,7 @@ use solana_sdk::{
 };
 
 use crate::{identity::AgentIdentity, kora::KoraClient};
-use zerox1_protocol::constants::GRACE_PERIOD_EPOCHS;
+use zerox1_protocol::constants::{GRACE_PERIOD_EPOCHS, SATI_PROGRAM_ID};
 
 // ============================================================================
 // Constants
@@ -32,7 +32,7 @@ pub const USDC_MINT_STR: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 /// SPL Token program.
 const SPL_TOKEN_PROGRAM_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 /// Associated Token Program.
-const ASSOCIATED_TOKEN_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+const ASSOCIATED_TOKEN_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bJo";
 /// Treasury.
 pub const TREASURY_PUBKEY_STR: &str = "qw4hzfV7UUXTrNh3hiS9Q8KSPMXWUusNoyFKLvtcMMX";
 
@@ -403,6 +403,7 @@ fn build_init_lease_ix(
             AccountMeta::new(*lease_account, false),
             AccountMeta::new(*treasury_usdc, false),
             AccountMeta::new_readonly(*treasury, false),
+            AccountMeta::new_readonly(SATI_PROGRAM_ID.parse().expect("valid SATI program ID"), false), // sati_token_program
             AccountMeta::new_readonly(*usdc_mint, false),
             AccountMeta::new_readonly(spl_token_program(), false),
             AccountMeta::new_readonly(associated_token_program(), false),

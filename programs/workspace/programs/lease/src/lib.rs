@@ -13,6 +13,9 @@ declare_id!("5P8uXqavnQFGXbHKE3tQDezh41D7ZutHsT2jY6gZ3C3x");
 /// Replace with the actual treasury pubkey before mainnet deploy.
 pub const TREASURY_PUBKEY: Pubkey = pubkey!("qw4hzfV7UUXTrNh3hiS9Q8KSPMXWUusNoyFKLvtcMMX");
 /// Canonical USDC mint enforced by all lease flows.
+#[cfg(feature = "devnet")]
+pub const USDC_MINT: Pubkey = pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
+#[cfg(not(feature = "devnet"))]
 pub const USDC_MINT: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
 // ============================================================================

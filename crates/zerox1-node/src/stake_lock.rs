@@ -18,6 +18,7 @@ use solana_sdk::{
 };
 
 use crate::{identity::AgentIdentity, kora::KoraClient, lease::get_ata};
+use zerox1_protocol::SATI_PROGRAM_ID;
 
 // ============================================================================
 // Constants
@@ -32,12 +33,12 @@ const USDC_MINT_STR: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 /// SPL Token program.
 const SPL_TOKEN_PROGRAM_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 /// Associated Token Program.
-const ASSOCIATED_TOKEN_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+const ASSOCIATED_TOKEN_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bJo";
 
 /// 10 USDC stake (6 decimal places).
 pub const MIN_STAKE_USDC: u64 = 10_000_000;
 
-fn stake_lock_program_id() -> Pubkey {
+pub fn stake_lock_program_id() -> Pubkey {
     STAKE_LOCK_PROGRAM_ID_STR
         .parse()
         .expect("valid stakelock program ID")
@@ -261,6 +262,7 @@ fn build_lock_stake_ix(
             AccountMeta::new(*stake_vault, false),
             AccountMeta::new_readonly(*agent_mint, false),
             AccountMeta::new_readonly(*owner_sati_token, false),
+            AccountMeta::new_readonly(SATI_PROGRAM_ID.parse().expect("valid SATI program ID"), false), // sati_token_program
             AccountMeta::new_readonly(*usdc_mint, false),
             AccountMeta::new_readonly(spl_token_program(), false),
             AccountMeta::new_readonly(associated_token_program(), false),

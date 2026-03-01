@@ -10,6 +10,9 @@ declare_id!("Es69yGQ7XnwhHjoj3TRv5oigUsQzCvbRYGXJTFcJrT9F");
 /// Protocol treasury — receives settlement fees.
 pub const TREASURY_PUBKEY: Pubkey = pubkey!("qw4hzfV7UUXTrNh3hiS9Q8KSPMXWUusNoyFKLvtcMMX");
 /// Canonical USDC mint enforced by escrow flows.
+#[cfg(feature = "devnet")]
+pub const USDC_MINT: Pubkey = pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
+#[cfg(not(feature = "devnet"))]
 pub const USDC_MINT: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
 /// Settlement fee in basis points (50 bps = 0.5%).

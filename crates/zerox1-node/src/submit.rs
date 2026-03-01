@@ -275,6 +275,7 @@ fn build_submit_batch_ix(
             AccountMeta::new(*payer, true),
             AccountMeta::new(*batch_pda, false),
             AccountMeta::new(*registry_pda, false),
+            AccountMeta::new_readonly(solana_sdk::sysvar::instructions::ID, false),
             AccountMeta::new_readonly(system_program_id(), false),
         ],
         data,

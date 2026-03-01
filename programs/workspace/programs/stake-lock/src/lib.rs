@@ -26,8 +26,6 @@ declare_id!("Dvf1qPzzvW1BkSUogRMaAvxZpXrmeTqYutTCBKpzHB1A");
 
 /// 10 USDC minimum stake (6 decimal places — USDC on Solana has 6 decimals).
 pub const MIN_STAKE_USDC: u64 = 10_000_000;
-/// Canonical USDC mint enforced by stake-lock flows.
-pub const USDC_MINT: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 /// ~2 days at 400ms/slot before stake can be claimed after unlock queue.
 pub const UNLOCK_DELAY_SLOTS: u64 = 432_000;
 /// Challenge program ID — only this program can call slash().

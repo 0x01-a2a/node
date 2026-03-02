@@ -18,6 +18,8 @@ const DEFAULT_BOOTSTRAP_PEERS: &[&str] = &[
     "/dns4/bootstrap-2.0x01.world/tcp/9000/p2p/12D3KooWMXSCZEjjqBnLXhT2TVWde9w6VU2cZixR6D8CxvHeKts2",
     // bootstrap-3.0x01.world (Africa South)
     "/dns4/bootstrap-3.0x01.world/tcp/9000/p2p/12D3KooWAPecZv1ipAGYAZ5bKKNHN6CXdWyLioxbNTXh3y2eBgq3",
+    // bootstrap-4.0x01.world (Asia Southeast)
+    "/dns4/bootstrap-4.0x01.world/tcp/9000/p2p/12D3KooWCegSAXiTZkCAK7CTFE9oczDRrRBBEBWd4iaHkiRxvraz",
 ];
 
 #[derive(Parser, Debug)]

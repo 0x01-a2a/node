@@ -85,7 +85,6 @@ export class GuardianNPC {
 
     // Ignore if agent has already completed the quest
     if (this.completedAgents.has(agentId)) {
-        console.log(`ℹ️  Agent ${agentId.slice(0, 8)} already completed the quest. Ignoring.`)
         return
     }
 
@@ -103,7 +102,6 @@ export class GuardianNPC {
     })
 
     // Send DISCOVER with instructions
-    // "Welcome to 0x01. To bootstrap your reputation, please send a 'Hello' greeting."
     const instructions = "Welcome to 0x01. To bootstrap your reputation, please send a 'Hello' greeting."
     
     try {
@@ -113,9 +111,8 @@ export class GuardianNPC {
         conversationId,
         payload: Buffer.from(instructions),
       })
-      console.log(`Pushed quest instructions to ${agentId.slice(0, 8)}...`)
     } catch (err) {
-      console.error(`Failed to send DISCOVER to ${agentId}:`, err)
+      console.error(`❌ Failed to send DISCOVER to ${agentId}:`, err)
       this.sessions.delete(agentId)
     }
   }
@@ -130,7 +127,7 @@ export class GuardianNPC {
     
     // Check if step is correct
     if (session.step !== 'negotiating') {
-      console.log(`❌ Unexpected PROPOSE from ${env.sender.slice(0, 8)}. Expected step: ${session.step}`)
+      console.warn(`❌ Unexpected PROPOSE from ${env.sender.slice(0, 8)}. Expected step: ${session.step}`)
       await this.rejectSession(session, 'Out of order message: Expected negotiating step')
       return
     }
@@ -138,12 +135,7 @@ export class GuardianNPC {
     // Update activity
     session.lastActivity = Date.now()
 
-    console.log(`🤝 Received PROPOSE from ${env.sender.slice(0, 8)}... Auto-accepting.`)
-
     try {
-      // Accept the proposal
-      // In a real scenario, we might parse env.payloadB64 to check terms.
-      // Here we assume it's the correct "Hello" quest proposal.
       await this.agent.send({
         msgType: 'ACCEPT',
         recipient: env.sender,
@@ -154,7 +146,7 @@ export class GuardianNPC {
       // Advance state
       session.step = 'verifying'
     } catch (err) {
-      console.error(`Failed to accept proposal from ${env.sender}:`, err)
+      console.error(`❌ Failed to accept proposal from ${env.sender}:`, err)
     }
   }
 
@@ -168,7 +160,7 @@ export class GuardianNPC {
     
     // Check if step is correct
     if (session.step !== 'verifying') {
-      console.log(`❌ Unexpected DELIVER from ${env.sender.slice(0, 8)}. Expected step: ${session.step}`)
+      console.warn(`❌ Unexpected DELIVER from ${env.sender.slice(0, 8)}. Expected step: ${session.step}`)
       await this.rejectSession(session, 'Out of order message: Expected verifying step')
       return
     }
@@ -177,13 +169,12 @@ export class GuardianNPC {
 
     // Decode payload
     const payload = Buffer.from(env.payloadB64, 'base64').toString('utf-8')
-    console.log(`📦 Received DELIVER from ${env.sender.slice(0, 8)}... Payload: "${payload}"`)
 
     if (payload.includes('Hello')) {
       console.log(`✅ Quest completed by ${env.sender.slice(0, 8)}! Sending reward...`)
       await this.rewardAgent(session)
     } else {
-      console.log(`❌ Invalid delivery from ${env.sender.slice(0, 8)}. Expected "Hello".`)
+      console.warn(`❌ Invalid delivery from ${env.sender.slice(0, 8)}. Expected "Hello".`)
       await this.rejectSession(session, 'Invalid payload: Expected "Hello"')
     }
   }
@@ -203,7 +194,7 @@ export class GuardianNPC {
         role: 'participant', // NPC acted as a participant (client) in this interaction
       })
       
-      console.log(`cw Consensus: Feedback submitted for ${session.agentId.slice(0, 8)}...`)
+      console.log(`✅ Feedback submitted for ${session.agentId.slice(0, 8)}...`)
       
       // Mark as completed
       this.completedAgents.add(session.agentId)
@@ -211,7 +202,7 @@ export class GuardianNPC {
       // Quest complete - close session
       this.sessions.delete(session.agentId)
     } catch (err) {
-      console.error(`Failed to send feedback for ${session.agentId}:`, err)
+      console.error(`❌ Failed to send feedback for ${session.agentId}:`, err)
     }
   }
 
@@ -227,7 +218,7 @@ export class GuardianNPC {
         payload: Buffer.from(reason),
       })
     } catch (err) {
-      console.error(`Failed to send REJECT to ${session.agentId}:`, err)
+      console.error(`❌ Failed to send REJECT to ${session.agentId}:`, err)
     } finally {
       this.sessions.delete(session.agentId)
     }
@@ -245,7 +236,7 @@ export class GuardianNPC {
     for (const [agentId, session] of this.sessions.entries()) {
       if (now - session.lastActivity > this.timeoutMs) {
         console.log(`⏱️  Session timed out for ${agentId.slice(0, 8)}...`)
-        this.sessions.delete(agentId)
+        this.rejectSession(session, 'Session timed out')
       }
     }
   }

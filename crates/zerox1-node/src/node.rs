@@ -126,6 +126,12 @@ pub struct Zx01Node {
     /// for each peer. Prevents flooding the aggregator with per-ping pushes.
     /// Only populated when --node-region is set.
     last_ping_push: HashMap<PeerId, std::time::Instant>,
+    /// Per-agent SATI RPC failure timestamps.
+    /// When `verify_sati_registration` returns an error (e.g. AccountNotFound on
+    /// devnet for infrastructure nodes), we record the time here and skip the
+    /// next check for 1 hour.  Without this, every BEACON from a reference node
+    /// that has no SATI mint triggers a fresh RPC call every ~30 seconds.
+    sati_rpc_failures: HashMap<[u8; 32], std::time::Instant>,
 }
 
 impl Zx01Node {
@@ -197,6 +203,7 @@ impl Zx01Node {
             bootstrap_peers,
             pending_broadcasts: Vec::new(),
             last_ping_push: HashMap::new(),
+            sati_rpc_failures: HashMap::new(),
         }
     }
 
@@ -641,9 +648,13 @@ impl Zx01Node {
                 }
             }
             Err(e) => {
-                // RPC failure: leave sati_status as None so we retry next time.
+                // RPC failure (incl. AccountNotFound for infra nodes without a
+                // SATI mint).  Record the failure time so we back off for 1 hour
+                // before retrying — avoids flooding devnet RPC and log spam.
+                self.sati_rpc_failures
+                    .insert(agent_id, std::time::Instant::now());
                 tracing::warn!(
-                    "SATI check failed for {}: {e} (will retry on next BEACON)",
+                    "SATI check failed for {}: {e} (will retry in 1 h)",
                     hex::encode(agent_id),
                 );
             }
@@ -938,7 +949,15 @@ impl Zx01Node {
         // BEACONs are exempt: they ARE the trigger for both checks.
         if env.msg_type == MsgType::Beacon {
             if self.peer_states.sati_status(&env.sender).is_none() {
-                self.verify_sati_registration(env.sender).await;
+                // Skip the RPC call if the last attempt failed within the past hour.
+                let recently_failed = self
+                    .sati_rpc_failures
+                    .get(&env.sender)
+                    .map(|t| t.elapsed().as_secs() < 3600)
+                    .unwrap_or(false);
+                if !recently_failed {
+                    self.verify_sati_registration(env.sender).await;
+                }
             }
             if self.peer_states.lease_status(&env.sender).is_none()
                 || self.peer_states.last_active_epoch(&env.sender) < self.current_epoch

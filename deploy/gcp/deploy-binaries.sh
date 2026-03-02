@@ -113,18 +113,22 @@ allow_durable_transactions = false
 allowed_programs = [
   "11111111111111111111111111111111",              # System Program
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",   # Token Program
-  "3gXhgBLsVYVQkntuVcPdiDe2gRxbSt2CGFJKriA8q9bA",  # behavior-log
-  "9g4RMQvBBVCppUc9C3Vjk2Yn3vhHzDFb8RkVm8a1WmUk",  # lease
-  "KncUkaiDtvaLJRDfXDmPXKmBYnVe6m3MKBawZsf6xsj",   # challenge
-  "CmtDveNpCXNJePa7pCLi7vCPeuNmWnfqq2L2YGiG7YD4",  # stake-lock
+  "TokenzQdBNbLqP5VEE3N7HBD3eB3FS8JqcshLxib8",     # Token-2022
+  "35DAMPQVu6wsmMEGv67URFAGgyauEYD73egd74uiX1sM",  # behavior-log
+  "5P8uXqavnQFGXbHKE3tQDezh41D7ZutHsT2jY6gZ3C3x",  # lease
+  "7FoisCiS1gyUx7osQkCLk4A1zNKGq37yHpVhL2BFgk1Y",  # challenge
+  "Dvf1qPzzvW1BkSUogRMaAvxZpXrmeTqYutTCBKpzHB1A",  # stake-lock
+  "Es69yGQ7XnwhHjoj3TRv5oigUsQzCvbRYGXJTFcJrT9F",  # escrow
 ]
 
-# Token mints allowed (USDC only)
+# Token mints allowed (USDC Devnet + Mainnet)
 allowed_tokens = [
-  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # Mainnet
+  "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU", # Devnet
 ]
 allowed_spl_paid_tokens = [
   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
 ]
 disallowed_accounts = []
 KORACFG

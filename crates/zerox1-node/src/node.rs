@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 use std::net::ToSocketAddrs;
 use std::time::Duration;
+use url::Host;
 
 use base64::Engine as _;
 
@@ -1902,7 +1903,16 @@ fn validated_aggregator_url(url: Option<String>) -> Option<String> {
         }
     };
 
-    if parsed.scheme() != "https" {
+    let is_internal = match parsed.host() {
+        Some(Host::Domain(h)) => {
+            h == "localhost" || h.ends_with(".localhost") || h.ends_with(".local")
+        }
+        Some(Host::Ipv4(ip)) => is_private_or_local_ip(IpAddr::V4(ip)),
+        Some(Host::Ipv6(ip)) => is_private_or_local_ip(IpAddr::V6(ip)),
+        None => false,
+    };
+
+    if parsed.scheme() != "https" && !is_internal {
         tracing::warn!("Ignoring non-HTTPS aggregator URL: {raw}");
         return None;
     }
@@ -1915,34 +1925,31 @@ fn validated_aggregator_url(url: Option<String>) -> Option<String> {
         }
     };
 
-    if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
-        tracing::warn!("Ignoring aggregator URL with local/private host: {raw}");
-        return None;
-    }
-
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_private_or_local_ip(ip) {
-            tracing::warn!("Ignoring aggregator URL with local/private host: {raw}");
-            return None;
-        }
-    } else {
-        let port = parsed.port_or_known_default().unwrap_or(443);
-        let addrs: Vec<_> = match (host.as_str(), port).to_socket_addrs() {
-            Ok(iter) => iter.collect(),
-            Err(e) => {
-                tracing::warn!("Ignoring aggregator URL; failed to resolve host '{host}': {e}");
+    if !is_internal {
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            if is_private_or_local_ip(ip) {
+                tracing::warn!("Ignoring aggregator URL with local/private host: {raw}");
                 return None;
             }
-        };
-        if addrs.is_empty() {
-            tracing::warn!("Ignoring aggregator URL; host '{host}' resolved to no addresses");
-            return None;
-        }
-        if addrs.iter().any(|addr| is_private_or_local_ip(addr.ip())) {
-            tracing::warn!(
-                "Ignoring aggregator URL with host resolving to local/private IPs: {raw}"
-            );
-            return None;
+        } else {
+            let port = parsed.port_or_known_default().unwrap_or(443);
+            let addrs: Vec<_> = match (host.as_str(), port).to_socket_addrs() {
+                Ok(iter) => iter.collect(),
+                Err(e) => {
+                    tracing::warn!("Ignoring aggregator URL; failed to resolve host '{host}': {e}");
+                    return None;
+                }
+            };
+            if addrs.is_empty() {
+                tracing::warn!("Ignoring aggregator URL; host '{host}' resolved to no addresses");
+                return None;
+            }
+            if addrs.iter().any(|addr| is_private_or_local_ip(addr.ip())) {
+                tracing::warn!(
+                    "Ignoring aggregator URL with host resolving to local/private IPs: {raw}"
+                );
+                return None;
+            }
         }
     }
 

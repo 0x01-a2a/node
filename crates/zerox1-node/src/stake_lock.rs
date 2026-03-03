@@ -29,7 +29,7 @@ const SPL_TOKEN_PROGRAM_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
 /// Associated Token Program.
 const ASSOCIATED_TOKEN_PROGRAM_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bJo";
 /// Token-2022 Program (used for SATI NFTs).
-const TOKEN_2022_PROGRAM_STR: &str = "TokenzQdBNbLqP5VEE3N7HBD3eB3FS8JqcshLxib8";
+const TOKEN_2022_PROGRAM_STR: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 
 /// 10 USDC stake (6 decimal places).
 pub const MIN_STAKE_USDC: u64 = 10_000_000;

@@ -37,7 +37,7 @@ pub const STAKE_LOCK_PROGRAM_ID_STR: &str = "Dvf1qPzzvW1BkSUogRMaAvxZpXrmeTqYutT
 pub const ESCROW_PROGRAM_ID_STR: &str = "Es69yGQ7XnwhHjoj3TRv5oigUsQzCvbRYGXJTFcJrT9F";
 pub const AGENT_OWNERSHIP_PROGRAM_ID_STR: &str = "9GYVDTgc345bBa2k7j9a15aJSeKjzC75eyxdL3XCYVS9";
 
-pub const TOKEN_2022_PROGRAM_ID_STR: &str = "TokenzQdBNbLqP5VEE3N7HBD3eB3FS8JqcshLxib8";
+pub const TOKEN_2022_PROGRAM_ID_STR: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 pub const SPL_TOKEN_PROGRAM_ID_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 pub const ASSOCIATED_TOKEN_PROGRAM_ID_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bJo";
 

@@ -1688,18 +1688,32 @@ impl Zx01Node {
 
         let env = self.build_envelope(MsgType::Beacon, BROADCAST_RECIPIENT, [0u8; 16], payload);
 
-        if let Err(e) = self.publish_envelope(swarm, &env) {
-            tracing::warn!("BEACON publish failed: {e}");
-        } else {
-            tracing::debug!("BEACON sent (nonce={})", self.nonce);
-            // Gossipsub does not loop published messages back to the publisher,
-            // so we push our own BEACON directly to the aggregator here.
-            self.push_to_aggregator(serde_json::json!({
-                "msg_type": "BEACON",
-                "sender":   hex::encode(self.identity.agent_id),
-                "name":     self.config.agent_name,
-                "slot":     self.current_slot,
-            }));
+        match self.publish_envelope(swarm, &env) {
+            Ok(()) => {
+                tracing::debug!("BEACON sent (nonce={})", self.nonce);
+                // Gossipsub does not loop published messages back to the publisher,
+                // so we push our own BEACON directly to the aggregator here.
+                self.push_to_aggregator(serde_json::json!({
+                    "msg_type": "BEACON",
+                    "sender":   hex::encode(self.identity.agent_id),
+                    "name":     self.config.agent_name,
+                    "slot":     self.current_slot,
+                }));
+            }
+            Err(e) if e.to_string().contains("InsufficientPeers") => {
+                // No mesh peers yet — queue exactly one BEACON so it fires the
+                // moment the first peer subscribes.  Deduplicate: if one is
+                // already queued from a previous tick, replace it with the fresh
+                // (higher-nonce) envelope so peers always see the latest state.
+                self.pending_broadcasts.retain(|e| e.msg_type != MsgType::Beacon);
+                if self.pending_broadcasts.len() < MAX_PENDING_BROADCASTS {
+                    tracing::debug!("No mesh peers — queuing BEACON for flush");
+                    self.pending_broadcasts.push(env);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("BEACON publish failed: {e}");
+            }
         }
     }
 

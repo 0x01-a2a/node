@@ -499,6 +499,11 @@ export class Zerox1Agent {
    * Returns the assigned nonce and payload hash for tracking.
    */
   async send(params: SendParams): Promise<SentConfirmation> {
+    if (!params.conversationId) {
+      throw new Error(
+        'conversationId is required. Generate one with agent.newConversationId().'
+      )
+    }
     const body = {
       msg_type: params.msgType,
       recipient: params.recipient ?? null,

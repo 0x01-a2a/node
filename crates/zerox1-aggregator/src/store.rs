@@ -2589,14 +2589,7 @@ impl ReputationStore {
                     .unwrap_or(false)
             });
         }
-        if sort_by == "recent" || sort_by == "active" {
-            agents.sort_by(|a, b| {
-                b.last_seen
-                    .cmp(&a.last_seen)
-                    .then(a.agent_id.cmp(&b.agent_id))
-            });
-        } else if sort_by == "new" {
-            // "new" — use last_seen ascending so newest-first approximates join order.
+        if sort_by == "recent" || sort_by == "active" || sort_by == "new" {
             agents.sort_by(|a, b| {
                 b.last_seen
                     .cmp(&a.last_seen)

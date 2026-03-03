@@ -40,6 +40,7 @@ use crate::{
     network::{Zx01Behaviour, Zx01BehaviourEvent},
     peer_state::PeerStateMap,
     push_notary,
+    registry_8004::Registry8004Client,
     reputation::ReputationTracker,
     submit,
 };
@@ -65,6 +66,13 @@ const MAX_ACTIVE_CONVERSATIONS: usize = 10_000;
 const MAX_NOTARY_POOL: usize = 100;
 /// Maximum broadcast envelopes queued while waiting for mesh peers.
 const MAX_PENDING_BROADCASTS: usize = 20;
+/// Maximum number of distinct peers tracked in the rate-limit table.
+/// When full, expired entries are evicted; if still full the new peer is skipped.
+const MAX_RATE_LIMITER_PEERS: usize = 10_000;
+/// Maximum number of SATI RPC failure cache entries retained.
+const MAX_SATI_FAILURE_CACHE: usize = 50_000;
+/// Maximum number of 8004 registry failure cache entries retained.
+const MAX_REG8004_FAILURE_CACHE: usize = 50_000;
 
 // ============================================================================
 // Zx01Node
@@ -132,14 +140,25 @@ pub struct Zx01Node {
     /// next check for 1 hour.  Without this, every BEACON from a reference node
     /// that has no SATI mint triggers a fresh RPC call every ~30 seconds.
     sati_rpc_failures: HashMap<[u8; 32], std::time::Instant>,
+    /// 8004 Solana Agent Registry client (primary registration gate).
+    /// Verifies peers by querying `agents(where:{owner:$base58})` against the
+    /// public GraphQL indexer — no on-chain RPC required.
+    registry8004: Registry8004Client,
+    /// Per-agent 8004 registry HTTP failure timestamps (same 1-hour backoff as SATI).
+    reg8004_failures: HashMap<[u8; 32], std::time::Instant>,
 }
 
 impl Zx01Node {
     pub fn new(
-        config: Config,
+        mut config: Config,
         identity: AgentIdentity,
         bootstrap_peers: Vec<libp2p::Multiaddr>,
     ) -> Self {
+        // If no name was configured, derive one from the first 4 bytes of the
+        // agent ID (8 hex chars) so every node has a unique, stable default.
+        if config.agent_name.is_empty() {
+            config.agent_name = hex::encode(&identity.agent_id[..4]);
+        }
         let epoch = current_epoch();
         let log_dir = config.log_dir.clone();
         let rpc = RpcClient::new(config.rpc_url.clone());
@@ -150,22 +169,45 @@ impl Zx01Node {
         } else {
             Some(KoraClient::new(&config.kora_url))
         };
-        let dev_mode = config.sati_mint.is_none();
+        // Dev mode: both the primary (8004) and legacy (SATI) registration gates
+        // are inactive.  In dev mode, unregistered peers produce warnings instead
+        // of being dropped, allowing local testing without on-chain registration.
+        let dev_mode = config.registry_8004_disabled && config.sati_mint.is_none();
+        let http_client = reqwest::Client::new();
+        let registry8004 = Registry8004Client::new(
+            &config.registry_8004_url,
+            http_client.clone(),
+            config.registry_8004_min_tier,
+        );
         let usdc_mint = config.usdc_mint_pubkey().ok().flatten();
         let aggregator_url = validated_aggregator_url(config.aggregator_url.clone());
         let aggregator_secret = config.aggregator_secret.clone();
         let (api, outbound_rx, hosted_outbound_rx) = ApiState::new(
             identity.agent_id,
+            config.agent_name.clone(),
             config.api_secret.clone(),
             config.hosting_fee_bps,
+            config.rpc_url.clone(),
+            http_client.clone(),
+            config.registry_8004_collection.clone(),
         );
         let batch = BatchAccumulator::new(epoch, 0);
         let logger = EnvelopeLogger::new(log_dir, epoch);
 
         if dev_mode {
             tracing::warn!(
-                "Running in dev mode (no --sati-mint). \
-                 SATI verification is advisory only — unregistered peers are allowed."
+                "Running in dev mode (no 8004 registry and no --sati-mint). \
+                 Registration verification is advisory only — unregistered peers are allowed."
+            );
+        } else if config.registry_8004_disabled {
+            tracing::info!(
+                "8004 registry disabled — using SATI-only registration gate (legacy mode)."
+            );
+        } else {
+            tracing::info!(
+                "8004 Solana Agent Registry enabled as primary gate ({}). \
+                 SATI is legacy fallback.",
+                config.registry_8004_url
             );
         }
 
@@ -197,13 +239,15 @@ impl Zx01Node {
             usdc_mint,
             aggregator_url,
             aggregator_secret,
-            http_client: reqwest::Client::new(),
+            http_client,
             rate_limiter: std::collections::HashMap::new(),
             notary_pool: HashMap::new(),
             bootstrap_peers,
             pending_broadcasts: Vec::new(),
             last_ping_push: HashMap::new(),
             sati_rpc_failures: HashMap::new(),
+            registry8004,
+            reg8004_failures: HashMap::new(),
         }
     }
 
@@ -375,7 +419,27 @@ impl Zx01Node {
                     self.handle_outbound(swarm, req).await;
                 }
                 Some(env) = self.hosted_outbound_rx.recv() => {
-                    if let Err(e) = self.publish_envelope(swarm, &env) {
+                    if env.msg_type.is_bilateral() {
+                        // Route bilateral hosted messages via request-response.
+                        match self.peer_states.peer_id_for_agent(&env.recipient) {
+                            Some(peer_id) => {
+                                if let Err(e) = self.send_bilateral(swarm, peer_id, &env) {
+                                    tracing::warn!(
+                                        "Hosted bilateral send failed ({} → {}): {e}",
+                                        env.msg_type,
+                                        hex::encode(env.recipient),
+                                    );
+                                }
+                            }
+                            None => {
+                                tracing::warn!(
+                                    "Hosted bilateral {}: no known peer_id for recipient {}",
+                                    env.msg_type,
+                                    hex::encode(env.recipient),
+                                );
+                            }
+                        }
+                    } else if let Err(e) = self.publish_envelope(swarm, &env) {
                         tracing::warn!("Hosted outbound publish failed: {e}");
                     }
                 }
@@ -655,6 +719,51 @@ impl Zx01Node {
                     .insert(agent_id, std::time::Instant::now());
                 tracing::warn!(
                     "SATI check failed for {}: {e} (will retry in 1 h)",
+                    hex::encode(agent_id),
+                );
+            }
+        }
+    }
+
+    // ========================================================================
+    // 8004 Solana Agent Registry (primary gate)
+    // ========================================================================
+
+    /// Query the 8004 registry for `agent_id` and, if found, mark them as
+    /// verified in `peer_states` so the gate check passes.
+    ///
+    /// This is the "connect existing identity" path: an agent already registered
+    /// in the 8004 Solana registry is accepted without needing a SATI mint.
+    /// Their Ed25519 `agent_id` bytes == their Solana pubkey == their `owner`
+    /// field in the 8004 registry — no extra key material needed.
+    async fn verify_8004_registration(&mut self, agent_id: [u8; 32]) {
+        match self.registry8004.is_registered(&agent_id).await {
+            Ok(true) => {
+                // Agent found and meets min_tier — connect their existing identity.
+                self.peer_states.set_sati_status(agent_id, true);
+                self.api.send_event(ApiEvent::SatiStatus {
+                    agent_id: hex::encode(agent_id),
+                    registered: true,
+                });
+                tracing::info!(
+                    "8004: agent {} verified (existing identity connected)",
+                    hex::encode(agent_id),
+                );
+            }
+            Ok(false) => {
+                // Not found in 8004 registry (or below min_tier).
+                // Do NOT set peer_states — let SATI fallback decide.
+                tracing::debug!(
+                    "8004: agent {} not found in registry",
+                    hex::encode(agent_id),
+                );
+            }
+            Err(e) => {
+                // Network / HTTP error — back off for 1 hour.
+                self.reg8004_failures
+                    .insert(agent_id, std::time::Instant::now());
+                tracing::warn!(
+                    "8004 check failed for {}: {e} (will retry in 1 h)",
                     hex::encode(agent_id),
                 );
             }
@@ -945,18 +1054,33 @@ impl Zx01Node {
             }
         }
 
-        // SATI + Lease gates — checked after signature validation.
+        // Registration + Lease gates — checked after signature validation.
         // BEACONs are exempt: they ARE the trigger for both checks.
         if env.msg_type == MsgType::Beacon {
             if self.peer_states.sati_status(&env.sender).is_none() {
-                // Skip the RPC call if the last attempt failed within the past hour.
-                let recently_failed = self
-                    .sati_rpc_failures
-                    .get(&env.sender)
-                    .map(|t| t.elapsed().as_secs() < 3600)
-                    .unwrap_or(false);
-                if !recently_failed {
-                    self.verify_sati_registration(env.sender).await;
+                // Primary gate: 8004 Solana Agent Registry (HTTP GraphQL, no RPC).
+                // If the agent is already registered in 8004, their existing
+                // identity is connected and they pass without needing a SATI mint.
+                if !self.config.registry_8004_disabled {
+                    let failed_8004 = self
+                        .reg8004_failures
+                        .get(&env.sender)
+                        .map(|t| t.elapsed().as_secs() < 3600)
+                        .unwrap_or(false);
+                    if !failed_8004 {
+                        self.verify_8004_registration(env.sender).await;
+                    }
+                }
+                // Legacy fallback: SATI SPL-mint check (only if 8004 did not verify).
+                if self.peer_states.sati_status(&env.sender).is_none() {
+                    let recently_failed = self
+                        .sati_rpc_failures
+                        .get(&env.sender)
+                        .map(|t| t.elapsed().as_secs() < 3600)
+                        .unwrap_or(false);
+                    if !recently_failed {
+                        self.verify_sati_registration(env.sender).await;
+                    }
                 }
             }
             if self.peer_states.lease_status(&env.sender).is_none()
@@ -1127,7 +1251,32 @@ impl Zx01Node {
             return;
         }
 
-        // SATI + Lease gates for bilateral messages.
+        // Registration check for bilateral senders not yet verified.
+        // Mirrors the BEACON path: 8004 first, SATI as fallback.
+        if self.peer_states.sati_status(&env.sender).is_none() {
+            if !self.config.registry_8004_disabled {
+                let failed_8004 = self
+                    .reg8004_failures
+                    .get(&env.sender)
+                    .map(|t| t.elapsed().as_secs() < 3600)
+                    .unwrap_or(false);
+                if !failed_8004 {
+                    self.verify_8004_registration(env.sender).await;
+                }
+            }
+            if self.peer_states.sati_status(&env.sender).is_none() {
+                let recently_failed = self
+                    .sati_rpc_failures
+                    .get(&env.sender)
+                    .map(|t| t.elapsed().as_secs() < 3600)
+                    .unwrap_or(false);
+                if !recently_failed {
+                    self.verify_sati_registration(env.sender).await;
+                }
+            }
+        }
+
+        // Registration + Lease gates for bilateral messages.
         if !self.sati_gate_allows(&env.sender) {
             tracing::warn!(
                 "Dropping bilateral {} from unregistered agent {}",
@@ -1211,6 +1360,34 @@ impl Zx01Node {
                 );
                 self.push_to_aggregator(serde_json::json!({
                     "msg_type":        "VERDICT",
+                    "sender":          hex::encode(env.sender),
+                    "recipient":       hex::encode(env.recipient),
+                    "conversation_id": hex::encode(env.conversation_id),
+                    "slot":            self.current_slot,
+                }));
+            }
+            MsgType::Reject => {
+                tracing::info!(
+                    "REJECT from {} for conversation {}",
+                    hex::encode(env.sender),
+                    hex::encode(env.conversation_id),
+                );
+                self.push_to_aggregator(serde_json::json!({
+                    "msg_type":        "REJECT",
+                    "sender":          hex::encode(env.sender),
+                    "recipient":       hex::encode(env.recipient),
+                    "conversation_id": hex::encode(env.conversation_id),
+                    "slot":            self.current_slot,
+                }));
+            }
+            MsgType::Deliver => {
+                tracing::info!(
+                    "DELIVER from {} for conversation {}",
+                    hex::encode(env.sender),
+                    hex::encode(env.conversation_id),
+                );
+                self.push_to_aggregator(serde_json::json!({
+                    "msg_type":        "DELIVER",
                     "sender":          hex::encode(env.sender),
                     "recipient":       hex::encode(env.recipient),
                     "conversation_id": hex::encode(env.conversation_id),
@@ -1847,6 +2024,39 @@ impl Zx01Node {
         self.batch = BatchAccumulator::new(new_epoch, self.current_slot);
         self.reputation.advance_epoch(new_epoch);
 
+        // Purge stale registration failure cache entries (TTL = 1 hour).
+        let sati_ttl = std::time::Duration::from_secs(3_600);
+        self.sati_rpc_failures
+            .retain(|_, ts| ts.elapsed() < sati_ttl);
+        // Hard cap: if still over limit (many fresh failures), evict oldest entries.
+        if self.sati_rpc_failures.len() > MAX_SATI_FAILURE_CACHE {
+            let over = self.sati_rpc_failures.len() - MAX_SATI_FAILURE_CACHE;
+            // Sort by elapsed descending (oldest first), take `over` to remove.
+            let mut by_age: Vec<_> = self
+                .sati_rpc_failures
+                .iter()
+                .map(|(k, ts)| (*k, ts.elapsed()))
+                .collect();
+            by_age.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+            for (k, _) in by_age.into_iter().take(over) {
+                self.sati_rpc_failures.remove(&k);
+            }
+        }
+        // Same TTL + cap for the 8004 HTTP failure cache.
+        self.reg8004_failures.retain(|_, ts| ts.elapsed() < sati_ttl);
+        if self.reg8004_failures.len() > MAX_REG8004_FAILURE_CACHE {
+            let over = self.reg8004_failures.len() - MAX_REG8004_FAILURE_CACHE;
+            let mut by_age: Vec<_> = self
+                .reg8004_failures
+                .iter()
+                .map(|(k, ts)| (*k, ts.elapsed()))
+                .collect();
+            by_age.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+            for (k, _) in by_age.into_iter().take(over) {
+                self.reg8004_failures.remove(&k);
+            }
+        }
+
         // Check own lease renewal at each epoch boundary.
         self.maybe_renew_own_lease().await;
     }
@@ -1979,17 +2189,34 @@ impl Zx01Node {
     fn check_rate_limit(&mut self, peer: &libp2p::PeerId) -> bool {
         use zerox1_protocol::constants::MESSAGE_RATE_LIMIT;
         let now = std::time::Instant::now();
-        let entry = self.rate_limiter.entry(*peer).or_insert((0, now));
-        if now.duration_since(entry.1).as_secs() >= 1 {
-            // New window — reset counter.
-            *entry = (1, now);
-            true
-        } else if entry.0 >= MESSAGE_RATE_LIMIT {
-            false
-        } else {
+
+        // Fast path: peer already tracked.
+        if let Some(entry) = self.rate_limiter.get_mut(peer) {
+            if now.duration_since(entry.1).as_secs() >= 1 {
+                *entry = (1, now);
+                return true;
+            }
+            if entry.0 >= MESSAGE_RATE_LIMIT {
+                return false;
+            }
             entry.0 += 1;
-            true
+            return true;
         }
+
+        // New peer — enforce cap before inserting.
+        if self.rate_limiter.len() >= MAX_RATE_LIMITER_PEERS {
+            // Evict entries whose window has already expired.
+            self.rate_limiter
+                .retain(|_, (_, ts)| now.duration_since(*ts).as_secs() < 1);
+            // If still at capacity, skip tracking this peer (allow the message).
+            if self.rate_limiter.len() >= MAX_RATE_LIMITER_PEERS {
+                tracing::debug!("rate_limiter at capacity — skipping tracking for {peer}");
+                return true;
+            }
+        }
+
+        self.rate_limiter.insert(*peer, (1, now));
+        true
     }
 }
 

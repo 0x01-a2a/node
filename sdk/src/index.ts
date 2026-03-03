@@ -393,7 +393,7 @@ export class Zerox1Agent {
     const args: string[] = [
       '--keypair-path', keypairPath,
       '--api-addr', `127.0.0.1:${this.port}`,
-      '--agent-name', this._config.name ?? 'zerox1-agent',
+      '--agent-name', this._config.name ?? '',
     ]
 
     if (this._config.satiMint) args.push('--sati-mint', this._config.satiMint)

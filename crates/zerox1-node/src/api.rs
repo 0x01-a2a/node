@@ -3,12 +3,17 @@
 //! Visualization (read-only):
 //!   GET  /ws/events              — WebSocket stream of node events
 //!   GET  /peers                  — All known peers with SATI/lease status
-//!   GET  /reputation/{agent_id}    — Reputation vector for an agent
+//!   GET  /reputation/{agent_id}  — Reputation vector for an agent
 //!   GET  /batch/{agent_id}/{epoch} — Batch summary (own node only)
 //!
 //! Agent integration:
 //!   POST /envelopes/send         — Send an envelope (node signs + routes)
 //!   GET  /ws/inbox               — WebSocket stream of inbound envelopes
+//!
+//! 8004 Solana Agent Registry:
+//!   GET  /registry/8004/info              — Program IDs, collection, step-by-step guide
+//!   POST /registry/8004/register-prepare  — Build partially-signed tx (agent signs message_b64)
+//!   POST /registry/8004/register-submit   — Inject owner sig + broadcast to Solana
 
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
@@ -26,7 +31,13 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+use solana_sdk::pubkey::Pubkey;
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
+
+use crate::registry_8004::{
+    broadcast_transaction, build_register_tx, fetch_latest_blockhash, COLLECTION_DEVNET,
+    PROGRAM_ID_DEVNET, PROGRAM_ID_MAINNET,
+};
 
 use zerox1_protocol::{
     envelope::{Envelope, BROADCAST_RECIPIENT},
@@ -164,6 +175,9 @@ const SESSION_TTL_SECS: u64 = 7 * 24 * 3600;
 const MAX_SENDS_PER_MINUTE: u32 = 60;
 /// Maximum API `/envelopes/send` requests per 60-second window.
 const MAX_API_SENDS_PER_MINUTE: u32 = 120;
+/// Maximum `/registry/8004/register-prepare` requests per 60-second window.
+/// Each request makes an external Solana RPC call, so cap tightly.
+const MAX_REGISTRY_PREPARE_PER_MINUTE: u32 = 10;
 
 struct RateLimitWindow {
     window_start: u64,
@@ -220,6 +234,7 @@ struct ApiInner {
     batches: RwLock<Vec<BatchSnapshot>>,
     event_tx: broadcast::Sender<ApiEvent>,
     self_agent: [u8; 32],
+    self_name: String,
 
     // Agent integration channels
     /// Outbound requests from HTTP handlers to the node loop.
@@ -238,6 +253,18 @@ struct ApiInner {
     hosted_outbound_tx: mpsc::Sender<Envelope>,
     /// Global rate limit window for `/envelopes/send`.
     send_rate_limit: Mutex<RateLimitWindow>,
+    /// Global rate limit window for `/registry/8004/register-prepare`.
+    registry_prepare_rate_limit: Mutex<RateLimitWindow>,
+
+    // 8004 registry helpers
+    /// Solana RPC URL — used by registry endpoints for blockhash + broadcast.
+    rpc_url: String,
+    /// Shared HTTP client for registry RPC calls.
+    http_client: reqwest::Client,
+    /// Whether this node is pointed at mainnet-beta (affects 8004 program IDs).
+    is_mainnet: bool,
+    /// Optional override for the 8004 base collection (required on mainnet).
+    registry_8004_collection: Option<String>,
 }
 
 /// Cheaply cloneable shared state passed to all axum handlers.
@@ -251,13 +278,18 @@ impl ApiState {
     /// must hold onto both receivers and drive them in the main event loop.
     pub fn new(
         self_agent: [u8; 32],
+        self_name: String,
         api_secret: Option<String>,
         hosting_fee_bps: u32,
+        rpc_url: String,
+        http_client: reqwest::Client,
+        registry_8004_collection: Option<String>,
     ) -> (
         Self,
         mpsc::Receiver<OutboundRequest>,
         mpsc::Receiver<Envelope>,
     ) {
+        let is_mainnet = rpc_url.contains("mainnet-beta");
         let (event_tx, _) = broadcast::channel(512);
         let (inbox_tx, _) = broadcast::channel(256);
         let (outbound_tx, outbound_rx) = mpsc::channel(64);
@@ -269,6 +301,7 @@ impl ApiState {
             batches: RwLock::new(Vec::new()),
             event_tx,
             self_agent,
+            self_name,
             outbound_tx,
             inbox_tx,
             api_secret,
@@ -279,6 +312,14 @@ impl ApiState {
                 window_start: now_secs(),
                 count: 0,
             }),
+            registry_prepare_rate_limit: Mutex::new(RateLimitWindow {
+                window_start: now_secs(),
+                count: 0,
+            }),
+            rpc_url,
+            http_client,
+            is_mainnet,
+            registry_8004_collection,
         }));
 
         (state, outbound_rx, hosted_outbound_rx)
@@ -385,6 +426,7 @@ pub async fn serve(state: ApiState, addr: SocketAddr) {
     let router = Router::new()
         // Visualization
         .route("/ws/events", get(ws_events_handler))
+        .route("/identity", get(get_identity))
         .route("/peers", get(get_peers))
         .route("/reputation/{agent_id}", get(get_reputation))
         .route("/batch/{agent_id}/{epoch}", get(get_batch))
@@ -396,6 +438,10 @@ pub async fn serve(state: ApiState, addr: SocketAddr) {
         .route("/hosted/register", post(hosted_register))
         .route("/hosted/send", post(hosted_send))
         .route("/ws/hosted/inbox", get(ws_hosted_inbox_handler))
+        // 8004 Solana Agent Registry helpers
+        .route("/registry/8004/info", get(registry_8004_info))
+        .route("/registry/8004/register-prepare", post(registry_8004_register_prepare))
+        .route("/registry/8004/register-submit", post(registry_8004_register_submit))
         .layer(
             // INFO-2: Local API — only allow loopback origins (zeroclaw, React Native).
             tower_http::cors::CorsLayer::new()
@@ -464,6 +510,17 @@ async fn ws_events_task(mut socket: WebSocket, state: ApiState) {
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
         }
     }
+}
+
+async fn get_identity(headers: HeaderMap, State(state): State<ApiState>) -> Response {
+    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
+        return resp;
+    }
+    Json(serde_json::json!({
+        "agent_id": hex::encode(state.0.self_agent),
+        "name":     state.0.self_name,
+    }))
+    .into_response()
 }
 
 async fn get_peers(headers: HeaderMap, State(state): State<ApiState>) -> Response {
@@ -626,6 +683,16 @@ async fn send_envelope(
             )
         }
     };
+
+    // Guard against oversized payloads before decoding — base64 of 64 KB ≈ 88 KB.
+    const MAX_PAYLOAD_B64_LEN: usize =
+        (zerox1_protocol::constants::MAX_MESSAGE_SIZE / 3 + 1) * 4;
+    if req.payload_b64.len() > MAX_PAYLOAD_B64_LEN {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({ "error": "payload_b64: exceeds maximum envelope size" })),
+        );
+    }
 
     // Decode payload.
     let payload = match B64.decode(&req.payload_b64) {
@@ -851,6 +918,15 @@ async fn hosted_send(
             )
         }
     };
+
+    // Guard against oversized payloads before decoding — hex of 64 KB = 128 KB.
+    const MAX_PAYLOAD_HEX_LEN: usize = zerox1_protocol::constants::MAX_MESSAGE_SIZE * 2;
+    if req.payload_hex.len() > MAX_PAYLOAD_HEX_LEN {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({ "error": "payload_hex: exceeds maximum envelope size" })),
+        );
+    }
 
     // Decode payload.
     let payload = match hex::decode(&req.payload_hex) {
@@ -1079,4 +1155,310 @@ fn resolve_hosted_token(headers: &HeaderMap) -> Option<String> {
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
         .map(|s| s.to_string())
+}
+
+// ============================================================================
+// 8004 Solana Agent Registry — registration helpers
+// ============================================================================
+
+/// GET /registry/8004/info
+///
+/// Returns the program constants, collection address, and step-by-step
+/// instructions an agent needs to self-register in the 8004 registry.
+/// No authentication required — this is public informational data.
+async fn registry_8004_info(State(state): State<ApiState>) -> Response {
+    let network = if state.0.is_mainnet { "mainnet-beta" } else { "devnet" };
+    let program_id = if state.0.is_mainnet {
+        PROGRAM_ID_MAINNET
+    } else {
+        PROGRAM_ID_DEVNET
+    };
+    let collection = state
+        .0
+        .registry_8004_collection
+        .as_deref()
+        .unwrap_or(if state.0.is_mainnet { "(query RootConfig or set ZX01_REGISTRY_8004_COLLECTION)" } else { COLLECTION_DEVNET });
+
+    Json(serde_json::json!({
+        "network":     network,
+        "program_id":  program_id,
+        "collection":  collection,
+        "mpl_core":    "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d",
+        "indexer_url": if state.0.is_mainnet {
+            "https://8004.qnt.sh/v2/graphql"
+        } else {
+            "https://8004-indexer-production.up.railway.app/v2/graphql"
+        },
+        "register_via_node": {
+            "prepare": "POST /registry/8004/register-prepare",
+            "submit":  "POST /registry/8004/register-submit",
+        },
+        "steps": [
+            "1. POST /registry/8004/register-prepare with { owner_pubkey, agent_uri? }",
+            "2. Sign the returned message_b64 with your Ed25519/owner keypair",
+            "3. POST /registry/8004/register-submit with { transaction_b64, owner_signature_b64 }",
+            "4. Save the asset_pubkey — it is your permanent 8004 identity",
+            "5. Within ~30 seconds the indexer will reflect your registration",
+        ],
+        "note": "Your 0x01 agent_id hex == your Solana owner pubkey (base58). No extra keys needed."
+    }))
+    .into_response()
+}
+
+/// Request body for POST /registry/8004/register-prepare.
+#[derive(Deserialize)]
+struct RegisterPrepareRequest {
+    /// base58 Solana pubkey of the agent registering.
+    /// Must equal the caller's Ed25519 agent_id (base58).
+    owner_pubkey: String,
+    /// Optional metadata URI (IPFS, Arweave, HTTPS, or empty).
+    /// Points to a JSON file with name, description, endpoints, etc.
+    /// Max 250 bytes.  Defaults to empty string.
+    #[serde(default)]
+    agent_uri: String,
+}
+
+/// POST /registry/8004/register-prepare
+///
+/// Builds a partially-signed `register` transaction for the 8004 Solana
+/// Agent Registry.  The asset keypair is generated by the node and pre-signed;
+/// the caller only needs to sign the message with their owner/Ed25519 key.
+///
+/// Returns:
+/// - `asset_pubkey`      — store this; it is your on-chain 8004 identity
+/// - `transaction_b64`   — bincode tx, asset already signed, owner slot empty
+/// - `message_b64`       — raw message bytes to sign with owner Ed25519 key
+/// - `signing_hint`      — instructions for completing the signature
+///
+/// Requires API secret if one is configured.
+async fn registry_8004_register_prepare(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Json(req): Json<RegisterPrepareRequest>,
+) -> Response {
+    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
+        return resp;
+    }
+
+    // Rate limit: this endpoint makes an external Solana RPC call per request.
+    {
+        let now = now_secs();
+        let mut rl = state.0.registry_prepare_rate_limit.lock().await;
+        if now.saturating_sub(rl.window_start) >= 60 {
+            rl.window_start = now;
+            rl.count = 0;
+        }
+        if rl.count >= MAX_REGISTRY_PREPARE_PER_MINUTE {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({ "error": "rate limit exceeded — try again in 60s" })),
+            )
+                .into_response();
+        }
+        rl.count += 1;
+    }
+
+    // Validate agent_uri: reject control characters and C0/C1 chars that could
+    // cause log injection or confuse on-chain metadata parsers.
+    if req.agent_uri.chars().any(|c| c.is_control()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "agent_uri: control characters not allowed" })),
+        )
+            .into_response();
+    }
+
+    let owner_pubkey: Pubkey = match req.owner_pubkey.parse() {
+        Ok(p) => p,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid owner_pubkey: expected base58 Solana pubkey" })),
+            )
+                .into_response();
+        }
+    };
+
+    // Fetch recent blockhash from the configured Solana RPC.
+    let blockhash = match fetch_latest_blockhash(&state.0.rpc_url, &state.0.http_client).await {
+        Ok(bh) => bh,
+        Err(e) => {
+            tracing::warn!("registry-prepare: blockhash fetch failed: {e}");
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("blockhash fetch failed: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    // Resolve collection override (mainnet requires explicit address).
+    let collection_override = state
+        .0
+        .registry_8004_collection
+        .as_deref()
+        .and_then(|s| s.parse::<Pubkey>().ok());
+
+    match build_register_tx(
+        owner_pubkey,
+        &req.agent_uri,
+        blockhash,
+        state.0.is_mainnet,
+        collection_override,
+    ) {
+        Ok(prepared) => Json(serde_json::json!({
+            "asset_pubkey":    prepared.asset_pubkey,
+            "transaction_b64": prepared.transaction_b64,
+            "message_b64":     prepared.message_b64,
+            "signing_hint": concat!(
+                "Sign message_b64 with your Ed25519 owner keypair (64-byte signature). ",
+                "Then POST { transaction_b64, owner_signature_b64 } to /registry/8004/register-submit. ",
+                "Or deserialize transaction_b64, add owner signature at index 0, and broadcast yourself."
+            ),
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("tx build failed: {e}") })),
+        )
+            .into_response(),
+    }
+}
+
+/// Request body for POST /registry/8004/register-submit.
+#[derive(Deserialize)]
+struct RegisterSubmitRequest {
+    /// base64 bincode Solana transaction (from register-prepare, asset already signed).
+    transaction_b64: String,
+    /// base64 64-byte Ed25519 signature of the transaction message by the owner keypair.
+    owner_signature_b64: String,
+}
+
+/// POST /registry/8004/register-submit
+///
+/// Injects the owner's Ed25519 signature into the prepared transaction and
+/// broadcasts it to Solana via the configured RPC endpoint.
+///
+/// Returns `{ signature }` — the Solana transaction signature (base58).
+///
+/// Requires API secret if one is configured.
+async fn registry_8004_register_submit(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Json(req): Json<RegisterSubmitRequest>,
+) -> Response {
+    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
+        return resp;
+    }
+
+    // Decode and validate the owner signature.
+    let sig_bytes = match B64.decode(&req.owner_signature_b64) {
+        Ok(b) if b.len() == 64 => b,
+        Ok(b) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("owner_signature_b64 must be 64 bytes, got {}", b.len())
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("invalid owner_signature_b64: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    // Guard transaction size: Solana max tx is 1232 bytes → ~1644 base64 chars.
+    // Allow 2× headroom for padding/overhead before even decoding.
+    const MAX_TX_B64_LEN: usize = 3300;
+    if req.transaction_b64.len() > MAX_TX_B64_LEN {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({ "error": "transaction_b64: exceeds maximum transaction size" })),
+        )
+            .into_response();
+    }
+
+    // Decode the partially-signed transaction.
+    let tx_bytes = match B64.decode(&req.transaction_b64) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("invalid transaction_b64: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut tx: solana_sdk::transaction::Transaction =
+        match bincode::deserialize(&tx_bytes) {
+            Ok(t) => t,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": format!("transaction deserialize failed: {e}") })),
+                )
+                    .into_response();
+            }
+        };
+
+    // The register tx must have exactly 2 signature slots: owner (index 0) + asset (index 1).
+    // Also verify the fee payer is in account_keys[0] to prevent owner impersonation.
+    if tx.signatures.len() != 2 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "expected 2 signature slots (owner + asset), got {}",
+                    tx.signatures.len()
+                )
+            })),
+        )
+            .into_response();
+    }
+
+    // Inject the owner signature at index 0 (owner is fee payer = first signer).
+    let sig_arr: [u8; 64] = sig_bytes.try_into().expect("checked length above");
+    tx.signatures[0] = solana_sdk::signature::Signature::from(sig_arr);
+
+    // Re-serialize with owner signature injected and broadcast.
+    let signed_bytes = match bincode::serialize(&tx) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("re-serialize failed: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    let signed_b64 = B64.encode(&signed_bytes);
+
+    match broadcast_transaction(&state.0.rpc_url, &state.0.http_client, &signed_b64).await {
+        Ok(signature) => {
+            tracing::info!("8004 registration broadcast: tx={signature}");
+            Json(serde_json::json!({
+                "signature": signature,
+                "explorer":  format!(
+                    "https://explorer.solana.com/tx/{}?cluster={}",
+                    signature,
+                    if state.0.is_mainnet { "mainnet-beta" } else { "devnet" }
+                ),
+            }))
+            .into_response()
+        }
+        Err(e) => {
+            tracing::warn!("8004 registration broadcast failed: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("broadcast failed: {e}") })),
+            )
+                .into_response()
+        }
+    }
 }

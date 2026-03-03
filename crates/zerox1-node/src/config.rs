@@ -51,7 +51,8 @@ pub struct Config {
     pub sati_mint: Option<String>,
 
     /// Display name for BEACON messages.
-    #[arg(long, default_value = "zerox1-agent")]
+    /// If not set, defaults to the first 8 hex characters of the agent ID.
+    #[arg(long, default_value = "")]
     pub agent_name: String,
 
     /// Path to the 32-byte Ed25519 secret key file.
@@ -157,6 +158,37 @@ pub struct Config {
     /// City name for geo-tagging (e.g. Lagos). Optional companion to geo_country.
     #[arg(long, env = "ZX01_GEO_CITY")]
     pub geo_city: Option<String>,
+
+    /// GraphQL endpoint for the 8004 Solana Agent Registry (primary registration gate).
+    ///
+    /// Agents registered in the 8004 registry are verified by querying their
+    /// owner pubkey (= base58 of their Ed25519 agent_id bytes) against this
+    /// indexer — no Solana RPC required.  SATI remains as a legacy fallback.
+    ///
+    /// Devnet default; set ZX01_REGISTRY_8004_URL to the mainnet endpoint
+    /// (https://8004.qnt.sh/v2/graphql) on mainnet deployments.
+    #[arg(
+        long,
+        env = "ZX01_REGISTRY_8004_URL",
+        default_value = "https://8004-indexer-production.up.railway.app/v2/graphql"
+    )]
+    pub registry_8004_url: String,
+
+    /// Disable the 8004 registry check and use SATI-only mode.
+    /// Legacy flag for operators who prefer the SATI SPL-mint gate.
+    #[arg(long, env = "ZX01_REGISTRY_8004_DISABLED", default_value_t = false)]
+    pub registry_8004_disabled: bool,
+
+    /// Minimum 8004 trust tier required for a peer to pass the gate (0–4).
+    /// Tier 0 = any registered agent; tier 1+ = at least one confirmed feedback.
+    #[arg(long, env = "ZX01_REGISTRY_8004_MIN_TIER", default_value_t = 0u8)]
+    pub registry_8004_min_tier: u8,
+
+    /// Base collection address for the 8004 registry (base58 Solana pubkey).
+    /// Devnet collection is hardcoded. Set this for mainnet deployments.
+    /// Value of `C6W2...` (devnet) is the default and need not be set on devnet.
+    #[arg(long, env = "ZX01_REGISTRY_8004_COLLECTION")]
+    pub registry_8004_collection: Option<String>,
 }
 
 impl Config {

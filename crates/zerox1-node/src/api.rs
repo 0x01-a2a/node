@@ -601,6 +601,7 @@ async fn send_envelope(
     Json(req): Json<SendEnvelopeRequest>,
 ) -> impl IntoResponse {
     // Authenticate outbound transmission requests.
+    let has_read_keys = !state.0.api_read_keys.is_empty();
     if let Some(ref secret) = state.0.api_secret {
         let expected = format!("Bearer {secret}");
         let provided = headers
@@ -613,6 +614,15 @@ async fn send_envelope(
                 Json(serde_json::json!({ "error": "unauthorized" })),
             );
         }
+    } else if has_read_keys {
+        // If the user configured read keys but forgot the master secret,
+        // we must actively block write endpoints rather than defaulting to open access.
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(
+                serde_json::json!({ "error": "unauthorized: mutating endpoints require api_secret" }),
+            ),
+        );
     }
 
     // Shared API-level rate limit to reduce flooding impact if credentials leak.
@@ -1152,13 +1162,14 @@ fn ct_eq(a: &str, b: &str) -> bool {
 }
 
 fn require_api_secret_or_unauthorized(state: &ApiState, headers: &HeaderMap) -> Option<Response> {
+    let has_read_keys = !state.0.api_read_keys.is_empty();
     if let Some(ref secret) = state.0.api_secret {
-        let expected = format!("Bearer {secret}");
         let provided = headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
             .unwrap_or("");
-        if !ct_eq(provided, &expected) {
+        if !ct_eq(provided, secret.as_str()) {
             return Some(
                 (
                     StatusCode::UNAUTHORIZED,
@@ -1167,6 +1178,20 @@ fn require_api_secret_or_unauthorized(state: &ApiState, headers: &HeaderMap) -> 
                     .into_response(),
             );
         }
+        return None;
+    }
+
+    if has_read_keys {
+        // Operator intended to secure the node but forgot the master secret.
+        return Some(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(
+                    serde_json::json!({ "error": "unauthorized: mutating endpoints require api_secret" }),
+                ),
+            )
+                .into_response(),
+        );
     }
     None
 }

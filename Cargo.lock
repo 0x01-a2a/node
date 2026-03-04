@@ -8999,7 +8999,7 @@ dependencies = [
 
 [[package]]
 name = "zerox1-aggregator"
-version = "0.2.10"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "axum",
@@ -9048,7 +9048,7 @@ dependencies = [
 
 [[package]]
 name = "zerox1-node"
-version = "0.2.10"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9083,7 +9083,7 @@ dependencies = [
 
 [[package]]
 name = "zerox1-protocol"
-version = "0.2.10"
+version = "0.2.14"
 dependencies = [
  "bytes",
  "ciborium",
@@ -9098,7 +9098,7 @@ dependencies = [
 
 [[package]]
 name = "zerox1-sati-client"
-version = "0.2.10"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "serde",
@@ -9114,7 +9114,7 @@ dependencies = [
 
 [[package]]
 name = "zerox1-simulator"
-version = "0.2.10"
+version = "0.2.14"
 dependencies = [
  "clap",
  "rand 0.8.5",

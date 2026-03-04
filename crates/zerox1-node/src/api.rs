@@ -1422,6 +1422,47 @@ async fn registry_8004_register_submit(
             .into_response();
     }
 
+    // Security check (Prevent Open RPC Relay):
+    // 1. Ensure exactly 1 instruction
+    // 2. Ensure the instruction calls the expected 8004 registry program ID
+    if tx.message.instructions.len() != 1 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "transaction must contain exactly 1 instruction, got {}",
+                    tx.message.instructions.len()
+                )
+            })),
+        )
+            .into_response();
+    }
+
+    let program_id_str = if state.0.is_mainnet {
+        crate::registry_8004::PROGRAM_ID_MAINNET
+    } else {
+        crate::registry_8004::PROGRAM_ID_DEVNET
+    };
+    
+    let expected_program_id = program_id_str
+        .parse::<solana_sdk::pubkey::Pubkey>()
+        .expect("static program ID parses");
+
+    let instruction_program_id = tx.message.instructions[0].program_id(&tx.message.account_keys);
+    
+    if instruction_program_id != &expected_program_id {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "invalid program ID: expected {}, got {}",
+                    expected_program_id, instruction_program_id
+                )
+            })),
+        )
+            .into_response();
+    }
+
     // Inject the owner signature at index 0 (owner is fee payer = first signer).
     let sig_arr: [u8; 64] = sig_bytes.try_into().expect("checked length above");
     tx.signatures[0] = solana_sdk::signature::Signature::from(sig_arr);

@@ -206,73 +206,6 @@ jobs:
 
 
 
-  # ── Bundle binaries + build release APK ─────────────────────────────────
-  build-apk:
-    name: Build Android APK
-    needs: [build-android]
-    runs-on: ubuntu-22.04
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: npm
-          cache-dependency-path: mobile/package-lock.json
-
-      - name: Install mobile dependencies
-        working-directory: mobile
-        run: npm ci
-
-      - name: Download zerox1-node Android binary
-        uses: actions/download-artifact@v4
-        with:
-          name: zerox1-node-android-arm64
-          path: node-android-artifact
-
-      - name: Download zeroclaw Android binary
-        run: |
-          gh release download v0.1.7 \
-            --repo 0x01-a2a/zeroclaw \
-            --pattern "zeroclaw-android-arm64" \
-            --output zeroclaw-android
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Bundle binaries into APK assets
-        run: |
-          mkdir -p mobile/android/app/src/main/assets
-          cp node-android-artifact/zerox1-node  mobile/android/app/src/main/assets/zerox1-node
-          cp zeroclaw-android                   mobile/android/app/src/main/assets/zeroclaw
-          chmod +x mobile/android/app/src/main/assets/zerox1-node
-          chmod +x mobile/android/app/src/main/assets/zeroclaw
-
-      - name: Decode release keystore
-        run: echo "${{ secrets.ZEROX1_RELEASE_KEYSTORE_BASE64 }}" | base64 -d > mobile/android/app/release.keystore
-
-      - name: Build release APK
-        working-directory: mobile/android
-        run: ./gradlew assembleRelease --no-daemon
-        env:
-          ZEROX1_RELEASE_KEYSTORE: ${{ github.workspace }}/mobile/android/app/release.keystore
-          ZEROX1_RELEASE_STORE_PASS: ${{ secrets.ZEROX1_RELEASE_STORE_PASS }}
-          ZEROX1_RELEASE_KEY_PASS:   ${{ secrets.ZEROX1_RELEASE_KEY_PASS }}
-
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: zerox1-android-apk
-          path: mobile/android/app/build/outputs/apk/release/app-release.apk
-          if-no-files-found: error
-
   # ── Assemble and publish npm packages ────────────────────────────────────
   publish-npm:
     name: Publish npm packages
@@ -370,7 +303,7 @@ jobs:
   # ── Create GitHub Release with binary attachments ─────────────────────────
   github-release:
     name: GitHub Release
-    needs: [build, build-android, build-apk, build-server-services, build-challenger]
+    needs: [build, build-android, build-server-services, build-challenger]
     runs-on: ubuntu-latest
 
     steps:
@@ -393,7 +326,6 @@ jobs:
           cp artifacts/zerox1-challenger-darwin-x64/zerox1-challenger  zerox1-challenger-darwin-x64
           cp artifacts/zerox1-challenger-win32-x64/zerox1-challenger.exe zerox1-challenger-win32-x64.exe
           cp artifacts/zerox1-node-android-arm64/zerox1-node           zerox1-node-android-arm64
-          cp artifacts/zerox1-android-apk/app-release.apk              zerox1-android.apk
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -409,5 +341,4 @@ jobs:
             zerox1-challenger-darwin-x64
             zerox1-challenger-win32-x64.exe
             zerox1-node-android-arm64
-            zerox1-android.apk
           generate_release_notes: true

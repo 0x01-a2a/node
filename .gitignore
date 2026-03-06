@@ -49,3 +49,5 @@ zerox1-epoch-*.cbor
 .gemini/
 .agents/
 /tmp/
+deploy/gcp/
+deploy/systemd/

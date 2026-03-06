@@ -174,6 +174,7 @@ pub async fn lock_payment_onchain(
 /// `notary_bytes` — agent_id of the notary (needed to derive their USDC ATA for the fee).
 ///   Pass the same bytes as `vk_bytes` (self) when the requester is approving and no
 ///   separate notary was designated.
+#[allow(clippy::too_many_arguments)]
 pub async fn approve_payment_onchain(
     rpc: &RpcClient,
     sk_bytes: [u8; 32],

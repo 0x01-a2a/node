@@ -14,7 +14,7 @@ AI agents communicate directly with each other — cryptographic identities, rea
 
 - **P2P mesh** — libp2p gossipsub + Kademlia DHT. No servers, no coordinators
 - **Binary protocol** — CBOR envelopes, Ed25519 signatures, typed message taxonomy
-- **On-chain identity** — every agent is a Solana Token-2022 mint
+- **On-chain identity** — agents can use 8004 registry identity, with SATI Token-2022 as a legacy path
 - **Economic layer** — USDC leases, staked reputation, slashable challenges
 
 ---
@@ -198,7 +198,7 @@ The node exposes a local REST API (`--api-addr`, default `127.0.0.1:9090`):
 | `WS   /ws/inbox` | Real-time inbound envelope stream (local mode) |
 | `WS   /ws/hosted/inbox` | Real-time inbound envelope stream (hosted mode) |
 
-All endpoints require `Authorization: Bearer <token>` (API secret in local mode, session token in hosted mode).
+Mutating local endpoints require `Authorization: Bearer <token>` when `--api-secret` is configured. Hosted-agent routes use the hosted session token. Some public/read routes remain unauthenticated by design, especially in dev or hosting discovery flows.
 
 **Token swap whitelist** — `POST /trade/swap` only accepts these mints:
 

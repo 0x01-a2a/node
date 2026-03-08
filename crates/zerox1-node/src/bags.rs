@@ -17,6 +17,19 @@ use crate::api::{
 use crate::registry_8004::{broadcast_transaction, fetch_latest_blockhash};
 
 // ============================================================================
+// Protocol fee constants
+// ============================================================================
+
+/// 0x01 protocol treasury — receives 1% of SOL income from Bags fee claims.
+const ZEROX1_TREASURY: &str = "7RTAnEokPmzycm5q3cwWZV9VXGv6KV3g8LEsfgeyJ7RK";
+
+/// Protocol cut in basis points: 100 bps = 1%.
+const PROTOCOL_FEE_BPS: u64 = 100;
+
+/// Minimum fee to bother sending — skip if < 1 000 lamports (< $0.0001).
+const MIN_PROTOCOL_FEE_LAMPORTS: u64 = 1_000;
+
+// ============================================================================
 // BagsConfig
 // ============================================================================
 
@@ -388,4 +401,118 @@ impl BagsLaunchClient {
             .await
             .map_err(|e| anyhow!("Bags GET launched-tokens parse error: {e}"))
     }
+}
+
+// ============================================================================
+// Protocol fee collection — 1% of SOL claimed via Bags
+// ============================================================================
+
+/// Query an account's confirmed SOL balance in lamports.
+pub async fn get_sol_balance(
+    rpc_url: &str,
+    http_client: &reqwest::Client,
+    pubkey: &Pubkey,
+) -> anyhow::Result<u64> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getBalance",
+        "params": [pubkey.to_string(), {"commitment": "confirmed"}],
+    });
+    let resp = http_client
+        .post(rpc_url)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await?
+        .json::<serde_json::Value>()
+        .await?;
+    resp["result"]["value"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("getBalance: unexpected response shape"))
+}
+
+/// Send a native SOL transfer signed by the node identity key.
+pub async fn send_sol(
+    signing_key: Arc<SigningKey>,
+    destination: Pubkey,
+    lamports: u64,
+    rpc_url: &str,
+    http_client: &reqwest::Client,
+) -> anyhow::Result<String> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    let signer_pubkey = Pubkey::new_from_array(signing_key.verifying_key().to_bytes());
+    let transfer_ix =
+        solana_sdk::system_instruction::transfer(&signer_pubkey, &destination, lamports);
+    let blockhash = fetch_latest_blockhash(rpc_url, http_client).await?;
+    let kp = to_solana_keypair(&signing_key);
+    let tx = solana_sdk::transaction::Transaction::new_signed_with_payer(
+        &[transfer_ix],
+        Some(&signer_pubkey),
+        &[&kp],
+        blockhash,
+    );
+    let serialized = bincode::serialize(&tx)?;
+    broadcast_transaction(rpc_url, http_client, &B64.encode(&serialized)).await
+}
+
+/// Spawn a background task that takes 1% of the SOL gained by the agent's
+/// wallet after Bags claim transactions confirm, forwarding it to the
+/// 0x01 treasury.
+///
+/// The task waits 5 seconds for transactions to settle, then computes the
+/// balance delta and sends `delta * PROTOCOL_FEE_BPS / 10_000` lamports.
+/// Completely fire-and-forget — never blocks the API response.
+pub fn spawn_protocol_fee_collection(
+    signing_key: Arc<SigningKey>,
+    agent_pubkey: Pubkey,
+    pre_balance: u64,
+    rpc_url: String,
+    http_client: reqwest::Client,
+) {
+    tokio::spawn(async move {
+        // Wait for claim txs to confirm (~1-2 slots, 5 s is conservative).
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        let post_balance =
+            match get_sol_balance(&rpc_url, &http_client, &agent_pubkey).await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!("Protocol fee: getBalance failed: {e}");
+                    return;
+                }
+            };
+
+        let delta = post_balance.saturating_sub(pre_balance);
+        if delta == 0 {
+            return;
+        }
+
+        let fee_lamports = (delta as u128)
+            .saturating_mul(PROTOCOL_FEE_BPS as u128)
+            .checked_div(10_000)
+            .unwrap_or(0) as u64;
+
+        if fee_lamports < MIN_PROTOCOL_FEE_LAMPORTS {
+            tracing::debug!(
+                "Protocol fee too small ({fee_lamports} lamports, delta={delta}) — skipping"
+            );
+            return;
+        }
+
+        let treasury: Pubkey = match ZEROX1_TREASURY.parse() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("Invalid ZEROX1_TREASURY constant: {e}");
+                return;
+            }
+        };
+
+        match send_sol(signing_key, treasury, fee_lamports, &rpc_url, &http_client).await {
+            Ok(txid) => tracing::info!(
+                "Protocol fee: {fee_lamports} lamports → treasury (txid={txid}, delta={delta})"
+            ),
+            Err(e) => tracing::warn!("Protocol fee SOL transfer failed: {e}"),
+        }
+    });
 }

@@ -331,6 +331,9 @@ const MAX_REGISTRY_PREPARE_PER_MINUTE: u32 = 10;
 const MAX_REGISTRY_SUBMIT_PER_MINUTE: u32 = 20;
 /// Maximum `/hosted/send` requests per 60-second window.
 const MAX_HOSTED_SENDS_PER_MINUTE: u32 = 120;
+/// Maximum Kora gas sponsorships per 24-hour window.
+/// After this, callers fall back to agent-pays-SOL.
+const MAX_KORA_DAILY_USES: u32 = 100;
 
 // USDC sweep constants
 pub(crate) const USDC_MINT_DEVNET: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
@@ -471,6 +474,8 @@ pub struct ApiInner {
     pub agent_pid: Mutex<Option<u32>>,
     /// Rate limit for POST /agent/reload — max 3 reloads per minute.
     agent_reload_rate_limit: Mutex<RateLimitWindow>,
+    /// Daily budget for Kora gas sponsorship — 100 uses per 24-hour window.
+    kora_daily_uses: Mutex<RateLimitWindow>,
 
     // Skill manager
     /// Zeroclaw workspace directory. When set, skill management endpoints are active.
@@ -579,6 +584,10 @@ impl ApiState {
             bags_launch,
             agent_pid: Mutex::new(None),
             agent_reload_rate_limit: Mutex::new(RateLimitWindow {
+                window_start: now_secs(),
+                count: 0,
+            }),
+            kora_daily_uses: Mutex::new(RateLimitWindow {
                 window_start: now_secs(),
                 count: 0,
             }),
@@ -2151,6 +2160,28 @@ fn ct_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
+/// Claim a Kora gas sponsorship slot from the daily budget.
+///
+/// Returns `true` and increments the counter if a slot is available.
+/// Returns `false` if the 24-hour limit has been reached — callers should
+/// fall back to agent-pays-SOL.
+pub(crate) async fn try_use_kora_budget(state: &ApiState) -> bool {
+    let mut rl = state.0.kora_daily_uses.lock().await;
+    let now = now_secs();
+    if now.saturating_sub(rl.window_start) >= 86_400 {
+        rl.window_start = now;
+        rl.count = 0;
+    }
+    if rl.count >= MAX_KORA_DAILY_USES {
+        tracing::warn!(
+            "Kora daily budget exhausted ({MAX_KORA_DAILY_USES}/day) — falling back to agent-pays-gas"
+        );
+        return false;
+    }
+    rl.count += 1;
+    true
+}
+
 pub(crate) fn require_api_secret_or_unauthorized(
     state: &ApiState,
     headers: &HeaderMap,
@@ -3107,10 +3138,13 @@ pub async fn sweep_usdc(
         }
     };
 
-    // 8. Build, sign, and broadcast — Kora pays gas if configured, otherwise agent pays SOL.
+    // 8. Build, sign, and broadcast — Kora pays gas if configured and within daily budget,
+    //    otherwise agent pays SOL directly.
     let solana_kp = to_solana_keypair(&signing_key);
 
-    if let Some(kora) = state.0.kora.as_ref() {
+    let use_kora_sweep = state.0.kora.is_some() && try_use_kora_budget(&state).await;
+    if use_kora_sweep {
+        let kora = state.0.kora.as_ref().unwrap();
         // ── Kora path: agent partial-signs, Kora adds fee-payer sig + broadcasts ──
         let fee_payer = match kora.get_fee_payer().await {
             Ok(fp) => fp,
@@ -3629,12 +3663,15 @@ async fn bags_launch_handler(
         }
     };
 
-    // Submit fee-share config txs: via Kora (gasless) or direct (agent pays SOL).
-    let use_kora = state.0.kora.is_some() && fee_payer != agent_wallet;
+    // Submit fee-share config txs: via Kora (gasless, within daily budget) or direct.
+    let kora_available_for_launch = state.0.kora.is_some() && fee_payer != agent_wallet;
     let mut fee_share_errors = 0usize;
     for tx_b64 in &fee_share_txs {
         let mut submitted = false;
-        if use_kora {
+        // Check budget per-tx: each Kora sign_and_send costs one daily slot.
+        let use_kora_this_tx =
+            kora_available_for_launch && try_use_kora_budget(&state).await;
+        if use_kora_this_tx {
             if let Some(ref kora) = state.0.kora {
                 match kora.sign_and_send(tx_b64).await {
                     Ok(_) => submitted = true,
@@ -3813,6 +3850,15 @@ async fn bags_claim_handler(
     let agent_pubkey = Pubkey::new_from_array(state.0.node_signing_key.verifying_key().to_bytes());
     let agent_wallet = agent_pubkey.to_string();
 
+    // Capture SOL balance before claiming so we can compute the 1% protocol fee.
+    let pre_sol_balance = crate::bags::get_sol_balance(
+        &state.0.trade_rpc_url,
+        &state.0.http_client,
+        &agent_pubkey,
+    )
+    .await
+    .unwrap_or(0);
+
     let claim_txs = match launch
         .claim_fee_transactions(&agent_wallet, &req.token_mint)
         .await
@@ -3866,6 +3912,15 @@ async fn bags_claim_handler(
                 timestamp: now_secs(),
             })
             .await;
+
+        // Collect 1% protocol fee from SOL income — fire-and-forget.
+        crate::bags::spawn_protocol_fee_collection(
+            state.0.node_signing_key.clone(),
+            agent_pubkey,
+            pre_sol_balance,
+            state.0.trade_rpc_url.clone(),
+            state.0.http_client.clone(),
+        );
     }
 
     Json(serde_json::json!({

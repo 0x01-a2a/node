@@ -225,17 +225,29 @@ pub async fn trade_swap_handler(
         .unwrap_or("0");
     let out_amount: u64 = out_amount_str.parse().unwrap_or(0);
 
-    let kora_fee_payer_opt = if let Some(ref kora) = state.inner().kora {
-        match kora.get_fee_payer().await {
-            Ok(fp) => Some(fp),
-            Err(e) => {
-                tracing::warn!("Failed to get Kora fee payer, falling back to signer: {e}");
+    // Wrapped SOL mint — if the user is selling SOL they already have gas,
+    // so Kora sponsorship is unnecessary. Only sponsor token→anything swaps.
+    const WRAPPED_SOL: &str = "So11111111111111111111111111111111111111112";
+    let selling_sol = req.input_mint == WRAPPED_SOL;
+
+    // Resolve Kora fee payer only when sponsorship is appropriate and the
+    // daily budget has not been exhausted.
+    let kora_fee_payer_opt =
+        if !selling_sol && crate::api::try_use_kora_budget(&state).await {
+            if let Some(ref kora) = state.inner().kora {
+                match kora.get_fee_payer().await {
+                    Ok(fp) => Some(fp),
+                    Err(e) => {
+                        tracing::warn!("Kora fee payer unavailable, agent pays gas: {e}");
+                        None
+                    }
+                }
+            } else {
                 None
             }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     let swap_req = JupiterSwapRequest {
         user_public_key: signer.to_string(),
@@ -300,7 +312,11 @@ pub async fn trade_swap_handler(
     let msg_bytes = versioned_tx.message.serialize();
     let sig = signing_key.sign(&msg_bytes);
 
-    let txid = if let Some(ref kora) = state.inner().kora {
+    // Use Kora only when a fee payer was successfully resolved above
+    // (i.e. not selling SOL, budget available, Kora online).
+    let txid = if let Some(ref kora_fee_payer) = kora_fee_payer_opt {
+        let _ = kora_fee_payer; // fee payer already embedded in the Jupiter tx
+        let kora = state.inner().kora.as_ref().unwrap(); // safe: kora_fee_payer_opt implies kora is Some
         let signer_index = versioned_tx
             .message
             .static_account_keys()
@@ -324,6 +340,7 @@ pub async fn trade_swap_handler(
             Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("Kora send failed: {e}")),
         }
     } else {
+        // Agent is fee payer — normal broadcast (works for SOL swaps and Kora fallback).
         if !versioned_tx.signatures.is_empty() {
             versioned_tx.signatures[0] = solana_sdk::signature::Signature::from(sig.to_bytes());
         }

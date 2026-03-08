@@ -4074,16 +4074,30 @@ async fn agent_reload(headers: HeaderMap, State(state): State<ApiState>) -> Resp
             .into_response(),
         Some(pid) => {
             // SIGTERM — zeroclaw exits gracefully, NodeService auto-restarts it.
-            let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-            if result == 0 {
-                tracing::info!("Sent SIGTERM to agent PID {pid} for skill reload");
-                Json(serde_json::json!({"ok": true, "pid": pid})).into_response()
-            } else {
-                let err = std::io::Error::last_os_error();
-                tracing::warn!("Failed to send SIGTERM to agent PID {pid}: {err}");
+            // kill(2) is Unix-only; on Windows the skill manager cannot be used
+            // (zeroclaw only runs on Android/Linux), so return a clear error.
+            #[cfg(unix)]
+            {
+                let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+                if result == 0 {
+                    tracing::info!("Sent SIGTERM to agent PID {pid} for skill reload");
+                    Json(serde_json::json!({"ok": true, "pid": pid})).into_response()
+                } else {
+                    let err = std::io::Error::last_os_error();
+                    tracing::warn!("Failed to send SIGTERM to agent PID {pid}: {err}");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": format!("kill({pid}): {err}")})),
+                    )
+                        .into_response()
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = pid;
                 (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": format!("kill({pid}): {err}")})),
+                    StatusCode::NOT_IMPLEMENTED,
+                    Json(serde_json::json!({"error": "agent reload not supported on this platform"})),
                 )
                     .into_response()
             }

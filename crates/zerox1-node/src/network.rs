@@ -145,7 +145,14 @@ pub fn build_swarm(
             yamux::Config::default,
         )?
         .with_quic()
-        .with_dns()?
+        // Android has no /etc/resolv.conf; fall back to Cloudflare DNS.
+        // with_dns() reads the system resolver config and fails on Android with
+        // "io error: No such file or directory".  with_dns_config() uses an
+        // explicit resolver config and never touches the filesystem.
+        .with_dns_config(
+            libp2p::dns::ResolverConfig::cloudflare(),
+            libp2p::dns::ResolverOpts::default(),
+        )
         .with_relay_client(noise::Config::new, yamux::Config::default)?
         .with_behaviour(|key, relay_client| {
             let peer_id = key.public().to_peer_id();

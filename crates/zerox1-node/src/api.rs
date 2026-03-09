@@ -768,6 +768,10 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
             "/registry/8004/register-submit",
             post(registry_8004_register_submit),
         )
+        .route(
+            "/registry/8004/register-local",
+            post(registry_8004_register_local),
+        )
         // Escrow
         .route("/escrow/lock", post(escrow_lock))
         .route("/escrow/approve", post(escrow_approve))
@@ -2702,6 +2706,181 @@ async fn registry_8004_register_submit(
         }
         Err(e) => {
             tracing::warn!("8004 registration broadcast failed: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("broadcast failed: {e}") })),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ============================================================================
+// 8004 register-local — all-in-one: prepare + sign with node key + broadcast
+// ============================================================================
+
+#[derive(Deserialize)]
+struct RegisterLocalRequest {
+    #[serde(default)]
+    agent_uri: String,
+}
+
+/// POST /registry/8004/register-local
+///
+/// Convenience endpoint: builds the register transaction using the node's own
+/// Ed25519 key as the owner, signs the message internally, and broadcasts.
+/// No external wallet or signature needed — the node registers itself.
+///
+/// Returns `{ signature, asset_pubkey, explorer }`.
+async fn registry_8004_register_local(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Json(req): Json<RegisterLocalRequest>,
+) -> Response {
+    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
+        return resp;
+    }
+
+    // Rate-limit: reuse the prepare bucket (same external RPC call cost).
+    {
+        let now = now_secs();
+        let mut rl = state.0.registry_prepare_rate_limit.lock().await;
+        if now.saturating_sub(rl.window_start) >= 60 {
+            rl.window_start = now;
+            rl.count = 0;
+        }
+        if rl.count >= MAX_REGISTRY_PREPARE_PER_MINUTE {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({ "error": "rate limit exceeded — try again in 60s" })),
+            )
+                .into_response();
+        }
+        rl.count += 1;
+    }
+
+    // Derive owner pubkey from the node's own signing key.
+    let signing_key = Arc::clone(&state.0.node_signing_key);
+    let owner_pubkey = Pubkey::from(signing_key.verifying_key().to_bytes());
+
+    // Validate agent_uri length (same guard as register-prepare).
+    let agent_uri = req.agent_uri.trim();
+    if agent_uri.len() > 250 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "agent_uri exceeds 250 bytes" })),
+        )
+            .into_response();
+    }
+    if agent_uri.chars().any(|c| c.is_control()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "agent_uri contains control characters" })),
+        )
+            .into_response();
+    }
+
+    let blockhash = match fetch_latest_blockhash(&state.0.rpc_url, &state.0.http_client).await {
+        Ok(bh) => bh,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("blockhash fetch failed: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    let collection_override = state
+        .0
+        .registry_8004_collection
+        .as_deref()
+        .and_then(|s| s.parse::<Pubkey>().ok());
+
+    let prepared = match build_register_tx(
+        owner_pubkey,
+        agent_uri,
+        blockhash,
+        state.0.is_mainnet,
+        collection_override,
+        None,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("tx build failed: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    // Sign the message with the node's own Ed25519 key.
+    let message_bytes = match B64.decode(&prepared.message_b64) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("message decode failed: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    use ed25519_dalek::Signer as _;
+    let owner_sig: ed25519_dalek::Signature = signing_key.sign(&message_bytes);
+    let sig_arr: [u8; 64] = owner_sig.to_bytes();
+
+    // Deserialize the partially-signed tx, inject owner sig, reserialise and broadcast.
+    let tx_bytes = match B64.decode(&prepared.transaction_b64) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("tx decode failed: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    let mut tx: solana_sdk::transaction::Transaction = match bincode::deserialize(&tx_bytes) {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("tx deserialize failed: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    tx.signatures[0] = solana_sdk::signature::Signature::from(sig_arr);
+
+    let signed_bytes = match bincode::serialize(&tx) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("re-serialize failed: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    let signed_b64 = B64.encode(&signed_bytes);
+
+    match broadcast_transaction(&state.0.rpc_url, &state.0.http_client, &signed_b64).await {
+        Ok(signature) => {
+            tracing::info!("8004 register-local broadcast: tx={signature}");
+            Json(serde_json::json!({
+                "signature":   signature,
+                "asset_pubkey": prepared.asset_pubkey,
+                "explorer": format!(
+                    "https://explorer.solana.com/tx/{}?cluster={}",
+                    signature,
+                    if state.0.is_mainnet { "mainnet-beta" } else { "devnet" }
+                ),
+            }))
+            .into_response()
+        }
+        Err(e) => {
+            tracing::warn!("8004 register-local broadcast failed: {e}");
             (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({ "error": format!("broadcast failed: {e}") })),

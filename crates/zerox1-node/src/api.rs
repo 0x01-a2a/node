@@ -803,6 +803,12 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
     let router = router
         .route("/trade/swap", post(crate::trade::trade_swap_handler))
         .route("/trade/quote", get(crate::trade::trade_quote_handler))
+        .route("/trade/price", get(crate::trade::trade_price_handler))
+        .route("/trade/tokens", get(crate::trade::trade_tokens_handler))
+        .route("/trade/limit/create", post(crate::trade::trade_limit_create_handler))
+        .route("/trade/limit/orders", get(crate::trade::trade_limit_orders_handler))
+        .route("/trade/limit/cancel", post(crate::trade::trade_limit_cancel_handler))
+        .route("/trade/dca/create", post(crate::trade::trade_dca_create_handler))
         .route("/portfolio/history", get(portfolio_history))
         .route("/portfolio/balances", get(portfolio_balances));
 

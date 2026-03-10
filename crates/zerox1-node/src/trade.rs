@@ -72,6 +72,8 @@ struct JupiterSwapResponse {
 
 // ── Swap whitelist ────────────────────────────────────────────────────────
 
+/// Previously enforced whitelist — kept for reference, no longer checked at runtime.
+#[allow(dead_code)]
 /// Token mints allowed in agent-to-agent swaps.
 ///
 /// Enforced at the node level so the protection applies to every caller
@@ -98,6 +100,7 @@ const SWAP_WHITELIST: &[&str] = &[
     "Bags4uLBdNscWBnHmqBozrjSScnEqPx5qZBzLiqnRVN7",
 ];
 
+#[allow(dead_code)]
 fn is_whitelisted(mint: &str) -> bool {
     SWAP_WHITELIST.contains(&mint)
 }
@@ -162,21 +165,6 @@ pub async fn trade_swap_handler(
     }
     if req.input_mint == req.output_mint {
         return err_resp(StatusCode::BAD_REQUEST, "mints must differ".into());
-    }
-    if !is_whitelisted(&req.input_mint) {
-        return err_resp(
-            StatusCode::BAD_REQUEST,
-            format!("input_mint {} is not in the swap whitelist", req.input_mint),
-        );
-    }
-    if !is_whitelisted(&req.output_mint) {
-        return err_resp(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "output_mint {} is not in the swap whitelist",
-                req.output_mint
-            ),
-        );
     }
     if req.amount == 0 {
         return err_resp(StatusCode::BAD_REQUEST, "amount must be > 0".into());
@@ -521,4 +509,457 @@ pub async fn trade_quote_handler(
     };
 
     Json(json).into_response()
+}
+
+// ============================================================================
+// Price, token search, limit orders, DCA
+// ============================================================================
+
+/// Jupiter token list base — free, no key required.
+const JUPITER_TOKEN_BASE: &str = "https://tokens.jup.ag";
+
+/// Jupiter full API base — used for limit orders and DCA.
+/// Identical to the lite base for price/quote but needed separately for routing.
+const JUPITER_FULL_BASE: &str = "https://api.jup.ag";
+
+fn jup_swap_base(state: &ApiState) -> &str {
+    state.inner().jupiter_api_url.as_deref().unwrap_or(JUPITER_LITE_BASE)
+}
+
+// ── Price ──────────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct PriceQuery {
+    /// Comma-separated list of token mint addresses.
+    pub ids: String,
+}
+
+/// GET /trade/price?ids=mint1,mint2,...
+///
+/// Returns current USD price for each mint via Jupiter Price API v2.
+pub async fn trade_price_handler(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    axum::extract::Query(query): axum::extract::Query<PriceQuery>,
+) -> Response {
+    if resolve_hosted_token(&headers).is_none()
+        && require_api_secret_or_unauthorized(&state, &headers).is_some()
+    {
+        return err_resp(StatusCode::UNAUTHORIZED, "unauthorized".into());
+    }
+    // Validate each mint looks like a pubkey before hitting upstream.
+    for id in query.ids.split(',') {
+        let id = id.trim();
+        if !id.is_empty() && !is_valid_pubkey(id) {
+            return err_resp(StatusCode::BAD_REQUEST, format!("invalid mint: {id}"));
+        }
+    }
+    let url = format!(
+        "{}/price/v2?ids={}",
+        jup_swap_base(&state),
+        query.ids
+    );
+    let client = reqwest::Client::new();
+    let res = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("Jupiter price failed: {e}")),
+    };
+    if !res.status().is_success() {
+        return err_resp(StatusCode::BAD_GATEWAY, format!("Jupiter price error: {}", res.status()));
+    }
+    match res.json::<serde_json::Value>().await {
+        Ok(j) => Json(j).into_response(),
+        Err(e) => err_resp(StatusCode::INTERNAL_SERVER_ERROR, format!("Jupiter price parse: {e}")),
+    }
+}
+
+// ── Token search ───────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct TokenSearchQuery {
+    /// Search term — matches name or symbol.
+    pub q: String,
+}
+
+/// GET /trade/tokens?q=search_term
+///
+/// Searches the Jupiter verified token list by name or symbol.
+pub async fn trade_tokens_handler(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    axum::extract::Query(query): axum::extract::Query<TokenSearchQuery>,
+) -> Response {
+    if resolve_hosted_token(&headers).is_none()
+        && require_api_secret_or_unauthorized(&state, &headers).is_some()
+    {
+        return err_resp(StatusCode::UNAUTHORIZED, "unauthorized".into());
+    }
+    let q = query.q.trim().to_string();
+    if q.is_empty() {
+        return err_resp(StatusCode::BAD_REQUEST, "q must not be empty".into());
+    }
+    // Encode the query param safely.
+    let encoded: String = q.chars().flat_map(|c| {
+        if c.is_alphanumeric() || matches!(c, '-' | '_' | ' ') {
+            vec![c]
+        } else {
+            format!("%{:02X}", c as u32).chars().collect()
+        }
+    }).collect::<String>().replace(' ', "+");
+
+    let url = format!("{}/search?query={}&limit=20", JUPITER_TOKEN_BASE, encoded);
+    let client = reqwest::Client::new();
+    let res = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("token search failed: {e}")),
+    };
+    if !res.status().is_success() {
+        return err_resp(StatusCode::BAD_GATEWAY, format!("token search error: {}", res.status()));
+    }
+    match res.json::<serde_json::Value>().await {
+        Ok(j) => Json(j).into_response(),
+        Err(e) => err_resp(StatusCode::INTERNAL_SERVER_ERROR, format!("token search parse: {e}")),
+    }
+}
+
+// ── Limit orders ───────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct LimitCreateRequest {
+    pub input_mint: String,
+    pub output_mint: String,
+    /// Amount of input_mint to spend (in base units).
+    pub making_amount: u64,
+    /// Amount of output_mint to receive (in base units).
+    pub taking_amount: u64,
+    /// Optional unix timestamp when the order expires.
+    pub expired_at: Option<u64>,
+}
+
+/// POST /trade/limit/create — place a limit order via Jupiter Limit Order v2.
+///
+/// Builds the order tx, signs with the agent key, and broadcasts.
+pub async fn trade_limit_create_handler(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Json(req): Json<LimitCreateRequest>,
+) -> Response {
+    let signing_key = if let Some(token) = resolve_hosted_token(&headers) {
+        match resolve_active_hosted_signing_key(&state, &token).await {
+            Some(k) => k,
+            None => return err_resp(StatusCode::UNAUTHORIZED, "invalid token".into()),
+        }
+    } else if require_api_secret_or_unauthorized(&state, &headers).is_none() {
+        state.inner().node_signing_key.as_ref().clone()
+    } else {
+        return err_resp(StatusCode::UNAUTHORIZED, "unauthorized".into());
+    };
+
+    if !is_valid_pubkey(&req.input_mint) || !is_valid_pubkey(&req.output_mint) {
+        return err_resp(StatusCode::BAD_REQUEST, "invalid mint".into());
+    }
+    if req.input_mint == req.output_mint {
+        return err_resp(StatusCode::BAD_REQUEST, "mints must differ".into());
+    }
+    if req.making_amount == 0 || req.taking_amount == 0 {
+        return err_resp(StatusCode::BAD_REQUEST, "amounts must be > 0".into());
+    }
+
+    let wallet = solana_sdk::pubkey::Pubkey::from(signing_key.verifying_key().to_bytes()).to_string();
+    let url = format!("{}/limit/v2/createOrder", JUPITER_FULL_BASE);
+    let body = serde_json::json!({
+        "inputMint": req.input_mint,
+        "outputMint": req.output_mint,
+        "maker": wallet,
+        "payer": wallet,
+        "params": {
+            "makingAmount": req.making_amount.to_string(),
+            "takingAmount": req.taking_amount.to_string(),
+            "expiredAt": req.expired_at,
+        }
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+    let res = match client.post(&url).json(&body).send().await {
+        Ok(r) => r,
+        Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("limit create failed: {e}")),
+    };
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return err_resp(StatusCode::BAD_GATEWAY, format!("limit create error {status}: {text}"));
+    }
+    let order_json: serde_json::Value = match res.json().await {
+        Ok(j) => j,
+        Err(e) => return err_resp(StatusCode::INTERNAL_SERVER_ERROR, format!("limit parse: {e}")),
+    };
+
+    // Sign and broadcast the returned transaction.
+    let tx_b64 = match order_json.get("tx").and_then(|v| v.as_str()) {
+        Some(t) => t.to_string(),
+        None => return err_resp(StatusCode::BAD_GATEWAY, "limit create: missing tx field".into()),
+    };
+    let order_key = order_json.get("order").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    let tx_bytes = match B64.decode(&tx_b64) {
+        Ok(b) => b,
+        Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("limit tx decode: {e}")),
+    };
+    let mut versioned_tx: VersionedTransaction = match bincode::deserialize(&tx_bytes) {
+        Ok(t) => t,
+        Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("limit tx deserialize: {e}")),
+    };
+    let signer_pk = solana_sdk::pubkey::Pubkey::from(signing_key.verifying_key().to_bytes());
+    let msg_bytes = versioned_tx.message.serialize();
+    let sig = signing_key.sign(&msg_bytes);
+    if let Some(idx) = versioned_tx.message.static_account_keys().iter().position(|&k| k == signer_pk) {
+        if idx < versioned_tx.signatures.len() {
+            versioned_tx.signatures[idx] = solana_sdk::signature::Signature::from(sig.to_bytes());
+        }
+    }
+    let rpc = RpcClient::new(state.inner().trade_rpc_url.clone());
+    match rpc.send_and_confirm_transaction(&versioned_tx).await {
+        Ok(txid) => Json(serde_json::json!({ "order": order_key, "txid": txid.to_string() })).into_response(),
+        Err(e) => err_resp(StatusCode::BAD_GATEWAY, format!("limit broadcast: {e}")),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct LimitOrdersQuery {
+    pub wallet: Option<String>,
+}
+
+/// GET /trade/limit/orders — list open limit orders for the agent wallet.
+pub async fn trade_limit_orders_handler(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    axum::extract::Query(query): axum::extract::Query<LimitOrdersQuery>,
+) -> Response {
+    if resolve_hosted_token(&headers).is_none()
+        && require_api_secret_or_unauthorized(&state, &headers).is_some()
+    {
+        return err_resp(StatusCode::UNAUTHORIZED, "unauthorized".into());
+    }
+    let wallet = match query.wallet {
+        Some(w) => w,
+        None => {
+            let pk = solana_sdk::pubkey::Pubkey::from(state.inner().node_signing_key.verifying_key().to_bytes());
+            pk.to_string()
+        }
+    };
+    let url = format!("{}/limit/v2/openOrders?wallet={}", JUPITER_FULL_BASE, wallet);
+    let client = reqwest::Client::new();
+    let res = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("limit orders failed: {e}")),
+    };
+    if !res.status().is_success() {
+        return err_resp(StatusCode::BAD_GATEWAY, format!("limit orders error: {}", res.status()));
+    }
+    match res.json::<serde_json::Value>().await {
+        Ok(j) => Json(j).into_response(),
+        Err(e) => err_resp(StatusCode::INTERNAL_SERVER_ERROR, format!("limit orders parse: {e}")),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct LimitCancelRequest {
+    pub orders: Vec<String>,
+}
+
+/// POST /trade/limit/cancel — cancel one or more open limit orders.
+///
+/// Signs and broadcasts each cancel transaction returned by Jupiter.
+pub async fn trade_limit_cancel_handler(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Json(req): Json<LimitCancelRequest>,
+) -> Response {
+    let signing_key = if let Some(token) = resolve_hosted_token(&headers) {
+        match resolve_active_hosted_signing_key(&state, &token).await {
+            Some(k) => k,
+            None => return err_resp(StatusCode::UNAUTHORIZED, "invalid token".into()),
+        }
+    } else if require_api_secret_or_unauthorized(&state, &headers).is_none() {
+        state.inner().node_signing_key.as_ref().clone()
+    } else {
+        return err_resp(StatusCode::UNAUTHORIZED, "unauthorized".into());
+    };
+
+    if req.orders.is_empty() {
+        return err_resp(StatusCode::BAD_REQUEST, "orders must not be empty".into());
+    }
+
+    let wallet = solana_sdk::pubkey::Pubkey::from(signing_key.verifying_key().to_bytes()).to_string();
+    let url = format!("{}/limit/v2/cancelOrders", JUPITER_FULL_BASE);
+    let body = serde_json::json!({
+        "maker": wallet,
+        "computeUnitPrice": "auto",
+        "orders": req.orders,
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+    let res = match client.post(&url).json(&body).send().await {
+        Ok(r) => r,
+        Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("limit cancel failed: {e}")),
+    };
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return err_resp(StatusCode::BAD_GATEWAY, format!("limit cancel error {status}: {text}"));
+    }
+    let cancel_json: serde_json::Value = match res.json().await {
+        Ok(j) => j,
+        Err(e) => return err_resp(StatusCode::INTERNAL_SERVER_ERROR, format!("cancel parse: {e}")),
+    };
+
+    let txs = cancel_json.get("txs").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let signer_pk = solana_sdk::pubkey::Pubkey::from(signing_key.verifying_key().to_bytes());
+    let rpc = RpcClient::new(state.inner().trade_rpc_url.clone());
+    let mut txids: Vec<String> = Vec::new();
+
+    for tx_val in &txs {
+        let tx_b64 = match tx_val.as_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        let tx_bytes = match B64.decode(tx_b64) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let mut vtx: VersionedTransaction = match bincode::deserialize(&tx_bytes) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let msg_bytes = vtx.message.serialize();
+        let sig = signing_key.sign(&msg_bytes);
+        if let Some(idx) = vtx.message.static_account_keys().iter().position(|&k| k == signer_pk) {
+            if idx < vtx.signatures.len() {
+                vtx.signatures[idx] = solana_sdk::signature::Signature::from(sig.to_bytes());
+            }
+        }
+        match rpc.send_and_confirm_transaction(&vtx).await {
+            Ok(s) => txids.push(s.to_string()),
+            Err(e) => tracing::warn!("limit cancel broadcast failed: {e}"),
+        }
+    }
+
+    Json(serde_json::json!({ "cancelled": txids.len(), "txids": txids })).into_response()
+}
+
+// ── DCA ────────────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct DcaCreateRequest {
+    pub input_mint: String,
+    pub output_mint: String,
+    /// Total amount of input_mint to DCA (base units).
+    pub in_amount: u64,
+    /// Amount to swap per cycle (base units).
+    pub in_amount_per_cycle: u64,
+    /// Seconds between each swap cycle.
+    pub cycle_seconds: u64,
+    /// Optional minimum output per cycle (base units).
+    pub min_out_amount_per_cycle: Option<u64>,
+    /// Optional maximum output per cycle (base units).
+    pub max_out_amount_per_cycle: Option<u64>,
+}
+
+/// POST /trade/dca/create — create a DCA (dollar-cost averaging) order.
+///
+/// Builds the DCA tx, signs, and broadcasts.
+pub async fn trade_dca_create_handler(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Json(req): Json<DcaCreateRequest>,
+) -> Response {
+    let signing_key = if let Some(token) = resolve_hosted_token(&headers) {
+        match resolve_active_hosted_signing_key(&state, &token).await {
+            Some(k) => k,
+            None => return err_resp(StatusCode::UNAUTHORIZED, "invalid token".into()),
+        }
+    } else if require_api_secret_or_unauthorized(&state, &headers).is_none() {
+        state.inner().node_signing_key.as_ref().clone()
+    } else {
+        return err_resp(StatusCode::UNAUTHORIZED, "unauthorized".into());
+    };
+
+    if !is_valid_pubkey(&req.input_mint) || !is_valid_pubkey(&req.output_mint) {
+        return err_resp(StatusCode::BAD_REQUEST, "invalid mint".into());
+    }
+    if req.input_mint == req.output_mint {
+        return err_resp(StatusCode::BAD_REQUEST, "mints must differ".into());
+    }
+    if req.in_amount == 0 || req.in_amount_per_cycle == 0 || req.cycle_seconds == 0 {
+        return err_resp(StatusCode::BAD_REQUEST, "amounts and cycle_seconds must be > 0".into());
+    }
+    if req.in_amount_per_cycle > req.in_amount {
+        return err_resp(StatusCode::BAD_REQUEST, "in_amount_per_cycle cannot exceed in_amount".into());
+    }
+
+    let wallet = solana_sdk::pubkey::Pubkey::from(signing_key.verifying_key().to_bytes()).to_string();
+    let url = format!("{}/dca/v2/createDca", JUPITER_FULL_BASE);
+    let body = serde_json::json!({
+        "payer": wallet,
+        "inputMint": req.input_mint,
+        "outputMint": req.output_mint,
+        "inAmount": req.in_amount,
+        "inAmountPerCycle": req.in_amount_per_cycle,
+        "cycleSecondsApart": req.cycle_seconds,
+        "minOutAmountPerCycle": req.min_out_amount_per_cycle,
+        "maxOutAmountPerCycle": req.max_out_amount_per_cycle,
+        "startAt": null,
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+    let res = match client.post(&url).json(&body).send().await {
+        Ok(r) => r,
+        Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("DCA create failed: {e}")),
+    };
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return err_resp(StatusCode::BAD_GATEWAY, format!("DCA create error {status}: {text}"));
+    }
+    let dca_json: serde_json::Value = match res.json().await {
+        Ok(j) => j,
+        Err(e) => return err_resp(StatusCode::INTERNAL_SERVER_ERROR, format!("DCA parse: {e}")),
+    };
+
+    let tx_b64 = match dca_json.get("tx").and_then(|v| v.as_str()) {
+        Some(t) => t.to_string(),
+        None => return err_resp(StatusCode::BAD_GATEWAY, "DCA create: missing tx field".into()),
+    };
+    let dca_key = dca_json.get("dcaKey").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    let tx_bytes = match B64.decode(&tx_b64) {
+        Ok(b) => b,
+        Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("DCA tx decode: {e}")),
+    };
+    let mut versioned_tx: VersionedTransaction = match bincode::deserialize(&tx_bytes) {
+        Ok(t) => t,
+        Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("DCA tx deserialize: {e}")),
+    };
+    let signer_pk = solana_sdk::pubkey::Pubkey::from(signing_key.verifying_key().to_bytes());
+    let msg_bytes = versioned_tx.message.serialize();
+    let sig = signing_key.sign(&msg_bytes);
+    if let Some(idx) = versioned_tx.message.static_account_keys().iter().position(|&k| k == signer_pk) {
+        if idx < versioned_tx.signatures.len() {
+            versioned_tx.signatures[idx] = solana_sdk::signature::Signature::from(sig.to_bytes());
+        }
+    }
+    let rpc = RpcClient::new(state.inner().trade_rpc_url.clone());
+    match rpc.send_and_confirm_transaction(&versioned_tx).await {
+        Ok(txid) => Json(serde_json::json!({ "dca_key": dca_key, "txid": txid.to_string() })).into_response(),
+        Err(e) => err_resp(StatusCode::BAD_GATEWAY, format!("DCA broadcast: {e}")),
+    }
 }

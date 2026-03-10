@@ -327,9 +327,10 @@ impl BagsLaunchClient {
                 form = form.text("telegram", u.to_string());
             }
 
+            let key = self.api_key.read().map(|k| k.clone()).unwrap_or_default();
             self.client
                 .post(&url)
-                .header("x-api-key", &self.api_key)
+                .header("x-api-key", &key)
                 .multipart(form)
                 .timeout(std::time::Duration::from_secs(60))
                 .send()
@@ -450,6 +451,162 @@ impl BagsLaunchClient {
             .json()
             .await
             .map_err(|e| anyhow!("Bags claim-txs parse error: {e}"))
+    }
+
+    /// GET helper with x-api-key header and 429 detection.
+    async fn get_json(&self, path: &str) -> anyhow::Result<reqwest::Response> {
+        let key = self.api_key.read().map(|k| k.clone()).unwrap_or_default();
+        let resp = self
+            .client
+            .get(format!("{}/{}", self.api_url, path))
+            .header("x-api-key", &key)
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(|e| anyhow!("Bags API GET /{path} failed: {e}"))?;
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(anyhow!("bags_rate_limited"));
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("Bags API GET /{path} returned {status}: {text}"));
+        }
+        Ok(resp)
+    }
+
+    /// Get a swap quote for buying or selling a token on the Bags.fm AMM.
+    ///
+    /// `action` must be `"buy"` or `"sell"`.
+    /// `amount` is lamports for buys, token base units for sells.
+    /// Returns the raw Bags quote JSON — pass it to `build_swap_transaction`.
+    pub async fn swap_quote(
+        &self,
+        token_mint: &str,
+        amount: u64,
+        action: &str,
+        slippage_bps: Option<u32>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let mut body = serde_json::json!({
+            "tokenMint": token_mint,
+            "amount": amount,
+            "action": action,
+        });
+        if let Some(bps) = slippage_bps {
+            body["slippageBps"] = bps.into();
+        }
+        self.post_json("swap/quote", &body)
+            .await?
+            .json()
+            .await
+            .map_err(|e| anyhow!("Bags swap/quote parse error: {e}"))
+    }
+
+    /// Build a swap transaction from a quote response.
+    ///
+    /// Returns raw transaction bytes (decoded from base58) ready to sign and broadcast.
+    pub async fn build_swap_transaction(
+        &self,
+        wallet: &str,
+        quote: &serde_json::Value,
+    ) -> anyhow::Result<Vec<u8>> {
+        #[derive(Deserialize)]
+        struct SwapTxResponse {
+            transaction: String,
+        }
+        let mut body = serde_json::json!({ "wallet": wallet });
+        if let Some(id) = quote.get("quoteId").and_then(|v| v.as_str()) {
+            body["quoteId"] = id.into();
+        } else {
+            body["quote"] = quote.clone();
+        }
+        let r: SwapTxResponse = self
+            .post_json("swap/transaction", &body)
+            .await?
+            .json()
+            .await
+            .map_err(|e| anyhow!("Bags swap/transaction parse error: {e}"))?;
+        bs58::decode(&r.transaction)
+            .into_vec()
+            .map_err(|e| anyhow!("Bags swap tx base58 decode error: {e}"))
+    }
+
+    /// Get Bags AMM pool info for a token mint.
+    ///
+    /// Returns raw JSON with reserve amounts, implied price, TVL, and volume.
+    pub async fn pool_info(&self, token_mint: &str) -> anyhow::Result<serde_json::Value> {
+        self.get_json(&format!("tokens/{token_mint}/pool"))
+            .await?
+            .json()
+            .await
+            .map_err(|e| anyhow!("Bags pool info parse error: {e}"))
+    }
+
+    /// Get all claimable fee positions for the given wallet.
+    pub async fn claimable_positions(&self, wallet: &str) -> anyhow::Result<serde_json::Value> {
+        let encoded: String = wallet
+            .chars()
+            .flat_map(|c| {
+                if c.is_alphanumeric() {
+                    vec![c]
+                } else {
+                    format!("%{:02X}", c as u32).chars().collect()
+                }
+            })
+            .collect();
+        self.get_json(&format!("claims/claimable-positions?wallet={encoded}"))
+            .await?
+            .json()
+            .await
+            .map_err(|e| anyhow!("Bags claimable-positions parse error: {e}"))
+    }
+
+    /// Check whether a Dexscreener listing is available for a token and get the cost.
+    pub async fn dexscreener_check(&self, token_mint: &str) -> anyhow::Result<serde_json::Value> {
+        self.get_json(&format!(
+            "dexscreener/order/availability?tokenMint={token_mint}"
+        ))
+        .await?
+        .json()
+        .await
+        .map_err(|e| anyhow!("Bags dexscreener check parse error: {e}"))
+    }
+
+    /// Create a Dexscreener listing order.
+    ///
+    /// Returns a JSON object that includes `orderId` and a `transaction`
+    /// field (the payment tx the caller must sign and submit).
+    pub async fn dexscreener_create_order(
+        &self,
+        token_mint: &str,
+        image_url: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let mut body = serde_json::json!({ "tokenMint": token_mint });
+        if let Some(url) = image_url {
+            body["imageUrl"] = url.into();
+        }
+        self.post_json("dexscreener/order", &body)
+            .await?
+            .json()
+            .await
+            .map_err(|e| anyhow!("Bags dexscreener create-order parse error: {e}"))
+    }
+
+    /// Submit a signed payment transaction for a Dexscreener order.
+    pub async fn dexscreener_pay_order(
+        &self,
+        order_id: &str,
+        signed_tx_b64: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let body = serde_json::json!({
+            "orderId": order_id,
+            "signedTx": signed_tx_b64,
+        });
+        self.post_json("dexscreener/order/payment", &body)
+            .await?
+            .json()
+            .await
+            .map_err(|e| anyhow!("Bags dexscreener pay-order parse error: {e}"))
     }
 
     /// List tokens launched by a given wallet.

@@ -54,10 +54,37 @@ For **intra-org coordination** (colleagues working together), it is the wrong mo
 
 | Class | Messages | Use case |
 |---|---|---|
-| **Collaboration** | `ASSIGN`, `CLARIFY`, `REPORT`, `ESCALATE`, `SYNC` | Intra-org: task delegation, status, escalation to human |
-| **Negotiation** | `PROPOSE`, `COUNTER`, `ACCEPT`, `DELIVER`, `REJECT` | Inter-org: commercial coordination between two organisations |
+| **Collaboration** | `ASSIGN`, `ACK`, `CLARIFY`, `REPORT`, `APPROVE`, `CANCEL`, `ESCALATE`, `SYNC` | Intra-org: task delegation, status, approval gates, escalation to human |
+| **Negotiation** | `PROPOSE`, `COUNTER`, `ACCEPT`, `DELIVER`, `DISPUTE`, `REJECT`, `CANCEL` | Inter-org: commercial coordination between two organisations |
 
 Both classes share the same envelope format, transport layer, and cryptographic signing. The difference is semantics and the absence of a payment leg in the collaboration class.
+
+**Collaboration message semantics:**
+
+| Message | Direction | Meaning |
+|---|---|---|
+| `ASSIGN` | assigner → assignee | Delegate a task with scope and deadline |
+| `ACK` | assignee → assigner | Received and accepted; will proceed |
+| `CLARIFY` | assignee → assigner | Blocking question before work can start |
+| `REPORT` | assignee → assigner | Progress update or completion notice |
+| `APPROVE` | approver → requester | Approve a reported outcome or escalated decision |
+| `CANCEL` | either party | Abort an in-progress task; no further work expected |
+| `ESCALATE` | agent → human supervisor | Requires human decision; includes context and options |
+| `SYNC` | either party | Synchronise shared task or conversation state |
+
+**Negotiation message semantics:**
+
+| Message | Direction | Meaning |
+|---|---|---|
+| `PROPOSE` | buyer → seller | Offer a task with terms |
+| `COUNTER` | seller → buyer | Counter-offer with revised terms |
+| `ACCEPT` | buyer → seller | Accept terms; work may begin |
+| `DELIVER` | seller → buyer | Submit completed work for acceptance |
+| `DISPUTE` | buyer → seller | Challenge a delivery; opens resolution process |
+| `REJECT` | either party | Final refusal of proposal or delivery |
+| `CANCEL` | either party | Cancel an accepted proposal before delivery |
+
+**`SYNC` scope note:** `SYNC` covers task and conversation state within an active workflow — not capability or presence advertisement, which is handled by the existing `BEACON`/`ADVERTISE` messages at the transport layer.
 
 ### 3. Agent runtime: protocol-agnostic interface
 

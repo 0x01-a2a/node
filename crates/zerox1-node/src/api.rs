@@ -817,7 +817,13 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
         .route("/bags/launch", post(bags_launch_handler))
         .route("/bags/claim", post(bags_claim_handler))
         .route("/bags/positions", get(bags_positions_handler))
-        .route("/bags/set-api-key", post(bags_set_api_key_handler));
+        .route("/bags/set-api-key", post(bags_set_api_key_handler))
+        .route("/bags/swap/quote", post(bags_swap_quote_handler))
+        .route("/bags/swap/execute", post(bags_swap_execute_handler))
+        .route("/bags/pool/:mint", get(bags_pool_handler))
+        .route("/bags/claimable", get(bags_claimable_handler))
+        .route("/bags/dexscreener/check/:mint", get(bags_dexscreener_check_handler))
+        .route("/bags/dexscreener/list", post(bags_dexscreener_list_handler));
 
     let app = router
         .layer({
@@ -4239,6 +4245,394 @@ async fn bags_set_api_key_handler(
             Json(serde_json::json!({"error": "Bags not configured"})),
         )
             .into_response(),
+    }
+}
+
+// ============================================================================
+// Bags — swap, pool, claimable positions, Dexscreener listing
+// ============================================================================
+
+#[cfg(feature = "bags")]
+#[derive(Deserialize)]
+struct BagsSwapQuoteRequest {
+    token_mint: String,
+    /// Lamports for buys, token base units for sells.
+    amount: u64,
+    /// `"buy"` or `"sell"`.
+    action: String,
+    slippage_bps: Option<u32>,
+}
+
+/// POST /bags/swap/quote — get a swap quote from the Bags AMM.
+#[cfg(feature = "bags")]
+async fn bags_swap_quote_handler(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Json(req): Json<BagsSwapQuoteRequest>,
+) -> Response {
+    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
+        return resp;
+    }
+    if req.action != "buy" && req.action != "sell" {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": "action must be \"buy\" or \"sell\""})),
+        )
+            .into_response();
+    }
+    if req.token_mint.parse::<Pubkey>().is_err() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": "token_mint is not a valid base58 pubkey"})),
+        )
+            .into_response();
+    }
+    let launch = match state.0.bags_launch.as_ref() {
+        Some(l) => l.clone(),
+        None => return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "Bags API key not configured"})),
+        )
+            .into_response(),
+    };
+    match launch.swap_quote(&req.token_mint, req.amount, &req.action, req.slippage_bps).await {
+        Ok(quote) => Json(quote).into_response(),
+        Err(e) => {
+            let (code, msg) = bags_error_response(&e);
+            (code, Json(serde_json::json!({"error": msg}))).into_response()
+        }
+    }
+}
+
+#[cfg(feature = "bags")]
+#[derive(Deserialize)]
+struct BagsSwapExecuteRequest {
+    token_mint: String,
+    amount: u64,
+    action: String,
+    slippage_bps: Option<u32>,
+}
+
+/// POST /bags/swap/execute — quote + build tx + sign + broadcast in one call.
+#[cfg(feature = "bags")]
+async fn bags_swap_execute_handler(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Json(req): Json<BagsSwapExecuteRequest>,
+) -> Response {
+    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
+        return resp;
+    }
+    if req.action != "buy" && req.action != "sell" {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": "action must be \"buy\" or \"sell\""})),
+        )
+            .into_response();
+    }
+    if req.token_mint.parse::<Pubkey>().is_err() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": "token_mint is not a valid base58 pubkey"})),
+        )
+            .into_response();
+    }
+    let launch = match state.0.bags_launch.as_ref() {
+        Some(l) => l.clone(),
+        None => return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "Bags API key not configured"})),
+        )
+            .into_response(),
+    };
+
+    let agent_pubkey = Pubkey::new_from_array(state.0.node_signing_key.verifying_key().to_bytes());
+    let agent_wallet = agent_pubkey.to_string();
+
+    // Step 1 — get quote.
+    let quote = match launch
+        .swap_quote(&req.token_mint, req.amount, &req.action, req.slippage_bps)
+        .await
+    {
+        Ok(q) => q,
+        Err(e) => {
+            let (code, msg) = bags_error_response(&e);
+            return (code, Json(serde_json::json!({"error": msg}))).into_response();
+        }
+    };
+
+    // Step 2 — build tx.
+    let tx_bytes = match launch.build_swap_transaction(&agent_wallet, &quote).await {
+        Ok(b) => b,
+        Err(e) => {
+            let (code, msg) = bags_error_response(&e);
+            return (code, Json(serde_json::json!({"error": msg}))).into_response();
+        }
+    };
+
+    // Step 3 — sign + broadcast.
+    let mut tx = match bincode::deserialize::<solana_sdk::transaction::Transaction>(&tx_bytes) {
+        Ok(t) => t,
+        Err(e) => return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("swap tx deserialize: {e}")})),
+        )
+            .into_response(),
+    };
+    let kp = to_solana_keypair(&state.0.node_signing_key);
+    tx.partial_sign(&[&kp], tx.message.recent_blockhash);
+    let serialized = match bincode::serialize(&tx) {
+        Ok(b) => b,
+        Err(e) => return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("swap tx serialize: {e}")})),
+        )
+            .into_response(),
+    };
+    match broadcast_transaction(
+        &state.0.trade_rpc_url,
+        &state.0.http_client,
+        &B64.encode(&serialized),
+    )
+    .await
+    {
+        Ok(txid) => Json(serde_json::json!({
+            "txid": txid,
+            "token_mint": req.token_mint,
+            "action": req.action,
+            "amount": req.amount,
+            "quote": quote,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("swap broadcast: {e}")})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /bags/pool/:mint — Bags AMM pool info (reserves, price, TVL, volume).
+#[cfg(feature = "bags")]
+async fn bags_pool_handler(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Path(mint): Path<String>,
+) -> Response {
+    if let Some(resp) = require_read_or_master_access(&state, &headers) {
+        return resp;
+    }
+    if mint.parse::<Pubkey>().is_err() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": "mint is not a valid base58 pubkey"})),
+        )
+            .into_response();
+    }
+    let launch = match state.0.bags_launch.as_ref() {
+        Some(l) => l.clone(),
+        None => return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "Bags API key not configured"})),
+        )
+            .into_response(),
+    };
+    match launch.pool_info(&mint).await {
+        Ok(info) => Json(info).into_response(),
+        Err(e) => {
+            let (code, msg) = bags_error_response(&e);
+            (code, Json(serde_json::json!({"error": msg}))).into_response()
+        }
+    }
+}
+
+/// GET /bags/claimable — all claimable fee positions for the agent wallet.
+#[cfg(feature = "bags")]
+async fn bags_claimable_handler(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+) -> Response {
+    if let Some(resp) = require_read_or_master_access(&state, &headers) {
+        return resp;
+    }
+    let launch = match state.0.bags_launch.as_ref() {
+        Some(l) => l.clone(),
+        None => return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "Bags API key not configured"})),
+        )
+            .into_response(),
+    };
+    let agent_pubkey = Pubkey::new_from_array(state.0.node_signing_key.verifying_key().to_bytes());
+    let agent_wallet = agent_pubkey.to_string();
+    match launch.claimable_positions(&agent_wallet).await {
+        Ok(positions) => Json(positions).into_response(),
+        Err(e) => {
+            let (code, msg) = bags_error_response(&e);
+            (code, Json(serde_json::json!({"error": msg}))).into_response()
+        }
+    }
+}
+
+/// GET /bags/dexscreener/check/:mint — check listing availability and cost.
+#[cfg(feature = "bags")]
+async fn bags_dexscreener_check_handler(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Path(mint): Path<String>,
+) -> Response {
+    if let Some(resp) = require_read_or_master_access(&state, &headers) {
+        return resp;
+    }
+    if mint.parse::<Pubkey>().is_err() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": "mint is not a valid base58 pubkey"})),
+        )
+            .into_response();
+    }
+    let launch = match state.0.bags_launch.as_ref() {
+        Some(l) => l.clone(),
+        None => return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "Bags API key not configured"})),
+        )
+            .into_response(),
+    };
+    match launch.dexscreener_check(&mint).await {
+        Ok(info) => Json(info).into_response(),
+        Err(e) => {
+            let (code, msg) = bags_error_response(&e);
+            (code, Json(serde_json::json!({"error": msg}))).into_response()
+        }
+    }
+}
+
+#[cfg(feature = "bags")]
+#[derive(Deserialize)]
+struct BagsDexscreenerListRequest {
+    token_mint: String,
+    image_url: Option<String>,
+}
+
+/// POST /bags/dexscreener/list — create order + sign payment tx + broadcast.
+///
+/// One-shot: agent calls this and gets back a txid when listing is paid and submitted.
+#[cfg(feature = "bags")]
+async fn bags_dexscreener_list_handler(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Json(req): Json<BagsDexscreenerListRequest>,
+) -> Response {
+    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
+        return resp;
+    }
+    if req.token_mint.parse::<Pubkey>().is_err() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": "token_mint is not a valid base58 pubkey"})),
+        )
+            .into_response();
+    }
+    if let Some(ref url) = req.image_url {
+        if !url.starts_with("https://") {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({"error": "image_url must use HTTPS"})),
+            )
+                .into_response();
+        }
+    }
+    let launch = match state.0.bags_launch.as_ref() {
+        Some(l) => l.clone(),
+        None => return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "Bags API key not configured"})),
+        )
+            .into_response(),
+    };
+
+    // Step 1 — create order, get orderId + payment tx.
+    let order = match launch
+        .dexscreener_create_order(&req.token_mint, req.image_url.as_deref())
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            let (code, msg) = bags_error_response(&e);
+            return (code, Json(serde_json::json!({"error": msg}))).into_response();
+        }
+    };
+
+    let order_id = match order.get("orderId").and_then(|v| v.as_str()) {
+        Some(id) => id.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": "Bags dexscreener order response missing orderId"})),
+            )
+                .into_response()
+        }
+    };
+
+    // Step 2 — sign payment tx and broadcast.
+    let tx_field = match order.get("transaction").and_then(|v| v.as_str()) {
+        Some(t) => t.to_string(),
+        None => {
+            // No tx in response means the order was already paid / no payment needed.
+            return Json(serde_json::json!({
+                "order_id": order_id,
+                "txid": null,
+                "status": "submitted",
+            }))
+            .into_response();
+        }
+    };
+
+    // Try base58 first, then base64.
+    let tx_bytes = bs58::decode(&tx_field).into_vec().or_else(|_| {
+        B64.decode(&tx_field)
+    });
+    let tx_bytes = match tx_bytes {
+        Ok(b) => b,
+        Err(e) => return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("dexscreener payment tx decode: {e}")})),
+        )
+            .into_response(),
+    };
+
+    let mut tx = match bincode::deserialize::<solana_sdk::transaction::Transaction>(&tx_bytes) {
+        Ok(t) => t,
+        Err(e) => return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("dexscreener payment tx deserialize: {e}")})),
+        )
+            .into_response(),
+    };
+    let kp = to_solana_keypair(&state.0.node_signing_key);
+    tx.partial_sign(&[&kp], tx.message.recent_blockhash);
+    let serialized = match bincode::serialize(&tx) {
+        Ok(b) => b,
+        Err(e) => return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("dexscreener payment tx serialize: {e}")})),
+        )
+            .into_response(),
+    };
+    let signed_b64 = B64.encode(&serialized);
+
+    // Step 3 — notify Bags of the signed payment.
+    match launch.dexscreener_pay_order(&order_id, &signed_b64).await {
+        Ok(result) => Json(serde_json::json!({
+            "order_id": order_id,
+            "result": result,
+        }))
+        .into_response(),
+        Err(e) => {
+            let (code, msg) = bags_error_response(&e);
+            (code, Json(serde_json::json!({"error": msg, "order_id": order_id}))).into_response()
+        }
     }
 }
 

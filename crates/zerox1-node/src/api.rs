@@ -28,7 +28,7 @@
 //!   POST /registry/8004/register-submit   — Inject owner sig + broadcast to Solana
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     net::SocketAddr,
     path::PathBuf,
     sync::Arc,
@@ -334,6 +334,9 @@ const MAX_HOSTED_SENDS_PER_MINUTE: u32 = 120;
 /// Maximum Kora gas sponsorships per 24-hour window.
 /// After this, callers fall back to agent-pays-SOL.
 const MAX_KORA_DAILY_USES: u32 = 100;
+/// Maximum byte length of the `message` field in negotiate endpoints.
+/// Prevents a large JSON serialisation from creating an oversized envelope.
+const MAX_NEGOTIATE_MESSAGE_LEN: usize = 4_096;
 
 // USDC sweep constants
 pub(crate) const USDC_MINT_DEVNET: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
@@ -395,7 +398,7 @@ pub struct ApiInner {
     // Visualization state
     peers: RwLock<HashMap<[u8; 32], PeerSnapshot>>,
     reputation: RwLock<HashMap<[u8; 32], ReputationSnapshot>>,
-    batches: RwLock<Vec<BatchSnapshot>>,
+    batches: RwLock<VecDeque<BatchSnapshot>>,
     event_tx: broadcast::Sender<ApiEvent>,
     self_agent: [u8; 32],
     self_name: String,
@@ -539,7 +542,7 @@ impl ApiState {
         let state = Self(Arc::new(ApiInner {
             peers: RwLock::new(HashMap::new()),
             reputation: RwLock::new(HashMap::new()),
-            batches: RwLock::new(Vec::new()),
+            batches: RwLock::new(VecDeque::new()),
             event_tx,
             self_agent,
             self_name,
@@ -645,10 +648,10 @@ impl ApiState {
 
     pub async fn push_batch(&self, snap: BatchSnapshot) {
         let mut batches = self.0.batches.write().await;
-        batches.push(snap);
-        if batches.len() > 200 {
-            batches.remove(0);
+        if batches.len() >= 200 {
+            batches.pop_front();
         }
+        batches.push_back(snap);
     }
 
     /// Broadcast a visualization event to all /ws/events subscribers.
@@ -1211,10 +1214,16 @@ async fn negotiate_propose(
             }
         },
         None => {
-            let b = rand::random::<[u8; 16]>();
+            let b = rand::Rng::gen::<[u8; 16]>(&mut OsRng);
             (hex::encode(b), b)
         }
     };
+    if req.message.len() > MAX_NEGOTIATE_MESSAGE_LEN {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({ "error": "message: exceeds maximum length" })),
+        );
+    }
     let amount = req.amount_usdc_micro.unwrap_or(0);
     let max_rounds = req.max_rounds.unwrap_or(2);
     let payload = build_negotiate_payload(
@@ -1320,12 +1329,19 @@ async fn negotiate_counter(
             )
         }
     };
+    let message = req.message.unwrap_or_default();
+    if message.len() > MAX_NEGOTIATE_MESSAGE_LEN {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({ "error": "message: exceeds maximum length" })),
+        );
+    }
     let payload = build_negotiate_payload(
         req.amount_usdc_micro,
         serde_json::json!({
             "round": req.round,
             "max_rounds": max_rounds,
-            "message": req.message.unwrap_or_default(),
+            "message": message,
         }),
     );
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
@@ -1411,10 +1427,17 @@ async fn negotiate_accept(
             )
         }
     };
+    let message = req.message.unwrap_or_default();
+    if message.len() > MAX_NEGOTIATE_MESSAGE_LEN {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({ "error": "message: exceeds maximum length" })),
+        );
+    }
     let payload = build_negotiate_payload(
         req.amount_usdc_micro,
         serde_json::json!({
-            "message": req.message.unwrap_or_default(),
+            "message": message,
         }),
     );
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
@@ -1501,7 +1524,8 @@ async fn hosted_register(State(state): State<ApiState>) -> impl IntoResponse {
 
     let signing_key = SigningKey::generate(&mut OsRng);
     let agent_id = signing_key.verifying_key().to_bytes();
-    let token = hex::encode(rand::random::<[u8; 32]>());
+    // Use OsRng explicitly for session tokens — same source as the signing key above.
+    let token = hex::encode(rand::Rng::gen::<[u8; 32]>(&mut OsRng));
 
     let session = HostedSession {
         agent_id,
@@ -1668,17 +1692,19 @@ async fn hosted_send(
         }
 
         // Rate limiting: sliding 60-second window.
+        // Check *before* incrementing so the counter never drifts past the
+        // limit on rejected requests, preventing counter wrap-around.
         if now.saturating_sub(session.rate_window_start) >= 60 {
             session.rate_window_start = now;
             session.sends_in_window = 0;
         }
-        session.sends_in_window += 1;
-        if session.sends_in_window > MAX_SENDS_PER_MINUTE {
+        if session.sends_in_window >= MAX_SENDS_PER_MINUTE {
             return (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(serde_json::json!({ "error": "rate limit exceeded" })),
             );
         }
+        session.sends_in_window += 1;
 
         session.nonce += 1;
         Envelope::build(
@@ -1758,7 +1784,7 @@ async fn hosted_negotiate_propose(
             }
         },
         None => {
-            let b = rand::random::<[u8; 16]>();
+            let b = rand::Rng::gen::<[u8; 16]>(&mut OsRng);
             (hex::encode(b), b)
         }
     };
@@ -1794,13 +1820,13 @@ async fn hosted_negotiate_propose(
             session.rate_window_start = now;
             session.sends_in_window = 0;
         }
-        session.sends_in_window += 1;
-        if session.sends_in_window > MAX_SENDS_PER_MINUTE {
+        if session.sends_in_window >= MAX_SENDS_PER_MINUTE {
             return (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(serde_json::json!({ "error": "rate limit exceeded" })),
             );
         }
+        session.sends_in_window += 1;
         session.nonce += 1;
         Envelope::build(
             MsgType::Propose,
@@ -1921,13 +1947,13 @@ async fn hosted_negotiate_counter(
             session.rate_window_start = now;
             session.sends_in_window = 0;
         }
-        session.sends_in_window += 1;
-        if session.sends_in_window > MAX_SENDS_PER_MINUTE {
+        if session.sends_in_window >= MAX_SENDS_PER_MINUTE {
             return (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(serde_json::json!({ "error": "rate limit exceeded" })),
             );
         }
+        session.sends_in_window += 1;
         session.nonce += 1;
         Envelope::build(
             MsgType::Counter,
@@ -2034,13 +2060,13 @@ async fn hosted_negotiate_accept(
             session.rate_window_start = now;
             session.sends_in_window = 0;
         }
-        session.sends_in_window += 1;
-        if session.sends_in_window > MAX_SENDS_PER_MINUTE {
+        if session.sends_in_window >= MAX_SENDS_PER_MINUTE {
             return (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(serde_json::json!({ "error": "rate limit exceeded" })),
             );
         }
+        session.sends_in_window += 1;
         session.nonce += 1;
         Envelope::build(
             MsgType::Accept,
@@ -2180,14 +2206,17 @@ fn parse_msg_type(s: &str) -> Option<MsgType> {
 }
 
 fn ct_eq(a: &str, b: &str) -> bool {
+    // Use u8 accumulator (matches aggregator's implementation).
+    // usize would allow compiler optimisations that can leak timing info on
+    // 64-bit targets — a u8 forces byte-granularity constant-time behaviour.
     let a = a.as_bytes();
     let b = b.as_bytes();
     let len = a.len().max(b.len());
-    let mut diff: usize = a.len() ^ b.len();
+    let mut diff: u8 = (a.len() ^ b.len()) as u8;
     for i in 0..len {
         let x = a.get(i).copied().unwrap_or(0);
         let y = b.get(i).copied().unwrap_or(0);
-        diff |= usize::from(x ^ y);
+        diff |= x ^ y;
     }
     diff == 0
 }
@@ -3685,9 +3714,18 @@ pub async fn portfolio_balances(
     if let Some(accounts) = spl_data["result"]["value"].as_array() {
         for acc in accounts {
             let parsed = &acc["account"]["data"]["parsed"]["info"];
-            let amount_f64 = parsed["tokenAmount"]["uiAmount"].as_f64().unwrap_or(0.0);
+            let Some(amount_f64) = parsed["tokenAmount"]["uiAmount"].as_f64() else {
+                tracing::warn!("portfolio: skipping token account with missing/non-float uiAmount");
+                continue;
+            };
             if amount_f64 > 0.0 {
-                let mint = parsed["mint"].as_str().unwrap_or("").to_string();
+                let mint = match parsed["mint"].as_str() {
+                    Some(m) => m.to_string(),
+                    None => {
+                        tracing::warn!("portfolio: skipping token account with missing mint field");
+                        continue;
+                    }
+                };
                 let decimals = parsed["tokenAmount"]["decimals"].as_u64().unwrap_or(0) as u8;
                 tokens.push(TokenBalance {
                     mint,

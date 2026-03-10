@@ -145,8 +145,13 @@ pub async fn get_lease_status(
                 anyhow::bail!("LeaseAccount discriminator mismatch for {}", pda);
             }
             Ok(Some(LeaseStatus {
-                paid_through_epoch: u64::from_le_bytes(d[73..81].try_into().unwrap()),
-                current_epoch: u64::from_le_bytes(d[89..97].try_into().unwrap()),
+                // Safety: length already validated (d.len() >= 100) above.
+                paid_through_epoch: u64::from_le_bytes(
+                    d[73..81].try_into().expect("slice is exactly 8 bytes"),
+                ),
+                current_epoch: u64::from_le_bytes(
+                    d[89..97].try_into().expect("slice is exactly 8 bytes"),
+                ),
                 in_grace_period: d[97] != 0,
                 deactivated: d[98] != 0,
             }))

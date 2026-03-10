@@ -17,10 +17,11 @@ pub const PROGRAM_ID_DEVNET: &str = "8oo4J9tBB3Hna1jRQ3rWvJjojqM5DYTDJo5cejUuJy3
 pub const PROGRAM_ID_MAINNET: &str = "8oo4dC4JvBLwy5tGgiH3WwK4B9PWxL9Z4XjA2jzkQMbQ";
 pub const COLLECTION_DEVNET: &str = "C6W2bq4BoVT8FDvqhdp3sbcHFBjNBXE8TsNak2wTXQs9";
 pub const COLLECTION_MAINNET: &str = "DbjsWo7iUs7QZyJxLgNyVxvAAjQZCXroJHoGok8h8Umg";
-/// Mainnet Solana RPC — used exclusively for 8004 registration so that the
-/// registration always lands on mainnet regardless of the mesh RPC setting.
+/// Public Solana mainnet RPC used for 8004 registration blockhash + broadcast.
+/// Independent of the mesh `--rpc-url` so registration always lands on the
+/// correct network even when the node operator uses a custom/private RPC.
 pub const RPC_MAINNET: &str = "https://api.mainnet-beta.solana.com";
-/// Devnet Solana RPC — used for 8004 registration when devnet is explicitly requested.
+/// Public Solana devnet RPC — used for 8004 registration on devnet.
 pub const RPC_DEVNET: &str = "https://api.devnet.solana.com";
 const MPL_CORE_PROGRAM: &str = "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d";
 /// `register` instruction discriminator from the IDL.

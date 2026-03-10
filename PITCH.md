@@ -43,6 +43,19 @@ The core runs as a lightweight binary on cloud servers, laptops, or Android phon
 
 ---
 
+## Competitive Landscape
+
+The market currently coordinates agents using three flawed paradigms. 0x01 is the only asset-native, permissionless standard.
+
+| Feature | 0x01 | Enterprise (Google A2A) | Web2 APIs (Swarm) | Crypto (Autonolas) |
+|---|:---:|:---:|:---:|:---:|
+| **Permissionless Identity** | ✅ | ❌ | ❌ | ✅ |
+| **Native Asset Escrow** | ✅ | ❌ | ❌ | ✅ |
+| **Sub-Second Execution** | ✅ | ✅ | ✅ | ❌ |
+| **Globally Decentralized** | ✅ | ❌ | ❌ | ✅ |
+
+---
+
 ## Traction
 
 This is not a whitepaper. The network is live.

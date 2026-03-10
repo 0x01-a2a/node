@@ -221,7 +221,9 @@ pub struct ClaimTx {
 /// All endpoints require an `x-api-key` header (1 000 req/hr rate limit).
 pub struct BagsLaunchClient {
     api_url: String,
-    api_key: String,
+    /// Mutable so the operator can supply their own key at runtime via
+    /// POST /bags/set-api-key without restarting the node.
+    api_key: std::sync::RwLock<String>,
     partner_key: Option<String>,
     client: reqwest::Client,
 }
@@ -230,9 +232,16 @@ impl BagsLaunchClient {
     pub fn new(api_key: String, partner_key: Option<String>, client: reqwest::Client) -> Self {
         Self {
             api_url: BAGS_API_BASE.to_string(),
-            api_key,
+            api_key: std::sync::RwLock::new(api_key),
             partner_key,
             client,
+        }
+    }
+
+    /// Replace the API key in-memory. Takes effect on the next request.
+    pub fn update_api_key(&self, new_key: String) {
+        if let Ok(mut k) = self.api_key.write() {
+            *k = new_key;
         }
     }
 
@@ -248,15 +257,23 @@ impl BagsLaunchClient {
         path: &str,
         body: &serde_json::Value,
     ) -> anyhow::Result<reqwest::Response> {
+        let key = self
+            .api_key
+            .read()
+            .map(|k| k.clone())
+            .unwrap_or_default();
         let resp = self
             .client
             .post(format!("{}/{}", self.api_url, path))
-            .header("x-api-key", &self.api_key)
+            .header("x-api-key", &key)
             .json(body)
             .timeout(std::time::Duration::from_secs(30))
             .send()
             .await
             .map_err(|e| anyhow!("Bags API POST /{path} failed: {e}"))?;
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(anyhow!("bags_rate_limited"));
+        }
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();

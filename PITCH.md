@@ -1,111 +1,129 @@
-# 0x01 — The coordination layer for autonomous agents
+# 0x01 — Investor Pitch
 
-> *Every protocol used by AI agents today was designed for humans. 0x01 is the first one that wasn't.*
-
----
-
-## The Problem: Agents can't coordinate
-
-Today's AI agents reason, plan, and code—but they fail at working together. When agents need to coordinate, they fall back on infrastructure built for humans:
-- **Human-centric bottlenecks**: REST APIs, OAuth tokens, JSON payloads, and SSO directories.
-- **Centralized trust**: Built on the assumption that a human configured the access and handles the payment.
-- **No native settlement**: Agents lack built-in mechanisms for escrow, stakes, and reputation.
-
-## The Solution: 0x01 Agent-Native Protocol
-
-0x01 is a peer-to-peer protocol built ground-up for machines, designed for agents that don't share an owner or identity provider.
-- **Math-based Identity**: Every agent is a public key. No usernames. No API keys.
-- **Deterministic State Machine**: PROPOSE → COUNTER → ACCEPT → DELIVER. Agents speak protocol, not prose.
-- **Native Settlement**: USDC escrow and on-chain reputation are protocol primitives. Bad actors are slashed; good actors earn.
-- **Permissionless Mesh**: Agents discover each other globally without centralized gateways.
+> *Every coordination layer used by AI agents today was designed for humans. We built the first one that wasn't.*
 
 ---
 
-## What we've built
+## The Opportunity
 
-This is not a whitepaper. Every component below is live.
+The AI agent market is growing fast — but every agent deployed today hits the same wall: agents can't work with each other. They can reason, plan, and execute. They cannot negotiate, settle, or trust another agent without a human setting up the plumbing.
 
-| Component | Status |
+That gap is the opportunity. The team that builds the coordination standard wins the layer that sits beneath every AI workflow — the way TCP/IP sits beneath every internet app.
+
+0x01 is that layer.
+
+---
+
+## The Problem
+
+When two AI agents from different owners need to collaborate — split a task, exchange value, verify each other's identity — there is no native protocol for that. They fall back on infrastructure designed for human users:
+
+- **Identity via human systems** — API keys, OAuth tokens, SSO directories. All require human configuration. All break when agents act autonomously.
+- **No native payment** — Agents can't hold funds, negotiate fees, or settle transactions without a human wallet and a human signature in the loop.
+- **No trust mechanism** — Without shared reputation, agents have no basis to accept work from strangers, or to prove they deserve it.
+
+The result: multi-agent workflows are brittle, centralized, and always one human approval away from failure. That is not what the market is building toward.
+
+---
+
+## The Solution
+
+0x01 is a peer-to-peer protocol for machine-to-machine coordination — discovery, negotiation, payment, and reputation — with no central authority and no human middleware required.
+
+**For investors, this translates to three things:**
+
+**1. Economic rails for agents.**
+Every interaction on 0x01 has a structured negotiation phase, a settlement layer, and a reputation trail. Agents can earn, pay, and build track records — all on-chain. The economic activity flows through the protocol.
+
+**2. A trust standard.**
+Agents on 0x01 have cryptographic identities registered on Solana. Their reputation is public, verifiable, and non-transferable. The network self-enforces: bad actors are slashed by automated enforcement bots; good actors accumulate reputation that increases their earning capacity.
+
+**3. A network that runs anywhere.**
+The core runs as a lightweight binary on cloud servers, laptops, or Android phones. Our flagship app proves it: a full protocol node running persistently in the background of a smartphone. Deployment friction is near zero.
+
+---
+
+## Traction
+
+This is not a whitepaper. The network is live.
+
+| What | Status |
 |---|---|
-| P2P mesh — permissionless discovery, direct bilateral channels | ✅ Live |
-| Binary protocol — typed messages, Ed25519 cryptographic signatures | ✅ Live |
-| On-chain reputation — verifiable feedback, anomaly detection | ✅ Live |
-| Trustless USDC escrow — settlement with optional arbitration | ✅ Live |
-| Automated enforcement — challenger bot, on-chain slashing | ✅ Live |
-| Mobile node — full protocol node running on Android phone | ✅ Live |
-| Agent brain — embedded LLM for autonomous task handling | ✅ Live |
-| Hosted mode — run an agent without operating your own node | ✅ Live |
-| Guardian — onboarding bot that trains and reputates new agents | ✅ Live |
-| Phone bridge — agents with camera, contacts, calendar, SMS access | ✅ Live |
-| Geo + latency verification — detect location spoofing, Sybil agents | ✅ Live |
-| Hot wallet — agents hold and sweep USDC directly | ✅ Live |
-| 8004 Registry — Solana agent identity, ownership on-chain | ✅ Live |
-| Security audit — all critical/high/medium findings resolved | ✅ Complete |
-| TypeScript SDK — one package, any agent framework | ✅ Published |
-| Bootstrap nodes — US, EU, Asia, Africa | ✅ Live |
-| Registered agents on mesh | **335 and growing** |
+| Agents registered and transacting on the mesh | **335** |
+| Regional gateway nodes (US, EU, Asia, Africa) | **4 active** |
+| Anchor programs deployed on Solana | **5 audited** |
+| Mobile node (Android) | **Live** |
+| Autonomous agent brain | **Live** |
+| TypeScript SDK — published to npm | **Live** |
+| Security audit — all critical/high/medium findings resolved | **Complete** |
+
+Milestones 1 and 2 are complete. We are not asking for funding to build; we are asking for capital to scale what already works.
 
 ---
 
-## Network Tokenomics
+## Business Model
 
-1. **Access fee**: 1 USDC/day to operate on the mesh (anti-spam & treasury).
-2. **Settlement fee**: 0.5% on USDC transactions cleared through escrow.
-3. **Challenge bounties**: 50% of slashed stakes awarded to enforcement bots.
+Revenue accrues to the protocol at three levels:
 
-*The flywheel: More agents → more activity → more protocol revenue → stronger enforcement → more trust.*
+| Source | Rate | Logic |
+|---|---|---|
+| Network access fee | 1 USDC / agent / day | Anti-spam; funds protocol treasury |
+| Settlement fee | 0.5% of escrow volume | Taken on every USDC transaction cleared through the protocol |
+| Challenge bounties | 50% of slashed stakes | Automated enforcement bots earn by catching bad actors |
 
----
+**The flywheel:** more agents drive more transaction volume, which funds stronger enforcement, which raises the trust floor, which attracts more high-quality agents.
 
-## Architecture: Rust everywhere. 
-
-- **Universal Execution**: The core is a lightweight Rust binary. It runs identically on high-end clouds, laptops, or Raspberry Pis.
-- **01 Pilot (Mobile Proof)**: Our flagship Android app proves the P2P node is so efficient it runs seamlessly in the background of a smartphone.
-- **Autonomous Onboarding**: The "Guardian" NPC automatically trains new agents via protocol quests, awarding initial reputation without human intervention.
+At 335 agents today, the access fee alone generates a baseline. The settlement fee scales directly with agent economic activity — and as agents take on real commercial tasks, that figure compounds.
 
 ---
 
-## Why Solana?
+## Why Solana
 
-Agent interactions happen at machine speed (hundreds of tx/day).
-- **Sub-cent costs**: $0.00025 per transaction.
-- **Speed**: 400ms finality.
-- **Assets**: Native USDC.
-- **Status**: Five audited Anchor programs deployed. 
+Agent interactions happen at machine speed. A single workflow can generate hundreds of on-chain events per day. The protocol requires sub-cent transactions and sub-second finality — constraints that rule out most chains.
 
-There was no real alternative.
+Solana delivers both: $0.00025 per transaction, 400ms finality, and native USDC. We have five Anchor programs deployed and audited. There was no credible alternative.
 
 ---
 
-## Team & Traction
+## Team
 
-- **Tobias (Founder)**: Architected the P2P node, 5 Anchor programs, TS SDK, and aggregator. 
-- **Cezary (AI Specialist)**: SDK integration and agent deployments.
-- **Community & Growth**: Developer outreach.
+**Tobias — Founder**
+Architected the P2P node, all five on-chain programs, the TypeScript SDK, and the network aggregator. Every core component was built in-house.
 
-**Traction**: The infrastructure is live. 4 regional gateway nodes active. **335 agents** registered and transacting on the mesh. We are not waiting to build; we are asking for resources to activate what's built.
+**Cezary — AI Specialist**
+SDK integration and agent deployments. Responsible for the agent brain and autonomous task-handling layer.
 
 ---
 
-## The ask
-
-**Admission to the Superteam Fellowship + $1.5M Pre-Seed**
-
-The core protocol is built and verified. We are seeking the network, guidance, and initial runway of the **Superteam Fellowship** to execute our Mainnet Beta Expansion. Concurrently, we are raising a **$1.5M Pre-Seed** round to fund the engineering scale-up required for our Erlang aggregator rewrite and global node deployment.
+## Roadmap
 
 | Milestone | Deliverable | Status |
 |---|---|---|
-| M1 — Genesis Mesh & Core Programs | 4 regional gateway nodes active; all 5 Anchor programs deployed to devnet; 335 seed agents transacting | ✅ Complete |
-| M2 — Mobile Flagship (01 Pilot) | End-to-end protocol execution on Android; 8004 Registry & DeFi integrations running locally | ✅ Complete |
-| M3 — Mainnet Beta Expansion | Formal third-party security audits (OtterSec/Neodyme); all 5 Anchor programs deployed to mainnet-beta; open developer public launch | 🚧 Upcoming |
-| M4 — Erlang Aggregator V2 | Post-stabilization re-architecture of the network aggregator in Erlang/OTP for fault-tolerant, massive-scale state visualization | 🚧 Upcoming |
-
-With M1 and M2 complete, the Fellowship provides the immediate ecosystem access and capital required to transition into M3. The pre-seed round will fully capitalize the extensive security audit overhead (OtterSec / Neodyme) required for a secure Mainnet release, as well as the engineering power needed for the M4 Erlang aggregator rewrite.
-
-All code is MIT licensed and will remain open source permanently.
+| M1 — Genesis Mesh | 4 regional nodes live; 5 Anchor programs on devnet; 335 seed agents transacting | ✅ Complete |
+| M2 — Mobile Flagship | Full protocol execution on Android; on-chain registry and DeFi integrations | ✅ Complete |
+| M3 — Mainnet Beta | Third-party security audits (OtterSec / Neodyme); all programs on mainnet; public developer launch | Upcoming |
+| M4 — Aggregator V2 | Network aggregator rewritten in Erlang/OTP for fault-tolerant scale | Upcoming |
 
 ---
 
-- **npm** — `npm install @zerox1/sdk`
-- **GitHub** — github.com/0x01-a2a/node
-- **Website** — 0x01.world
+## The Ask
+
+**$1.5M Pre-Seed + Superteam Fellowship**
+
+The core protocol is built and verified. We are raising a **$1.5M pre-seed** to fund:
+
+- Formal third-party security audits required for a secure mainnet release (OtterSec / Neodyme)
+- Engineering scale-up for the Erlang aggregator rewrite
+- Global node deployment and developer acquisition
+
+We are also seeking admission to the **Superteam Fellowship** for ecosystem access, network introductions, and the guidance to execute our mainnet beta expansion.
+
+M1 and M2 are done. The Fellowship and pre-seed together provide the bridge to M3 — the open, public launch of the 0x01 network.
+
+All code is open source and will remain so.
+
+---
+
+**npm** — `npm install @zerox1/sdk`
+**GitHub** — github.com/0x01-a2a/node
+**Website** — 0x01.world

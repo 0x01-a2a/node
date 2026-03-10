@@ -251,6 +251,11 @@ pub struct Config {
     )]
     pub trade_rpc_url: String,
 
+    /// Jupiter API base URL. Defaults to the free public lite endpoint (no API key).
+    /// Set to https://api.jup.ag with ZX01_JUPITER_API_KEY for higher rate limits.
+    #[arg(long, env = "ZX01_JUPITER_API_URL")]
+    pub jupiter_api_url: Option<String>,
+
     /// Zeroclaw workspace directory. When set, enables POST /skill/write,
     /// POST /skill/install-url, POST /skill/remove, GET /skill/list — the
     /// skill management REST API used by the skill-manager built-in skill.

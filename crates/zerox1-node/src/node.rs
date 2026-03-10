@@ -293,6 +293,8 @@ impl Zx01Node {
             config.hosting_fee_bps,
             config.rpc_url.clone(),
             config.trade_rpc_url.clone(),
+            #[cfg(feature = "trade")]
+            config.jupiter_api_url.clone(),
             http_client.clone(),
             config.registry_8004_collection.clone(),
             std::sync::Arc::new(identity.signing_key.clone()),

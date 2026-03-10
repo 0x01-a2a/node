@@ -444,6 +444,10 @@ pub struct ApiInner {
     pub(crate) is_mainnet: bool,
     /// Whether trade_rpc_url points at mainnet-beta (affects USDC mint selection).
     pub(crate) is_trading_mainnet: bool,
+    /// Optional Jupiter API base URL override (default: lite-api.jup.ag — free, no key).
+    /// Set to https://api.jup.ag with --jupiter-api-url for higher rate limits.
+    #[cfg(feature = "trade")]
+    pub(crate) jupiter_api_url: Option<String>,
     /// Kora paymaster client — present when --kora-url is configured.
     pub kora: Option<KoraClient>,
     /// Optional override for the 8004 base collection (required on mainnet).
@@ -504,6 +508,7 @@ impl ApiState {
         hosting_fee_bps: u32,
         rpc_url: String,
         trade_rpc_url: String,
+        #[cfg(feature = "trade")] jupiter_api_url: Option<String>,
         http_client: reqwest::Client,
         registry_8004_collection: Option<String>,
         node_signing_key: Arc<SigningKey>,
@@ -567,6 +572,8 @@ impl ApiState {
             }),
             rpc_url,
             trade_rpc_url,
+            #[cfg(feature = "trade")]
+            jupiter_api_url,
             node_signing_key,
             http_client,
             is_mainnet,
@@ -809,7 +816,8 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
         .route("/bags/config", get(bags_config_handler))
         .route("/bags/launch", post(bags_launch_handler))
         .route("/bags/claim", post(bags_claim_handler))
-        .route("/bags/positions", get(bags_positions_handler));
+        .route("/bags/positions", get(bags_positions_handler))
+        .route("/bags/set-api-key", post(bags_set_api_key_handler));
 
     let app = router
         .layer({
@@ -3849,11 +3857,8 @@ async fn bags_launch_handler(
     {
         Ok(v) => v,
         Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": format!("create-token-info: {e}")})),
-            )
-                .into_response()
+            let (code, msg) = bags_error_response(&e);
+            return (code, Json(serde_json::json!({"error": msg}))).into_response();
         }
     };
 
@@ -3881,11 +3886,8 @@ async fn bags_launch_handler(
     {
         Ok(v) => v,
         Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": format!("fee-share config: {e}")})),
-            )
-                .into_response()
+            let (code, msg) = bags_error_response(&e);
+            return (code, Json(serde_json::json!({"error": msg}))).into_response();
         }
     };
 
@@ -4091,11 +4093,8 @@ async fn bags_claim_handler(
     {
         Ok(txs) => txs,
         Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": format!("claim-txs: {e}")})),
-            )
-                .into_response()
+            let (code, msg) = bags_error_response(&e);
+            return (code, Json(serde_json::json!({"error": msg}))).into_response();
         }
     };
 
@@ -4184,6 +4183,60 @@ async fn bags_positions_handler(headers: HeaderMap, State(state): State<ApiState
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({"error": format!("positions: {e}")})),
+        )
+            .into_response(),
+    }
+}
+
+/// Map a Bags client error to an HTTP status + message string.
+///
+/// `bags_rate_limited` → 429 (caller should prompt for a user-supplied key).
+/// Anything else       → 502 Bad Gateway.
+#[cfg(feature = "bags")]
+fn bags_error_response(e: &anyhow::Error) -> (StatusCode, String) {
+    if e.to_string().contains("bags_rate_limited") {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            "bags_rate_limited".to_string(),
+        )
+    } else {
+        (StatusCode::BAD_GATEWAY, e.to_string())
+    }
+}
+
+#[cfg(feature = "bags")]
+#[derive(Deserialize)]
+struct BagsSetApiKeyRequest {
+    api_key: String,
+}
+
+/// POST /bags/set-api-key — replace the Bags API key in-memory without restart.
+///
+/// Requires the node API secret. Returns 204 on success.
+#[cfg(feature = "bags")]
+async fn bags_set_api_key_handler(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Json(req): Json<BagsSetApiKeyRequest>,
+) -> Response {
+    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
+        return resp;
+    }
+    if req.api_key.trim().is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": "api_key must not be empty"})),
+        )
+            .into_response();
+    }
+    match state.0.bags_launch.as_ref() {
+        Some(launch) => {
+            launch.update_api_key(req.api_key.trim().to_string());
+            StatusCode::NO_CONTENT.into_response()
+        }
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "Bags not configured"})),
         )
             .into_response(),
     }

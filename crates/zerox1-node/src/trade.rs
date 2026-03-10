@@ -47,13 +47,19 @@ struct JupiterQuoteResponse {
     // (Other fields are ignored)
 }
 
+// ── Jupiter API endpoints ─────────────────────────────────────────────────
+/// Free public endpoint — no API key required, rate-limited.
+/// Use `--jupiter-api-url https://api.jup.ag` with x-api-key for higher limits.
+const JUPITER_LITE_BASE: &str = "https://lite-api.jup.ag";
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct JupiterSwapRequest {
     user_public_key: String,
     quote_response: serde_json::Value,
     dynamic_compute_unit_limit: bool,
-    prioritization_fee_lamports: String,
+    /// `{ "priorityLevelWithMaxLamports": { "maxLamports": 1000000, "priorityLevel": "high" } }`
+    prioritization_fee_lamports: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     fee_account: Option<String>,
 }
@@ -201,9 +207,14 @@ pub async fn trade_swap_handler(
         .unwrap_or_default();
 
     // 1. Get Jupiter Quote
+    let jupiter_base = state
+        .inner()
+        .jupiter_api_url
+        .as_deref()
+        .unwrap_or(JUPITER_LITE_BASE);
     let quote_url = format!(
-        "https://quote-api.jup.ag/v6/quote?inputMint={}&outputMint={}&amount={}&slippageBps={}",
-        req.input_mint, req.output_mint, req.amount, slippage
+        "{}/swap/v1/quote?inputMint={}&outputMint={}&amount={}&slippageBps={}",
+        jupiter_base, req.input_mint, req.output_mint, req.amount, slippage
     );
 
     let quote_res = match client.get(&quote_url).send().await {
@@ -262,14 +273,20 @@ pub async fn trade_swap_handler(
         user_public_key: signer.to_string(),
         quote_response: quote_json,
         dynamic_compute_unit_limit: true,
-        prioritization_fee_lamports: "auto".to_string(),
+        prioritization_fee_lamports: serde_json::json!({
+            "priorityLevelWithMaxLamports": {
+                "maxLamports": 1_000_000,
+                "priorityLevel": "high"
+            }
+        }),
         fee_account: kora_fee_payer_opt
             .as_ref()
             .map(|p: &solana_sdk::pubkey::Pubkey| p.to_string()),
     };
 
+    let swap_url = format!("{}/swap/v1/swap", jupiter_base);
     let swap_res = match client
-        .post("https://quote-api.jup.ag/v6/swap")
+        .post(&swap_url)
         .json(&swap_req)
         .send()
         .await
@@ -466,9 +483,14 @@ pub async fn trade_quote_handler(
     let slippage = query.slippage_bps.unwrap_or(50);
     let client = reqwest::Client::new();
 
+    let jupiter_base = state
+        .inner()
+        .jupiter_api_url
+        .as_deref()
+        .unwrap_or(JUPITER_LITE_BASE);
     let quote_url = format!(
-        "https://quote-api.jup.ag/v6/quote?inputMint={}&outputMint={}&amount={}&slippageBps={}",
-        query.input_mint, query.output_mint, query.amount, slippage
+        "{}/swap/v1/quote?inputMint={}&outputMint={}&amount={}&slippageBps={}",
+        jupiter_base, query.input_mint, query.output_mint, query.amount, slippage
     );
 
     let res = match client.get(&quote_url).send().await {

@@ -135,7 +135,7 @@ jobs:
           restore-keys: cargo-registry-${{ runner.os }}-
 
       - name: Build aggregator
-        run: cargo build --release -p zerox1-aggregator
+        run: cargo build --release -p zerox1-aggregator --features zerox1-aggregator/data-bounty
         env:
           CARGO_TERM_COLOR: always
 

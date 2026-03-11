@@ -12,9 +12,11 @@ use tokio::sync::broadcast;
 
 use crate::registry_8004::Registry8004Client;
 use crate::store::{
-    ActivityEvent, AgentProfile, AgentRegistryEntry, Campaign, CapabilityMatch, DisputeRecord,
+    ActivityEvent, AgentProfile, AgentRegistryEntry, CapabilityMatch, DisputeRecord,
     HostingNode, IngestEvent, NetworkStats, OwnerStatus, PendingMessage, ReputationStore,
 };
+#[cfg(feature = "data-bounty")]
+use crate::store::Campaign;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -50,10 +52,13 @@ pub struct AppState {
     /// require `Authorization: Bearer <key>` matching one of these values.
     pub api_keys: Vec<String>,
     /// Secret for POST /campaigns (operator-only). None = disabled.
+    #[cfg(feature = "data-bounty")]
     pub operator_secret: Option<String>,
     /// Broadcast channel for real-time campaign events (WS /ws/campaigns).
+    #[cfg(feature = "data-bounty")]
     pub campaign_tx: broadcast::Sender<Campaign>,
     /// Rate-limit window for POST /campaigns (count, window_start).
+    #[cfg(feature = "data-bounty")]
     pub campaign_rate_limit: std::sync::Arc<std::sync::Mutex<(u32, std::time::Instant)>>,
 }
 
@@ -1637,8 +1642,11 @@ pub async fn get_blob(State(state): State<AppState>, Path(cid): Path<String>) ->
 
 // ============================================================================
 // DataBounty campaign handlers
+// Only compiled when the `data-bounty` feature is enabled (mobile-targeting
+// aggregator deployments). Server-only deployments exclude this entirely.
 // ============================================================================
 
+#[cfg(feature = "data-bounty")]
 #[derive(serde::Deserialize)]
 pub struct CreateCampaignRequest {
     pub data_type: String,
@@ -1654,13 +1662,20 @@ pub struct CreateCampaignRequest {
     pub purpose: Option<String>,
 }
 
+#[cfg(feature = "data-bounty")]
 const MAX_CAMPAIGN_TITLE_LEN: usize = 128;
+#[cfg(feature = "data-bounty")]
 const MAX_CAMPAIGN_DESC_LEN: usize = 1024;
+#[cfg(feature = "data-bounty")]
 const MAX_CAMPAIGN_PURPOSE_LEN: usize = 512;
+#[cfg(feature = "data-bounty")]
 const MAX_COLLECTION_PARAMS_JSON_LEN: usize = 4096;
+#[cfg(feature = "data-bounty")]
 const VALID_DATA_TYPES: &[&str] = &["imu", "gps", "audio", "camera"];
+#[cfg(feature = "data-bounty")]
 const VALID_PRIVACY_LEVELS: &[&str] = &["anonymized", "pseudonymized", "raw"];
 
+#[cfg(feature = "data-bounty")]
 fn json_depth(v: &serde_json::Value, depth: usize) -> usize {
     if depth > 20 { return depth; }
     match v {
@@ -1670,6 +1685,7 @@ fn json_depth(v: &serde_json::Value, depth: usize) -> usize {
     }
 }
 
+#[cfg(feature = "data-bounty")]
 pub async fn post_campaign(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1779,11 +1795,13 @@ pub async fn post_campaign(
     (StatusCode::CREATED, Json(serde_json::to_value(&campaign).unwrap_or_default())).into_response()
 }
 
+#[cfg(feature = "data-bounty")]
 #[derive(serde::Deserialize)]
 pub struct CampaignsQuery {
     pub include_expired: Option<bool>,
 }
 
+#[cfg(feature = "data-bounty")]
 pub async fn get_campaigns(
     State(state): State<AppState>,
     Query(q): Query<CampaignsQuery>,
@@ -1792,6 +1810,7 @@ pub async fn get_campaigns(
     Json(campaigns)
 }
 
+#[cfg(feature = "data-bounty")]
 pub async fn get_campaign_by_id(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1802,8 +1821,10 @@ pub async fn get_campaign_by_id(
     }
 }
 
+#[cfg(feature = "data-bounty")]
 const WS_CAMPAIGNS_IDLE_SECS: u64 = 300; // 5 minutes — drop silent connections
 
+#[cfg(feature = "data-bounty")]
 pub async fn ws_campaigns(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
@@ -1835,6 +1856,7 @@ pub async fn ws_campaigns(
     })
 }
 
+#[cfg(feature = "data-bounty")]
 fn uuid_v4() -> String {
     let mut bytes = [0u8; 16];
     rand::Rng::fill(&mut rand::rngs::OsRng, &mut bytes);

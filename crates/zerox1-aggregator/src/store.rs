@@ -2000,8 +2000,11 @@ impl Default for ReputationStore {
 }
 
 // ── DataBounty campaign types ─────────────────────────────────────────────────
+// Gated behind the `data-bounty` feature; only mobile-targeting aggregator
+// deployments compile or expose these types and store methods.
 
 /// A data-collection campaign posted by an operator via POST /campaigns.
+#[cfg(feature = "data-bounty")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Campaign {
     pub id: String,
@@ -2022,6 +2025,7 @@ pub struct Campaign {
     pub created_at: u64,
 }
 
+#[cfg(feature = "data-bounty")]
 fn campaign_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Campaign> {
     Ok(Campaign {
         id:                   row.get(0)?,
@@ -3693,6 +3697,7 @@ impl ReputationStore {
     }
     // ── DataBounty campaigns ──────────────────────────────────────────────────
 
+    #[cfg(feature = "data-bounty")]
     pub fn store_campaign(&self, c: &Campaign) -> rusqlite::Result<()> {
         let db = self.db.lock().unwrap();
         if let Some(ref conn) = *db {
@@ -3714,6 +3719,7 @@ impl ReputationStore {
         Ok(())
     }
 
+    #[cfg(feature = "data-bounty")]
     pub fn get_campaigns(&self, include_expired: bool) -> Vec<Campaign> {
         let now = now_secs() as i64;
         let db = self.db.lock().unwrap();
@@ -3749,6 +3755,7 @@ impl ReputationStore {
         vec![]
     }
 
+    #[cfg(feature = "data-bounty")]
     pub fn get_campaign(&self, id: &str) -> Option<Campaign> {
         let db = self.db.lock().unwrap();
         if let Some(ref conn) = *db {
@@ -3767,6 +3774,7 @@ impl ReputationStore {
 
     /// Record a delivery and increment the sample count.
     /// Returns Err if the (campaign_id, sender, nonce) triple already exists (duplicate).
+    #[cfg(feature = "data-bounty")]
     #[allow(dead_code)]
     pub fn record_campaign_delivery(
         &self,

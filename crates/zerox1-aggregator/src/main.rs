@@ -13,7 +13,9 @@ use clap::Parser;
 use tokio::sync::broadcast;
 
 use api::AppState;
-use store::{ActivityEvent, Campaign, ReputationStore};
+use store::{ActivityEvent, ReputationStore};
+#[cfg(feature = "data-bounty")]
+use store::Campaign;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -83,6 +85,7 @@ struct Config {
 
     /// Shared secret for POST /campaigns (operator-only campaign creation).
     /// When absent, campaign creation is disabled.
+    #[cfg(feature = "data-bounty")]
     #[arg(long, env = "AGGREGATOR_OPERATOR_SECRET")]
     operator_secret: Option<String>,
 }
@@ -131,6 +134,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let (activity_tx, _) = broadcast::channel::<ActivityEvent>(512);
+    #[cfg(feature = "data-bounty")]
     let (campaign_tx, _) = broadcast::channel::<Campaign>(64);
 
     let http_client = reqwest::Client::new();
@@ -156,8 +160,11 @@ async fn main() -> anyhow::Result<()> {
         activity_tx,
         registry,
         api_keys: config.api_keys,
+        #[cfg(feature = "data-bounty")]
         operator_secret: config.operator_secret,
+        #[cfg(feature = "data-bounty")]
         campaign_tx,
+        #[cfg(feature = "data-bounty")]
         campaign_rate_limit: std::sync::Arc::new(std::sync::Mutex::new(
             (0u32, std::time::Instant::now()),
         )),
@@ -210,8 +217,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/activity", get(api::get_activity))
         .route("/ws/activity", get(api::ws_activity))
         .route("/hosting/nodes", get(api::get_hosting_nodes))
-        .route("/blobs/{cid}", get(api::get_blob))
-        // DataBounty campaigns
+        .route("/blobs/{cid}", get(api::get_blob));
+    // DataBounty campaigns — only compiled when the data-bounty feature is enabled
+    #[cfg(feature = "data-bounty")]
+    let public_routes = public_routes
         .route("/campaigns", get(api::get_campaigns).post(api::post_campaign))
         .route("/campaigns/{id}", get(api::get_campaign_by_id))
         .route("/ws/campaigns", get(api::ws_campaigns));

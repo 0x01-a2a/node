@@ -621,13 +621,14 @@ impl BagsLaunchClient {
                 }
             })
             .collect();
+        let api_key = self.api_key.read().map(|k| k.clone()).unwrap_or_default();
         let resp = self
             .client
             .get(format!(
                 "{}/token-launch/launched-tokens?wallet={}",
                 self.api_url, encoded
             ))
-            .header("x-api-key", self.api_key.read().unwrap().clone())
+            .header("x-api-key", api_key)
             .timeout(std::time::Duration::from_secs(15))
             .send()
             .await

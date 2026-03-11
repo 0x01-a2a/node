@@ -1,13 +1,13 @@
 [package]
 name = "zerox1-aggregator"
+version.workspace = true
+edition.workspace = true
 
 [features]
 # DataBounty campaign marketplace — IMU/GPS/audio/camera data collection.
 # Only meaningful when the aggregator serves mobile nodes; off by default
 # so server-only deployments don't expose unfinished endpoints.
 data-bounty = []
-version.workspace = true
-edition.workspace = true
 
 [[bin]]
 name = "zerox1-aggregator"

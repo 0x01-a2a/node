@@ -13,7 +13,7 @@ use clap::Parser;
 use tokio::sync::broadcast;
 
 use api::AppState;
-use store::{ActivityEvent, ReputationStore};
+use store::{ActivityEvent, Campaign, ReputationStore};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -80,6 +80,11 @@ struct Config {
     /// Example: "explorer-abc123,devteam-xyz789,paid-client-001"
     #[arg(long, env = "AGGREGATOR_API_KEYS", value_delimiter = ',')]
     api_keys: Vec<String>,
+
+    /// Shared secret for POST /campaigns (operator-only campaign creation).
+    /// When absent, campaign creation is disabled.
+    #[arg(long, env = "AGGREGATOR_OPERATOR_SECRET")]
+    operator_secret: Option<String>,
 }
 
 #[tokio::main]
@@ -126,6 +131,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let (activity_tx, _) = broadcast::channel::<ActivityEvent>(512);
+    let (campaign_tx, _) = broadcast::channel::<Campaign>(64);
 
     let http_client = reqwest::Client::new();
     let registry = registry_8004::Registry8004Client::new(
@@ -150,6 +156,11 @@ async fn main() -> anyhow::Result<()> {
         activity_tx,
         registry,
         api_keys: config.api_keys,
+        operator_secret: config.operator_secret,
+        campaign_tx,
+        campaign_rate_limit: std::sync::Arc::new(std::sync::Mutex::new(
+            (0u32, std::time::Instant::now()),
+        )),
     };
 
     if let Some(rpc_url) = config.solana_rpc {
@@ -199,7 +210,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/activity", get(api::get_activity))
         .route("/ws/activity", get(api::ws_activity))
         .route("/hosting/nodes", get(api::get_hosting_nodes))
-        .route("/blobs/{cid}", get(api::get_blob));
+        .route("/blobs/{cid}", get(api::get_blob))
+        // DataBounty campaigns
+        .route("/campaigns", get(api::get_campaigns).post(api::post_campaign))
+        .route("/campaigns/{id}", get(api::get_campaign_by_id))
+        .route("/ws/campaigns", get(api::ws_campaigns));
 
     // ── API-key gated routes (read endpoints for explorer / dev team / paid clients) ──
     let gated_routes = Router::new()

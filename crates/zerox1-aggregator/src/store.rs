@@ -911,6 +911,37 @@ WHERE id NOT IN (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_fe_sender_conv
     ON feedback_events(sender, conversation_id);
 ",
+    // v9: DataBounty campaigns marketplace
+    "
+CREATE TABLE IF NOT EXISTS campaigns (
+    id                   TEXT    PRIMARY KEY,
+    data_type            TEXT    NOT NULL,
+    title                TEXT    NOT NULL DEFAULT '',
+    description          TEXT    NOT NULL DEFAULT '',
+    collection_params    TEXT    NOT NULL DEFAULT '{}',
+    payout_usdc_micro    INTEGER NOT NULL DEFAULT 0,
+    max_samples_per_node INTEGER NOT NULL DEFAULT 10,
+    max_total_samples    INTEGER NOT NULL DEFAULT 0,
+    samples_collected    INTEGER NOT NULL DEFAULT 0,
+    expires_at           INTEGER NOT NULL,
+    privacy_level        TEXT    NOT NULL DEFAULT 'anonymized',
+    data_retention_days  INTEGER NOT NULL DEFAULT 30,
+    purpose              TEXT    NOT NULL DEFAULT '',
+    active               INTEGER NOT NULL DEFAULT 1,
+    created_at           INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_campaigns_active_exp ON campaigns(active, expires_at);
+
+CREATE TABLE IF NOT EXISTS campaign_deliveries (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_id TEXT    NOT NULL,
+    sender      TEXT    NOT NULL,
+    nonce       TEXT    NOT NULL,
+    delivered_at INTEGER NOT NULL,
+    UNIQUE (campaign_id, sender, nonce)
+);
+CREATE INDEX IF NOT EXISTS idx_cd_campaign ON campaign_deliveries(campaign_id);
+",
 ];
 
 struct Db(rusqlite::Connection);
@@ -1966,6 +1997,49 @@ impl Default for ReputationStore {
             feedback_rate_limit: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+}
+
+// ── DataBounty campaign types ─────────────────────────────────────────────────
+
+/// A data-collection campaign posted by an operator via POST /campaigns.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Campaign {
+    pub id: String,
+    pub data_type: String,
+    pub title: String,
+    pub description: String,
+    /// JSON string of collection parameters (e.g. {"rate_hz":50,"duration_ms":30000})
+    pub collection_params: String,
+    pub payout_usdc_micro: u64,
+    pub max_samples_per_node: u32,
+    pub max_total_samples: u32,
+    pub samples_collected: u32,
+    pub expires_at: u64,
+    pub privacy_level: String,
+    pub data_retention_days: u32,
+    pub purpose: String,
+    pub active: bool,
+    pub created_at: u64,
+}
+
+fn campaign_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Campaign> {
+    Ok(Campaign {
+        id:                   row.get(0)?,
+        data_type:            row.get(1)?,
+        title:                row.get(2)?,
+        description:          row.get(3)?,
+        collection_params:    row.get(4)?,
+        payout_usdc_micro:    row.get::<_, i64>(5)? as u64,
+        max_samples_per_node: row.get::<_, i64>(6)? as u32,
+        max_total_samples:    row.get::<_, i64>(7)? as u32,
+        samples_collected:    row.get::<_, i64>(8)? as u32,
+        expires_at:           row.get::<_, i64>(9)? as u64,
+        privacy_level:        row.get(10)?,
+        data_retention_days:  row.get::<_, i64>(11)? as u32,
+        purpose:              row.get(12)?,
+        active:               row.get::<_, i64>(13)? != 0,
+        created_at:           row.get::<_, i64>(14)? as u64,
+    })
 }
 
 impl ReputationStore {
@@ -3616,6 +3690,109 @@ impl ReputationStore {
                 rusqlite::params![agent_id, host_node_id, now],
             );
         }
+    }
+    // ── DataBounty campaigns ──────────────────────────────────────────────────
+
+    pub fn store_campaign(&self, c: &Campaign) -> rusqlite::Result<()> {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            conn.0.execute(
+                "INSERT INTO campaigns
+                    (id, data_type, title, description, collection_params,
+                     payout_usdc_micro, max_samples_per_node, max_total_samples,
+                     expires_at, privacy_level, data_retention_days, purpose, created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                rusqlite::params![
+                    c.id, c.data_type, c.title, c.description, c.collection_params,
+                    c.payout_usdc_micro as i64, c.max_samples_per_node as i64,
+                    c.max_total_samples as i64, c.expires_at as i64,
+                    c.privacy_level, c.data_retention_days as i64, c.purpose,
+                    c.created_at as i64,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn get_campaigns(&self, include_expired: bool) -> Vec<Campaign> {
+        let now = now_secs() as i64;
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            // Always filter active=1 — include_expired only controls the expiry check,
+            // not whether soft-deleted/inactive campaigns are visible.
+            let sql = if include_expired {
+                "SELECT id, data_type, title, description, collection_params,
+                        payout_usdc_micro, max_samples_per_node, max_total_samples,
+                        samples_collected, expires_at, privacy_level, data_retention_days,
+                        purpose, active, created_at
+                 FROM campaigns WHERE active = 1 ORDER BY created_at DESC"
+            } else {
+                "SELECT id, data_type, title, description, collection_params,
+                        payout_usdc_micro, max_samples_per_node, max_total_samples,
+                        samples_collected, expires_at, privacy_level, data_retention_days,
+                        purpose, active, created_at
+                 FROM campaigns WHERE active = 1 AND expires_at > ?1 ORDER BY created_at DESC"
+            };
+            let result = if include_expired {
+                conn.0.prepare(sql).and_then(|mut stmt| {
+                    let rows = stmt.query_map([], campaign_from_row)?;
+                    Ok(rows.flatten().collect())
+                })
+            } else {
+                conn.0.prepare(sql).and_then(|mut stmt| {
+                    let rows = stmt.query_map(rusqlite::params![now], campaign_from_row)?;
+                    Ok(rows.flatten().collect())
+                })
+            };
+            return result.unwrap_or_default();
+        }
+        vec![]
+    }
+
+    pub fn get_campaign(&self, id: &str) -> Option<Campaign> {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            return conn.0.query_row(
+                "SELECT id, data_type, title, description, collection_params,
+                        payout_usdc_micro, max_samples_per_node, max_total_samples,
+                        samples_collected, expires_at, privacy_level, data_retention_days,
+                        purpose, active, created_at
+                 FROM campaigns WHERE id = ?1",
+                rusqlite::params![id],
+                campaign_from_row,
+            ).ok();
+        }
+        None
+    }
+
+    /// Record a delivery and increment the sample count.
+    /// Returns Err if the (campaign_id, sender, nonce) triple already exists (duplicate).
+    #[allow(dead_code)]
+    pub fn record_campaign_delivery(
+        &self,
+        campaign_id: &str,
+        sender: &str,
+        nonce: &str,
+    ) -> rusqlite::Result<()> {
+        let now = now_secs() as i64;
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            // Use a transaction so the INSERT (with UNIQUE guard) and the counter
+            // UPDATE are atomic — prevents a race where two concurrent deliveries
+            // both INSERT then both UPDATE, double-counting one accepted delivery.
+            let tx = conn.0.unchecked_transaction()?;
+            tx.execute(
+                "INSERT INTO campaign_deliveries (campaign_id, sender, nonce, delivered_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![campaign_id, sender, nonce, now],
+            )?;
+            tx.execute(
+                "UPDATE campaigns SET samples_collected = samples_collected + 1 WHERE id = ?1",
+                rusqlite::params![campaign_id],
+            )?;
+            tx.commit()?;
+        }
+        Ok(())
     }
 } // end impl ReputationStore
 

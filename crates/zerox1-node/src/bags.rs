@@ -627,7 +627,7 @@ impl BagsLaunchClient {
                 "{}/token-launch/launched-tokens?wallet={}",
                 self.api_url, encoded
             ))
-            .header("x-api-key", &self.api_key)
+            .header("x-api-key", self.api_key.read().unwrap().clone())
             .timeout(std::time::Duration::from_secs(15))
             .send()
             .await

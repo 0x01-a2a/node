@@ -12,8 +12,8 @@ use tokio::sync::broadcast;
 
 use crate::registry_8004::Registry8004Client;
 use crate::store::{
-    ActivityEvent, AgentProfile, AgentRegistryEntry, CapabilityMatch, DisputeRecord, HostingNode,
-    IngestEvent, NetworkStats, OwnerStatus, PendingMessage, ReputationStore,
+    ActivityEvent, AgentProfile, AgentRegistryEntry, Campaign, CapabilityMatch, DisputeRecord,
+    HostingNode, IngestEvent, NetworkStats, OwnerStatus, PendingMessage, ReputationStore,
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use std::path::PathBuf;
@@ -49,6 +49,12 @@ pub struct AppState {
     /// Empty = public access (dev mode). When non-empty, all read endpoints
     /// require `Authorization: Bearer <key>` matching one of these values.
     pub api_keys: Vec<String>,
+    /// Secret for POST /campaigns (operator-only). None = disabled.
+    pub operator_secret: Option<String>,
+    /// Broadcast channel for real-time campaign events (WS /ws/campaigns).
+    pub campaign_tx: broadcast::Sender<Campaign>,
+    /// Rate-limit window for POST /campaigns (count, window_start).
+    pub campaign_rate_limit: std::sync::Arc<std::sync::Mutex<(u32, std::time::Instant)>>,
 }
 
 /// Check if the request carries a valid API key.
@@ -1627,6 +1633,222 @@ pub async fn get_blob(State(state): State<AppState>, Path(cid): Path<String>) ->
         )
             .into_response(),
     }
+}
+
+// ============================================================================
+// DataBounty campaign handlers
+// ============================================================================
+
+#[derive(serde::Deserialize)]
+pub struct CreateCampaignRequest {
+    pub data_type: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub collection_params: Option<serde_json::Value>,
+    pub payout_usdc_micro: u64,
+    pub max_samples_per_node: Option<u32>,
+    pub max_total_samples: Option<u32>,
+    pub expires_at: u64,
+    pub privacy_level: Option<String>,
+    pub data_retention_days: Option<u32>,
+    pub purpose: Option<String>,
+}
+
+const MAX_CAMPAIGN_TITLE_LEN: usize = 128;
+const MAX_CAMPAIGN_DESC_LEN: usize = 1024;
+const MAX_CAMPAIGN_PURPOSE_LEN: usize = 512;
+const MAX_COLLECTION_PARAMS_JSON_LEN: usize = 4096;
+const VALID_DATA_TYPES: &[&str] = &["imu", "gps", "audio", "camera"];
+const VALID_PRIVACY_LEVELS: &[&str] = &["anonymized", "pseudonymized", "raw"];
+
+fn json_depth(v: &serde_json::Value, depth: usize) -> usize {
+    if depth > 20 { return depth; }
+    match v {
+        serde_json::Value::Object(m) => m.values().map(|c| json_depth(c, depth + 1)).max().unwrap_or(depth),
+        serde_json::Value::Array(a)  => a.iter().map(|c| json_depth(c, depth + 1)).max().unwrap_or(depth),
+        _ => depth,
+    }
+}
+
+pub async fn post_campaign(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<CreateCampaignRequest>,
+) -> impl IntoResponse {
+    // Operator-secret gate
+    let provided = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let authorized = match &state.operator_secret {
+        Some(secret) => ct_eq(provided, secret.as_str()),
+        None => false,
+    };
+    if !authorized {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "operator secret required" })),
+        ).into_response();
+    }
+
+    // Rate limit: max 20 campaigns per minute
+    {
+        const MAX_CAMPAIGNS_PER_MINUTE: u32 = 20;
+        let mut rl = state.campaign_rate_limit.lock().unwrap();
+        let now = std::time::Instant::now();
+        if now.duration_since(rl.1) >= std::time::Duration::from_secs(60) {
+            *rl = (0, now);
+        }
+        if rl.0 >= MAX_CAMPAIGNS_PER_MINUTE {
+            return (StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({ "error": "campaign creation rate limit exceeded" }))).into_response();
+        }
+        rl.0 += 1;
+    }
+
+    // Validate
+    if !VALID_DATA_TYPES.contains(&req.data_type.as_str()) {
+        return (StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "invalid data_type" }))).into_response();
+    }
+    let title = req.title.unwrap_or_default();
+    let description = req.description.unwrap_or_default();
+    let purpose = req.purpose.unwrap_or_default();
+    if title.len() > MAX_CAMPAIGN_TITLE_LEN
+        || description.len() > MAX_CAMPAIGN_DESC_LEN
+        || purpose.len() > MAX_CAMPAIGN_PURPOSE_LEN
+    {
+        return (StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "field exceeds maximum length" }))).into_response();
+    }
+    let privacy_level = req.privacy_level.unwrap_or_else(|| "anonymized".to_string());
+    if !VALID_PRIVACY_LEVELS.contains(&privacy_level.as_str()) {
+        return (StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "invalid privacy_level" }))).into_response();
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if req.expires_at <= now {
+        return (StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "expires_at must be in the future" }))).into_response();
+    }
+
+    let collection_params = if let Some(ref cp) = req.collection_params {
+        let s = cp.to_string();
+        if s.len() > MAX_COLLECTION_PARAMS_JSON_LEN {
+            return (StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "collection_params exceeds maximum size" }))).into_response();
+        }
+        if json_depth(cp, 0) > 10 {
+            return (StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "collection_params nesting too deep" }))).into_response();
+        }
+        s
+    } else {
+        "{}".to_string()
+    };
+
+    let campaign = Campaign {
+        id: uuid_v4(),
+        data_type: req.data_type,
+        title,
+        description,
+        collection_params,
+        payout_usdc_micro: req.payout_usdc_micro,
+        max_samples_per_node: req.max_samples_per_node.unwrap_or(10),
+        max_total_samples: req.max_total_samples.unwrap_or(0),
+        samples_collected: 0,
+        expires_at: req.expires_at,
+        privacy_level,
+        data_retention_days: req.data_retention_days.unwrap_or(30),
+        purpose,
+        active: true,
+        created_at: now,
+    };
+
+    if let Err(e) = state.store.store_campaign(&campaign) {
+        tracing::error!("Failed to store campaign: {e}");
+        return (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "database error" }))).into_response();
+    }
+
+    let _ = state.campaign_tx.send(campaign.clone());
+    (StatusCode::CREATED, Json(serde_json::to_value(&campaign).unwrap_or_default())).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct CampaignsQuery {
+    pub include_expired: Option<bool>,
+}
+
+pub async fn get_campaigns(
+    State(state): State<AppState>,
+    Query(q): Query<CampaignsQuery>,
+) -> impl IntoResponse {
+    let campaigns = state.store.get_campaigns(q.include_expired.unwrap_or(false));
+    Json(campaigns)
+}
+
+pub async fn get_campaign_by_id(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.store.get_campaign(&id) {
+        Some(c) => Json(serde_json::to_value(c).unwrap_or_default()).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({ "error": "campaign not found" }))).into_response(),
+    }
+}
+
+const WS_CAMPAIGNS_IDLE_SECS: u64 = 300; // 5 minutes — drop silent connections
+
+pub async fn ws_campaigns(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |mut socket| async move {
+        let mut rx = state.campaign_tx.subscribe();
+        loop {
+            let recv = tokio::time::timeout(
+                std::time::Duration::from_secs(WS_CAMPAIGNS_IDLE_SECS),
+                rx.recv(),
+            );
+            match recv.await {
+                // Idle timeout — close the connection
+                Err(_elapsed) => break,
+                Ok(Ok(campaign)) => {
+                    let Ok(msg) = serde_json::to_string(&campaign) else { continue };
+                    if socket
+                        .send(axum::extract::ws::Message::Text(msg.into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(Err(broadcast::error::RecvError::Closed)) => break,
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+            }
+        }
+    })
+}
+
+fn uuid_v4() -> String {
+    let mut bytes = [0u8; 16];
+    rand::Rng::fill(&mut rand::rngs::OsRng, &mut bytes);
+    // Set version 4 and variant bits
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5],
+        bytes[6], bytes[7],
+        bytes[8], bytes[9],
+        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+    )
 }
 
 #[cfg(test)]

@@ -829,9 +829,9 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
         .route("/bags/set-api-key", post(bags_set_api_key_handler))
         .route("/bags/swap/quote", post(bags_swap_quote_handler))
         .route("/bags/swap/execute", post(bags_swap_execute_handler))
-        .route("/bags/pool/:mint", get(bags_pool_handler))
+        .route("/bags/pool/{mint}", get(bags_pool_handler))
         .route("/bags/claimable", get(bags_claimable_handler))
-        .route("/bags/dexscreener/check/:mint", get(bags_dexscreener_check_handler))
+        .route("/bags/dexscreener/check/{mint}", get(bags_dexscreener_check_handler))
         .route("/bags/dexscreener/list", post(bags_dexscreener_list_handler));
 
     let app = router
@@ -3958,7 +3958,7 @@ async fn bags_launch_handler(
             }
         } else {
             // Agent pays gas: deserialize, sign, broadcast.
-            if let Ok(tx_bytes) = B64.decode(tx_b64) {
+            if let Ok(tx_bytes) = bs58::decode(tx_b64).into_vec() {
                 if let Ok(mut tx) =
                     bincode::deserialize::<solana_sdk::transaction::Transaction>(&tx_bytes)
                 {
@@ -4150,7 +4150,7 @@ async fn bags_claim_handler(
 
     let mut txids: Vec<String> = Vec::new();
     for ctx in &claim_txs {
-        if let Ok(tx_bytes) = B64.decode(&ctx.tx) {
+        if let Ok(tx_bytes) = bs58::decode(&ctx.tx).into_vec() {
             if let Ok(mut tx) =
                 bincode::deserialize::<solana_sdk::transaction::Transaction>(&tx_bytes)
             {
@@ -4556,10 +4556,12 @@ async fn bags_dexscreener_check_handler(
 #[derive(Deserialize)]
 struct BagsDexscreenerListRequest {
     token_mint: String,
-    image_url: Option<String>,
+    description: String,
+    icon_image_url: String,
+    header_image_url: String,
 }
 
-/// POST /bags/dexscreener/list — create order + sign payment tx + broadcast.
+/// POST /bags/dexscreener/list — create order + sign payment tx + broadcast + submit signature.
 ///
 /// One-shot: agent calls this and gets back a txid when listing is paid and submitted.
 #[cfg(feature = "bags")]
@@ -4578,11 +4580,11 @@ async fn bags_dexscreener_list_handler(
         )
             .into_response();
     }
-    if let Some(ref url) = req.image_url {
+    for url in [&req.icon_image_url, &req.header_image_url] {
         if !url.starts_with("https://") {
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
-                Json(serde_json::json!({"error": "image_url must use HTTPS"})),
+                Json(serde_json::json!({"error": "image URLs must use HTTPS"})),
             )
                 .into_response();
         }
@@ -4596,9 +4598,18 @@ async fn bags_dexscreener_list_handler(
             .into_response(),
     };
 
-    // Step 1 — create order, get orderId + payment tx.
+    let agent_pubkey = Pubkey::new_from_array(state.0.node_signing_key.verifying_key().to_bytes());
+    let agent_wallet = agent_pubkey.to_string();
+
+    // Step 1 — create order, get orderUUID + payment tx.
     let order = match launch
-        .dexscreener_create_order(&req.token_mint, req.image_url.as_deref())
+        .dexscreener_create_order(
+            &req.token_mint,
+            &agent_wallet,
+            &req.description,
+            &req.icon_image_url,
+            &req.header_image_url,
+        )
         .await
     {
         Ok(o) => o,
@@ -4608,24 +4619,24 @@ async fn bags_dexscreener_list_handler(
         }
     };
 
-    let order_id = match order.get("orderId").and_then(|v| v.as_str()) {
+    let order_uuid = match order.get("orderUUID").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
         None => {
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": "Bags dexscreener order response missing orderId"})),
+                Json(serde_json::json!({"error": "Bags dexscreener order response missing orderUUID"})),
             )
                 .into_response()
         }
     };
 
-    // Step 2 — sign payment tx and broadcast.
+    // Step 2 — sign payment tx and broadcast; get back the txid (signature).
     let tx_field = match order.get("transaction").and_then(|v| v.as_str()) {
         Some(t) => t.to_string(),
         None => {
             // No tx in response means the order was already paid / no payment needed.
             return Json(serde_json::json!({
-                "order_id": order_id,
+                "order_uuid": order_uuid,
                 "txid": null,
                 "status": "submitted",
             }))
@@ -4633,11 +4644,8 @@ async fn bags_dexscreener_list_handler(
         }
     };
 
-    // Try base58 first, then base64.
-    let tx_bytes = bs58::decode(&tx_field).into_vec().or_else(|_| {
-        B64.decode(&tx_field)
-    });
-    let tx_bytes = match tx_bytes {
+    // Payment tx is base58-encoded.
+    let tx_bytes = match bs58::decode(&tx_field).into_vec() {
         Ok(b) => b,
         Err(e) => return (
             StatusCode::BAD_GATEWAY,
@@ -4664,18 +4672,33 @@ async fn bags_dexscreener_list_handler(
         )
             .into_response(),
     };
-    let signed_b64 = B64.encode(&serialized);
 
-    // Step 3 — notify Bags of the signed payment.
-    match launch.dexscreener_pay_order(&order_id, &signed_b64).await {
+    let txid = match broadcast_transaction(
+        &state.0.trade_rpc_url,
+        &state.0.http_client,
+        &B64.encode(&serialized),
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("dexscreener payment broadcast: {e}")})),
+        )
+            .into_response(),
+    };
+
+    // Step 3 — submit the payment signature to Bags.
+    match launch.dexscreener_pay_order(&order_uuid, &txid).await {
         Ok(result) => Json(serde_json::json!({
-            "order_id": order_id,
+            "order_uuid": order_uuid,
+            "txid": txid,
             "result": result,
         }))
         .into_response(),
         Err(e) => {
             let (code, msg) = bags_error_response(&e);
-            (code, Json(serde_json::json!({"error": msg, "order_id": order_id}))).into_response()
+            (code, Json(serde_json::json!({"error": msg, "order_uuid": order_uuid}))).into_response()
         }
     }
 }

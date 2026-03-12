@@ -262,7 +262,7 @@ jobs:
 
       - name: Publish zerox1-client
         if: steps.check.outputs.skip != 'true'
-        run: cargo publish -p zerox1-client --no-verify
+        run: cargo publish -p zerox1-client --no-verify --allow-dirty
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 

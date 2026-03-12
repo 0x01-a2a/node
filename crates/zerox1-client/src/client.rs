@@ -192,7 +192,13 @@ impl NodeClient {
         Fut: std::future::Future<Output = Result<()>>,
     {
         let url = self.inbox_ws_url();
-        let mut req = Request::builder().uri(&url);
+        let key = base64::engine::general_purpose::STANDARD.encode(uuid::Uuid::new_v4().as_bytes());
+        let mut req = Request::builder()
+            .uri(&url)
+            .header("Upgrade", "websocket")
+            .header("Connection", "Upgrade")
+            .header("Sec-WebSocket-Key", key)
+            .header("Sec-WebSocket-Version", "13");
         if let Some(auth) = self.auth_header() {
             req = req.header("Authorization", auth);
         }

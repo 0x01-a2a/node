@@ -1,6 +1,5 @@
 use crate::{handler, node_client::{AgentId, NodeClient}, store};
 use futures_util::StreamExt;
-use http::Request;
 use sqlx::SqlitePool;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -16,7 +15,7 @@ pub async fn run(
 ) {
     loop {
         if let Err(e) = run_once(&aggregator_ws_url, &client, &db, &mailbox_id).await {
-            warn!("aggregator WS closed: {e}  — reconnecting in 10s");
+            warn!("aggregator WS closed: {e:#}  — reconnecting in 10s");
         }
         sleep(Duration::from_secs(10)).await;
     }
@@ -28,7 +27,7 @@ async fn run_once(
     db: &SqlitePool,
     mailbox_id: &AgentId,
 ) -> anyhow::Result<()> {
-    let (ws, _) = connect_async(Request::builder().uri(url).body(())?).await?;
+    let (ws, _) = connect_async(url).await?;
     info!("aggregator WS connected");
     let (_, mut rx) = ws.split();
     let mailbox_hex = mailbox_id.to_hex();

@@ -24,7 +24,7 @@ pub async fn run(client: NodeClient, db: SqlitePool, config: Config) {
             .await;
 
         if let Err(e) = err {
-            warn!("inbox WS closed: {e}  — reconnecting in 5s");
+            warn!("inbox WS closed: {e:#}  — reconnecting in 5s");
         }
         sleep(Duration::from_secs(5)).await;
     }

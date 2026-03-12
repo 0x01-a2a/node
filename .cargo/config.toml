@@ -1,0 +1,9 @@
+[target.aarch64-linux-android]
+linker = "/tmp/android-toolchain/aarch64-linux-android24-clang"
+ar = "/tmp/android-toolchain/llvm-ar"
+
+[env]
+CC_aarch64_linux_android = "/tmp/android-toolchain/aarch64-linux-android24-clang"
+CXX_aarch64_linux_android = "/tmp/android-toolchain/aarch64-linux-android24-clang++"
+AR_aarch64_linux_android = "/tmp/android-toolchain/llvm-ar"
+ANDROID_NDK_HOME = "/Users/tobiasd/Library/Android/sdk/ndk/27.1.12297006"

@@ -644,6 +644,10 @@ impl BagsLaunchClient {
     }
 
     /// List tokens launched by a given wallet.
+    ///
+    /// Uses `GET /fee-share/admin/list?wallet=` (the successor to the removed
+    /// `/token-launch/launched-tokens` endpoint). Returns a JSON array of mint
+    /// strings, normalised from `{ "tokenMints": [...] }`.
     pub async fn launched_tokens(&self, wallet: &str) -> anyhow::Result<serde_json::Value> {
         let encoded: String = wallet
             .chars()
@@ -655,28 +659,18 @@ impl BagsLaunchClient {
                 }
             })
             .collect();
-        let api_key = self.api_key.read().map(|k| k.clone()).unwrap_or_default();
-        let resp = self
-            .client
-            .get(format!(
-                "{}/token-launch/launched-tokens?wallet={}",
-                self.api_url, encoded
-            ))
-            .header("x-api-key", api_key)
-            .timeout(std::time::Duration::from_secs(15))
-            .send()
-            .await
-            .map_err(|e| anyhow!("Bags GET launched-tokens failed: {e}"))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "Bags GET launched-tokens returned {status}: {text}"
-            ));
+        #[derive(Deserialize)]
+        struct AdminListInner {
+            #[serde(rename = "tokenMints")]
+            token_mints: Vec<String>,
         }
-        resp.json()
+        let r: BagsResponse<AdminListInner> = self
+            .get_json(&format!("fee-share/admin/list?wallet={encoded}"))
+            .await?
+            .json()
             .await
-            .map_err(|e| anyhow!("Bags GET launched-tokens parse error: {e}"))
+            .map_err(|e| anyhow!("Bags fee-share/admin/list parse error: {e}"))?;
+        Ok(serde_json::json!(r.response.token_mints))
     }
 }
 

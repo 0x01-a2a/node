@@ -2418,7 +2418,11 @@ async fn registry_8004_info(State(state): State<ApiState>) -> Response {
         "program_id":  program_id,
         "collection":  collection,
         "mpl_core":    "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d",
-        "indexer_url": "https://8004-indexer-production.up.railway.app/v2/graphql",
+        "indexer_url": if state.0.is_mainnet { "https://8004-indexer-main.qnt.sh/v2/graphql" } else { "https://8004-indexer-dev.qnt.sh/v2/graphql" },
+        "indexer_urls": {
+            "mainnet": "https://8004-indexer-main.qnt.sh/v2/graphql",
+            "devnet":  "https://8004-indexer-dev.qnt.sh/v2/graphql",
+        },
         "register_via_node": {
             "prepare": "POST /registry/8004/register-prepare",
             "submit":  "POST /registry/8004/register-submit",

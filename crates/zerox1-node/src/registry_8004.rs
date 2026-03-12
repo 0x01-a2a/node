@@ -15,7 +15,7 @@ use solana_sdk::{
 
 pub const PROGRAM_ID_DEVNET: &str = "8oo4J9tBB3Hna1jRQ3rWvJjojqM5DYTDJo5cejUuJy3C";
 pub const PROGRAM_ID_MAINNET: &str = "8oo4dC4JvBLwy5tGgiH3WwK4B9PWxL9Z4XjA2jzkQMbQ";
-pub const COLLECTION_DEVNET: &str = "C6W2bq4BoVT8FDvqhdp3sbcHFBjNBXE8TsNak2wTXQs9";
+pub const COLLECTION_DEVNET: &str = "6CTyGPcn8dMwKEqgtvx2XCpkGUd7uqCVK6937RSM5bhA";
 pub const COLLECTION_MAINNET: &str = "DbjsWo7iUs7QZyJxLgNyVxvAAjQZCXroJHoGok8h8Umg";
 /// Public Solana mainnet RPC used for 8004 registration blockhash + broadcast.
 /// Independent of the mesh `--rpc-url` so registration always lands on the

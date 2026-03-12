@@ -1,0 +1,24 @@
+[package]
+name        = "zerox1-client"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Official client SDK for building agents and services on the 0x01 mesh network"
+homepage    = "https://0x01.world"
+repository  = "https://github.com/0x01-world/node"
+keywords    = ["zerox1", "agent", "mesh", "p2p", "a2a"]
+categories  = ["network-programming", "asynchronous"]
+
+[dependencies]
+anyhow             = { workspace = true }
+tracing            = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+base64             = { workspace = true }
+hex                = { workspace = true }
+reqwest            = { workspace = true }
+tokio-tungstenite  = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+futures-util       = { version = "0.3", default-features = false, features = ["sink"] }
+http               = "1"
+uuid               = { version = "1", features = ["v4"] }

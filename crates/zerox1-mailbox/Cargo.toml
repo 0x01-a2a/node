@@ -1,0 +1,31 @@
+[package]
+name        = "zerox1-mailbox"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Async store-and-forward mail service for the 0x01 mesh network"
+
+[[bin]]
+name = "zerox1-mailbox"
+path = "src/main.rs"
+
+[dependencies]
+zerox1-client      = { path = "../zerox1-client" }
+anyhow             = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+base64             = { workspace = true }
+hex                = { workspace = true }
+reqwest            = { workspace = true }
+tokio              = { workspace = true }
+tokio-tungstenite  = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+futures-util       = { version = "0.3", default-features = false, features = ["sink"] }
+http               = "1"
+axum               = { workspace = true }
+sqlx               = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
+uuid               = { version = "1", features = ["v4"] }
+clap               = { version = "4", features = ["derive", "env"] }
+thiserror          = { workspace = true }

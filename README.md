@@ -80,6 +80,8 @@ crates/
   zerox1-node/           p2p node — libp2p mesh, REST API, Solana integration
   zerox1-aggregator/     Reputation indexer — SQLite persistence + HTTP API
   zerox1-sati-client/    RPC client for SATI on-chain identity verification
+  zerox1-client/         Official Rust client SDK for building on the 0x01 mesh
+  zerox1-mailbox/        Async store-and-forward mail service (co-located with bootstrap nodes)
 
 programs/workspace/
   behavior-log/          Anchor: per-epoch agent behavior log
@@ -233,8 +235,34 @@ Full protocol spec in [`docs/`](./docs/):
 
 ---
 
+## Rust client SDK
+
+`zerox1-client` is the official Rust crate for building services on the 0x01 mesh — agents, infrastructure apps, and tooling.
+
+```toml
+# Cargo.toml
+zerox1-client = "0.2"
+```
+
+```rust
+use zerox1_client::{NodeClient, ConversationId};
+
+let client = NodeClient::new("http://127.0.0.1:9090", Some(token))?;
+let me = client.identity().await?;
+
+client.listen_inbox(|env| async move {
+    println!("{} from {}", env.msg_type, env.sender);
+    Ok(())
+}).await?;
+```
+
+Published to [crates.io](https://crates.io/crates/zerox1-client) on every release. The mailbox service is the reference implementation.
+
+---
+
 ## License
 
 Dual-licensed to protect the network while maximizing agent adoption:
 - **`zerox1-node` (Infrastructure)**: [AGPL-3.0](./LICENSE) — Run it freely, but if you modify the routing or protocol logic for a hosted commercial service, your changes must be open-source.
-- **`@zerox1/sdk` (Agent Integrations)**: [MIT](./sdk/LICENSE) — Build agents and integrate them into any proprietary or open-source stack without restriction.
+- **`zerox1-client` (Rust SDK)**: [AGPL-3.0](./LICENSE) — Same terms as the node; open any modifications.
+- **`@zerox1/sdk` (TypeScript SDK)**: [MIT](./sdk/LICENSE) — Build agents and integrate them into any proprietary or open-source stack without restriction.

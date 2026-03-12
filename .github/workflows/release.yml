@@ -149,6 +149,18 @@ jobs:
           path: target/release/zerox1-aggregator
           if-no-files-found: error
 
+      - name: Build mailbox
+        run: cargo build --release -p zerox1-mailbox
+        env:
+          CARGO_TERM_COLOR: always
+
+      - name: Upload mailbox artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zerox1-mailbox
+          path: target/release/zerox1-mailbox
+          if-no-files-found: error
+
   # ── Build zerox1-challenger for all platforms (public bounty hunter) ──────
   build-challenger:
     name: Build challenger (${{ matrix.platform }})
@@ -208,6 +220,32 @@ jobs:
           if-no-files-found: error
 
 
+
+  # ── Publish zerox1-client to crates.io ───────────────────────────────────
+  publish-crates:
+    name: Publish crates.io
+    needs: [build]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-${{ runner.os }}-
+
+      - name: Publish zerox1-client
+        run: cargo publish -p zerox1-client --no-verify
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   # ── Assemble and publish npm packages ────────────────────────────────────
   publish-npm:
@@ -324,6 +362,7 @@ jobs:
           cp artifacts/zerox1-node-linux-x64/zerox1-node               zerox1-node-linux-x64
           cp artifacts/zerox1-node-win32-x64/zerox1-node.exe           zerox1-node-win32-x64.exe
           cp artifacts/zerox1-aggregator/zerox1-aggregator             zerox1-aggregator-linux-x64
+          cp artifacts/zerox1-mailbox/zerox1-mailbox                   zerox1-mailbox-linux-x64
           cp artifacts/zerox1-challenger-linux-x64/zerox1-challenger   zerox1-challenger-linux-x64
           cp artifacts/zerox1-challenger-darwin-arm64/zerox1-challenger zerox1-challenger-darwin-arm64
           cp artifacts/zerox1-challenger-darwin-x64/zerox1-challenger  zerox1-challenger-darwin-x64
@@ -339,6 +378,7 @@ jobs:
             zerox1-node-linux-x64
             zerox1-node-win32-x64.exe
             zerox1-aggregator-linux-x64
+            zerox1-mailbox-linux-x64
             zerox1-challenger-linux-x64
             zerox1-challenger-darwin-arm64
             zerox1-challenger-darwin-x64

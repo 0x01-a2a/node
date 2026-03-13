@@ -3780,10 +3780,15 @@ struct BagsLaunchRequest {
     name: String,
     symbol: String,
     description: String,
-    /// Raw image bytes, base64-encoded. Mutually exclusive with `image_url`.
+    /// Raw image bytes, base64-encoded. Mutually exclusive with `image_url` / `image_cid`.
     /// Bags API accepts PNG/JPG/GIF/WebP up to 15 MB.
     image_bytes: Option<String>,
+    /// Public HTTPS URL for the token image. Mutually exclusive with `image_bytes` / `image_cid`.
     image_url: Option<String>,
+    /// Keccak-256 hex CID of a blob previously uploaded via POST /wallet/upload-blob.
+    /// The node fetches the bytes from the aggregator and uploads them directly to Bags.fm
+    /// as multipart/form-data. Mutually exclusive with `image_bytes` / `image_url`.
+    image_cid: Option<String>,
     website_url: Option<String>,
     twitter_url: Option<String>,
     telegram_url: Option<String>,
@@ -3844,17 +3849,34 @@ async fn bags_launch_handler(
         )
             .into_response();
     }
-    // Reject supplying both image_bytes and image_url — Bags API enforces oneOf.
-    if req.image_bytes.is_some() && req.image_url.is_some() {
+    // Reject supplying more than one image source — Bags API enforces oneOf.
+    let image_sources = [req.image_bytes.is_some(), req.image_url.is_some(), req.image_cid.is_some()]
+        .iter()
+        .filter(|&&x| x)
+        .count();
+    if image_sources > 1 {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(serde_json::json!({"error": "provide either image_bytes or image_url, not both"})),
+            Json(serde_json::json!({"error": "provide at most one of: image_bytes, image_url, image_cid"})),
         )
             .into_response();
     }
 
+    // Validate image_cid format: must be a 64-char lowercase hex string.
+    if let Some(ref cid) = req.image_cid {
+        if cid.len() != 64 || !cid.chars().all(|c| c.is_ascii_hexdigit()) {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({"error": "image_cid must be a 64-char hex string (keccak-256)"})),
+            )
+                .into_response();
+        }
+    }
+
     // Decode and size-check image_bytes when present (15 MB limit from Bags API).
     const MAX_IMAGE_BYTES: usize = 15 * 1024 * 1024;
+    const AGGREGATOR_BLOB_URL: &str = "https://api.0x01.world/blobs";
+
     let decoded_image: Option<Vec<u8>> = if let Some(ref b64) = req.image_bytes {
         use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
         match B64.decode(b64) {
@@ -3870,6 +3892,44 @@ async fn bags_launch_handler(
                 return (
                     StatusCode::UNPROCESSABLE_ENTITY,
                     Json(serde_json::json!({"error": "image_bytes is not valid base64"})),
+                )
+                    .into_response();
+            }
+        }
+    } else if let Some(ref cid) = req.image_cid {
+        // Fetch blob bytes from the aggregator and send them directly as multipart.
+        let blob_url = format!("{}/{}", AGGREGATOR_BLOB_URL, cid);
+        match reqwest::get(&blob_url).await {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.bytes().await {
+                    Ok(bytes) if bytes.len() <= MAX_IMAGE_BYTES => Some(bytes.to_vec()),
+                    Ok(_) => {
+                        return (
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            Json(serde_json::json!({"error": "blob exceeds 15 MB limit"})),
+                        )
+                            .into_response();
+                    }
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_GATEWAY,
+                            Json(serde_json::json!({"error": format!("failed to read blob: {e}")})),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+            Ok(resp) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({"error": format!("aggregator returned {} for blob {}", resp.status(), cid)})),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({"error": format!("failed to fetch blob from aggregator: {e}")})),
                 )
                     .into_response();
             }

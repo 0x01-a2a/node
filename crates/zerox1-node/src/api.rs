@@ -345,6 +345,8 @@ pub(crate) const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9
 const SPL_ATA_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bJo";
 /// Minimum balance (atomic USDC units, 6 decimals) required to attempt a sweep.
 const MIN_SWEEP_AMOUNT: u64 = 10_000;
+/// Maximum single x402 micropayment (atomic USDC units). 10 USDC = 10_000_000.
+const MAX_X402_PAYMENT_MICRO: u64 = 10_000_000;
 
 struct RateLimitWindow {
     window_start: u64,
@@ -785,8 +787,9 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
         // Escrow
         .route("/escrow/lock", post(escrow_lock))
         .route("/escrow/approve", post(escrow_approve))
-        // Hot wallet sweep
+        // Hot wallet sweep + x402 micropayments
         .route("/wallet/sweep", post(sweep_usdc))
+        .route("/wallet/x402/pay", post(x402_pay))
         // Admin — exempt agent management (loopback only; requires api_secret)
         .route(
             "/admin/exempt",
@@ -2944,6 +2947,289 @@ async fn registry_8004_register_local(
                 .into_response()
         }
     }
+}
+
+// ============================================================================
+// x402 micropayment — POST /wallet/x402/pay
+// ============================================================================
+
+/// Compute Budget program ID (Solana).
+const COMPUTE_BUDGET_PROGRAM_ID: &str = "ComputeBudget111111111111111111111111111111";
+
+/// CAIP-2 network identifiers for Solana mainnet and devnet.
+const SOLANA_MAINNET_CAIP2: &str = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
+const SOLANA_DEVNET_CAIP2: &str = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
+
+#[derive(Deserialize)]
+pub(crate) struct X402PayRequest {
+    /// Raw value of the `Payment-Required` header (base64-encoded JSON).
+    payment_required_b64: String,
+}
+
+/// POST /wallet/x402/pay
+///
+/// Accepts an x402 `Payment-Required` header value (base64-encoded JSON),
+/// selects the first Solana `exact` scheme entry from `accepts[]`, builds and
+/// signs the required SPL `TransferChecked` transaction (preceded by Compute
+/// Budget instructions as the spec requires), and returns a ready-to-use
+/// `Payment-Signature` header value that the caller can forward on the retry
+/// request.
+///
+/// The facilitator at `https://facilitator.payai.network` will broadcast the
+/// transaction when the target server calls its `/settle` endpoint.
+///
+/// Requires api_secret.  Amount is capped at MAX_X402_PAYMENT_MICRO (10 USDC).
+async fn x402_pay(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<X402PayRequest>,
+) -> Response {
+    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
+        return resp;
+    }
+
+    // 1. Decode and parse the Payment-Required header value.
+    let req_bytes = match B64.decode(body.payment_required_b64.trim()) {
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "payment_required_b64: invalid base64" })),
+            )
+                .into_response();
+        }
+    };
+    let payment_req: serde_json::Value = match serde_json::from_slice(&req_bytes) {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "payment_required_b64: invalid JSON" })),
+            )
+                .into_response();
+        }
+    };
+
+    // 2. Find first Solana exact-scheme entry in accepts[].
+    let accepts = match payment_req["accepts"].as_array() {
+        Some(a) => a,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "payment_required: missing accepts array" })),
+            )
+                .into_response();
+        }
+    };
+
+    // Prefer the network matching this node's current mode (mainnet vs devnet).
+    let expected_network = if state.0.is_trading_mainnet {
+        SOLANA_MAINNET_CAIP2
+    } else {
+        SOLANA_DEVNET_CAIP2
+    };
+
+    let accepted = accepts.iter().find(|e| {
+        e["scheme"].as_str() == Some("exact")
+            && e["network"].as_str() == Some(expected_network)
+    });
+    let accepted = match accepted {
+        Some(a) => a,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "no compatible Solana exact-scheme entry in accepts",
+                    "expected_network": expected_network,
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // 3. Parse pay_to, asset (mint), and amount.
+    let pay_to_str = match accepted["payTo"].as_str() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "accepted entry missing payTo" })),
+            )
+                .into_response();
+        }
+    };
+    let pay_to: Pubkey = match pay_to_str.parse() {
+        Ok(pk) => pk,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "payTo: invalid Solana pubkey" })),
+            )
+                .into_response();
+        }
+    };
+
+    let asset_str = match accepted["asset"].as_str() {
+        Some(s) => s,
+        None => {
+            // Default to USDC mint for this network if omitted.
+            if state.0.is_trading_mainnet {
+                USDC_MINT_MAINNET
+            } else {
+                USDC_MINT_DEVNET
+            }
+        }
+    };
+    let usdc_mint: Pubkey = match asset_str.parse() {
+        Ok(pk) => pk,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "asset: invalid mint pubkey" })),
+            )
+                .into_response();
+        }
+    };
+
+    let amount_micro: u64 = match accepted["amount"].as_str().and_then(|s| s.parse().ok()) {
+        Some(v) => v,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "accepted entry missing or invalid amount" })),
+            )
+                .into_response();
+        }
+    };
+
+    if amount_micro > MAX_X402_PAYMENT_MICRO {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "payment amount exceeds MAX_X402_PAYMENT_MICRO",
+                "amount_micro": amount_micro,
+                "max_micro": MAX_X402_PAYMENT_MICRO,
+            })),
+        )
+            .into_response();
+    }
+
+    // 4. Derive hot-wallet pubkey and source ATA.
+    let signing_key = Arc::clone(&state.0.node_signing_key);
+    let agent_pubkey: Pubkey = {
+        let vk_bytes = signing_key.verifying_key().to_bytes();
+        Pubkey::new_from_array(vk_bytes)
+    };
+    let source_ata = derive_ata(&agent_pubkey, &usdc_mint);
+    let dest_ata = derive_ata(&pay_to, &usdc_mint);
+
+    // 5. Fetch recent blockhash.
+    let blockhash =
+        match fetch_latest_blockhash(&state.0.trade_rpc_url, &state.0.http_client).await {
+            Ok(bh) => bh,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({ "error": format!("blockhash fetch failed: {e}") })),
+                )
+                    .into_response();
+            }
+        };
+
+    // 6. Build the three required instructions in the order mandated by x402:
+    //      a) SetComputeUnitLimit (max 40_000)
+    //      b) SetComputeUnitPrice (max 5 microlamports)
+    //      c) SPL TransferChecked (amount + 6 decimals)
+    let compute_budget_program: Pubkey = COMPUTE_BUDGET_PROGRAM_ID
+        .parse()
+        .expect("valid compute budget program id");
+
+    // SetComputeUnitLimit discriminant = 2, then u32 LE units.
+    let mut limit_data = vec![2u8];
+    limit_data.extend_from_slice(&40_000u32.to_le_bytes());
+    let compute_limit_ix = solana_sdk::instruction::Instruction {
+        program_id: compute_budget_program,
+        accounts: vec![],
+        data: limit_data,
+    };
+
+    // SetComputeUnitPrice discriminant = 3, then u64 LE microlamports.
+    let mut price_data = vec![3u8];
+    price_data.extend_from_slice(&5u64.to_le_bytes());
+    let compute_price_ix = solana_sdk::instruction::Instruction {
+        program_id: compute_budget_program,
+        accounts: vec![],
+        data: price_data,
+    };
+
+    // SPL TransferChecked discriminant = 12, then u64 LE amount, then u8 decimals.
+    let spl_token_program: Pubkey = SPL_TOKEN_PROGRAM_ID
+        .parse()
+        .expect("valid SPL_TOKEN_PROGRAM_ID");
+    let mut transfer_data = vec![12u8];
+    transfer_data.extend_from_slice(&amount_micro.to_le_bytes());
+    transfer_data.push(6u8); // USDC decimals
+    let transfer_ix = solana_sdk::instruction::Instruction {
+        program_id: spl_token_program,
+        accounts: vec![
+            solana_sdk::instruction::AccountMeta::new(source_ata, false),
+            solana_sdk::instruction::AccountMeta::new_readonly(usdc_mint, false),
+            solana_sdk::instruction::AccountMeta::new(dest_ata, false),
+            solana_sdk::instruction::AccountMeta::new(agent_pubkey, true),
+        ],
+        data: transfer_data,
+    };
+
+    // 7. Build and sign the transaction (agent is fee payer — x402 facilitator
+    //    expects a partially-signed tx; for Solana the payer signs fully here
+    //    and the facilitator broadcasts without adding another sig).
+    let solana_kp = to_solana_keypair(&signing_key);
+    let tx = solana_sdk::transaction::Transaction::new_signed_with_payer(
+        &[compute_limit_ix, compute_price_ix, transfer_ix],
+        Some(&agent_pubkey),
+        &[&solana_kp],
+        blockhash,
+    );
+
+    let tx_b64 = match bincode::serialize(&tx) {
+        Ok(b) => B64.encode(&b),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::json!({ "error": format!("transaction serialization failed: {e}") }),
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    // 8. Wrap in the x402 Payment-Signature JSON envelope and base64-encode it.
+    let payment_signature_json = serde_json::json!({
+        "x402Version": 2,
+        "scheme": "exact",
+        "network": expected_network,
+        "accepted": accepted,
+        "payload": {
+            "transaction": tx_b64,
+        },
+    });
+    let payment_signature_b64 = B64.encode(payment_signature_json.to_string().as_bytes());
+
+    tracing::info!(
+        "x402 payment: {} USDC micro → {} (network: {expected_network})",
+        amount_micro,
+        pay_to_str,
+    );
+
+    Json(serde_json::json!({
+        "payment_signature": payment_signature_b64,
+        "amount_micro": amount_micro,
+        "amount_usdc": amount_micro as f64 / 1_000_000.0,
+        "pay_to": pay_to_str,
+        "network": expected_network,
+    }))
+    .into_response()
 }
 
 // ============================================================================

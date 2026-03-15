@@ -55,7 +55,7 @@ use crate::{
     kora::KoraClient,
     registry_8004::{
         broadcast_transaction, build_register_tx, fetch_latest_blockhash, PROGRAM_ID_DEVNET,
-        PROGRAM_ID_MAINNET, RPC_DEVNET, RPC_MAINNET,
+        PROGRAM_ID_MAINNET,
     },
 };
 
@@ -2522,10 +2522,8 @@ async fn registry_8004_register_prepare(
         }
     };
 
-    // Fetch recent blockhash from the public Solana RPC for the correct network.
-    // Use the canonical public endpoints rather than the mesh rpc_url so that
-    // 8004 registration always lands on the right cluster.
-    let rpc_8004 = if state.0.is_mainnet { RPC_MAINNET } else { RPC_DEVNET };
+    // Use the configured rpc_url (Helius when baked in, public mainnet otherwise).
+    let rpc_8004 = &state.0.rpc_url;
     let blockhash = match fetch_latest_blockhash(rpc_8004, &state.0.http_client).await {
         Ok(bh) => bh,
         Err(e) => {
@@ -2748,7 +2746,7 @@ async fn registry_8004_register_submit(
     };
     let signed_b64 = B64.encode(&signed_bytes);
 
-    let rpc_8004 = if state.0.is_mainnet { RPC_MAINNET } else { RPC_DEVNET };
+    let rpc_8004 = &state.0.rpc_url;
     match broadcast_transaction(rpc_8004, &state.0.http_client, &signed_b64).await {
         Ok(signature) => {
             tracing::info!("8004 registration broadcast: tx={signature}");
@@ -2838,7 +2836,7 @@ async fn registry_8004_register_local(
             .into_response();
     }
 
-    let rpc_8004 = if state.0.is_mainnet { RPC_MAINNET } else { RPC_DEVNET };
+    let rpc_8004 = &state.0.rpc_url;
     let blockhash = match fetch_latest_blockhash(rpc_8004, &state.0.http_client).await {
         Ok(bh) => bh,
         Err(e) => {

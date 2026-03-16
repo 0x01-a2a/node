@@ -12,8 +12,13 @@ const MAX_PENDING_KEYS: usize = 200;
 /// Per-peer cached state for envelope validation.
 #[derive(Default)]
 pub struct PeerEntry {
-    /// Last validated nonce from this sender (replay protection).
+    /// Last validated nonce from this sender (replay protection, non-BEACON).
     pub last_nonce: u64,
+    /// Last validated BEACON nonce — tracked separately because gossipsub
+    /// does not guarantee ordering and high-frequency BEACONs (every 30s)
+    /// would otherwise block lower-nonce non-BEACON messages that propagate
+    /// through different mesh paths.
+    pub last_beacon_nonce: u64,
     /// Ed25519 verifying key (populated from BEACON payload or identify).
     pub verifying_key: Option<VerifyingKey>,
     /// libp2p PeerId for this agent (populated on connect + BEACON).
@@ -35,10 +40,12 @@ pub struct PeerEntry {
 /// Thread-local in-memory peer state map.
 pub struct PeerStateMap {
     by_agent_id: HashMap<[u8; 32], PeerEntry>,
-    /// Durable replay floor for SATI-confirmed agents.
+    /// Durable replay floor for SATI-confirmed agents (non-BEACON).
     /// Preserved across in-memory `by_agent_id` evictions so nonce replay
     /// protection does not reset under churn.
     confirmed_nonce_floor: HashMap<[u8; 32], u64>,
+    /// Same as above but for BEACON nonces.
+    confirmed_beacon_floor: HashMap<[u8; 32], u64>,
     /// Reverse lookup: libp2p PeerId → 0x01 agent_id (SATI mint).
     peer_to_agent: HashMap<PeerId, [u8; 32]>,
     /// Keys received from the `identify` protocol before the peer has sent a
@@ -52,6 +59,7 @@ impl PeerStateMap {
         Self {
             by_agent_id: HashMap::new(),
             confirmed_nonce_floor: HashMap::new(),
+            confirmed_beacon_floor: HashMap::new(),
             peer_to_agent: HashMap::new(),
             pending_keys: HashMap::new(),
         }
@@ -79,6 +87,8 @@ impl PeerStateMap {
                     if matches!(entry.sati_status, Some(true)) {
                         let floor = self.confirmed_nonce_floor.entry(evict_key).or_insert(0);
                         *floor = (*floor).max(entry.last_nonce);
+                        let bfloor = self.confirmed_beacon_floor.entry(evict_key).or_insert(0);
+                        *bfloor = (*bfloor).max(entry.last_beacon_nonce);
                     }
                 }
             }
@@ -96,12 +106,34 @@ impl PeerStateMap {
         in_mem.max(floor)
     }
 
+    /// Return the last BEACON nonce for this sender (separate from non-BEACON).
+    pub fn last_beacon_nonce(&self, agent_id: &[u8; 32]) -> u64 {
+        let in_mem = self.by_agent_id.get(agent_id).map_or(0, |e| e.last_beacon_nonce);
+        let floor = self
+            .confirmed_beacon_floor
+            .get(agent_id)
+            .copied()
+            .unwrap_or(0);
+        in_mem.max(floor)
+    }
+
     pub fn update_nonce(&mut self, agent_id: [u8; 32], nonce: u64) {
         let entry = self.entry(agent_id);
         entry.last_nonce = nonce;
         let is_confirmed = matches!(entry.sati_status, Some(true));
         if is_confirmed {
             let floor = self.confirmed_nonce_floor.entry(agent_id).or_insert(0);
+            *floor = (*floor).max(nonce);
+        }
+    }
+
+    /// Update the BEACON-specific nonce for this sender.
+    pub fn update_beacon_nonce(&mut self, agent_id: [u8; 32], nonce: u64) {
+        let entry = self.entry(agent_id);
+        entry.last_beacon_nonce = nonce;
+        let is_confirmed = matches!(entry.sati_status, Some(true));
+        if is_confirmed {
+            let floor = self.confirmed_beacon_floor.entry(agent_id).or_insert(0);
             *floor = (*floor).max(nonce);
         }
     }
@@ -164,9 +196,12 @@ impl PeerStateMap {
         let entry = self.entry(agent_id);
         entry.sati_status = Some(registered);
         let last_nonce = entry.last_nonce;
+        let last_beacon_nonce = entry.last_beacon_nonce;
         if registered {
             let floor = self.confirmed_nonce_floor.entry(agent_id).or_insert(0);
             *floor = (*floor).max(last_nonce);
+            let bfloor = self.confirmed_beacon_floor.entry(agent_id).or_insert(0);
+            *bfloor = (*bfloor).max(last_beacon_nonce);
         }
     }
 

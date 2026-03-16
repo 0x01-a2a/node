@@ -163,6 +163,14 @@ pub struct DisputeEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcceptEvent {
+    pub sender: String,
+    pub recipient: String,
+    pub conversation_id: String,
+    pub slot: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RejectEvent {
     pub sender: String,
     pub recipient: String,
@@ -247,7 +255,7 @@ pub struct AgentProfile {
 pub struct ActivityEvent {
     pub id: i64,
     pub ts: i64,
-    pub event_type: String, // "JOIN" | "FEEDBACK" | "DISPUTE" | "VERDICT" | "REJECT" | "DELIVER"
+    pub event_type: String, // "JOIN" | "FEEDBACK" | "DISPUTE" | "VERDICT" | "ACCEPT" | "REJECT" | "DELIVER"
     pub agent_id: String,
     pub target_id: Option<String>,
     pub score: Option<i64>,
@@ -276,6 +284,8 @@ pub enum IngestEvent {
     Beacon(BeaconEvent),
     #[serde(rename = "LATENCY")]
     Latency(LatencyEvent),
+    #[serde(rename = "ACCEPT")]
+    Accept(AcceptEvent),
     #[serde(rename = "REJECT")]
     Reject(RejectEvent),
     #[serde(rename = "DELIVER")]
@@ -2696,6 +2706,39 @@ impl ReputationStore {
                             Ok(saved) => return Some(saved),
                             Err(e) => tracing::warn!("SQLite insert_activity(JOIN) failed: {e}"),
                         }
+                    }
+                }
+                None
+            }
+            IngestEvent::Accept(ev) => {
+                if !is_valid_agent_id(&ev.sender) || !is_valid_agent_id(&ev.recipient) {
+                    tracing::warn!("Ingest: invalid agent_id in ACCEPT — dropped");
+                    return None;
+                }
+                drop(inner);
+                let ts = now_secs();
+                tracing::debug!(
+                    "ACCEPT sender={} recipient={}",
+                    &ev.sender[..8.min(ev.sender.len())],
+                    &ev.recipient[..8.min(ev.recipient.len())],
+                );
+                let db = self.db.lock().unwrap();
+                if let Some(ref conn) = *db {
+                    let act = ActivityEvent {
+                        id: 0,
+                        ts: ts as i64,
+                        event_type: "ACCEPT".to_string(),
+                        agent_id: ev.sender.clone(),
+                        target_id: Some(ev.recipient.clone()),
+                        score: None,
+                        name: conn.query_agent_name(&ev.sender).ok().flatten(),
+                        target_name: conn.query_agent_name(&ev.recipient).ok().flatten(),
+                        slot: Some(ev.slot as i64),
+                        conversation_id: Some(ev.conversation_id.clone()),
+                    };
+                    match conn.insert_activity(&act) {
+                        Ok(saved) => return Some(saved),
+                        Err(e) => tracing::warn!("SQLite insert_activity(ACCEPT) failed: {e}"),
                     }
                 }
                 None

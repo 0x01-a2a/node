@@ -556,38 +556,7 @@ impl Zx01Node {
                     self.handle_outbound(swarm, req).await;
                 }
                 Some(env) = self.hosted_outbound_rx.recv() => {
-                    // Pre-verify hosted envelopes exactly like inbound ones to prevent DoS broadcast.
-                    if env.msg_type == MsgType::Beacon {
-                        if self.peer_states.sati_status(&env.sender).is_none() {
-                            if !self.config.registry_8004_disabled {
-                                let failed_8004 = self.reg8004_failures.get(&env.sender).map(|t| t.elapsed().as_secs() < 3600).unwrap_or(false);
-                                if !failed_8004 {
-                                    self.verify_8004_registration(env.sender).await;
-                                }
-                            }
-                            // SATI fallback
-                            if self.peer_states.sati_status(&env.sender).is_none() {
-                                let recently_failed = self.sati_rpc_failures.get(&env.sender).map(|t| t.elapsed().as_secs() < 3600).unwrap_or(false);
-                                if !recently_failed {
-                                    self.verify_sati_registration(env.sender).await;
-                                }
-                            }
-                        }
-                        if self.peer_states.lease_status(&env.sender).is_none()
-                            || self.peer_states.last_active_epoch(&env.sender) < self.current_epoch
-                        {
-                            self.verify_peer_lease(env.sender).await;
-                        }
-                    }
-
-                    if !self.sati_gate_allows(&env.sender) {
-                        tracing::warn!("Blocked hosted agent {} (unregistered)", hex::encode(env.sender));
-                        continue;
-                    }
-                    if !self.lease_gate_allows(&env.sender) {
-                        tracing::warn!("Blocked hosted agent {} (deactivated)", hex::encode(env.sender));
-                        continue;
-                    }
+                    // Registration/lease gates disabled — network-first mode.
 
                     // Record it in the batch so it's not bypassing the epoch logging!
                     self.batch.record_message(env.msg_type, env.sender, self.current_slot);
@@ -620,6 +589,8 @@ impl Zx01Node {
                     }
                 }
                 _ = beacon_timer.tick() => {
+                    // Retry any queued broadcasts before sending the new BEACON.
+                    self.flush_pending_broadcasts(swarm);
                     self.send_beacon(swarm).await;
                 }
                 _ = epoch_timer.tick() => {
@@ -847,11 +818,10 @@ impl Zx01Node {
     ///
     /// - Dev mode: always true
     /// - Prod mode: false only when lease_status = Some(false)
-    fn lease_gate_allows(&self, agent_id: &[u8; 32]) -> bool {
-        if self.dev_mode || self.exempt_agents.read().unwrap().contains(agent_id) {
-            return true;
-        }
-        !matches!(self.peer_states.lease_status(agent_id), Some(false))
+    fn lease_gate_allows(&self, _agent_id: &[u8; 32]) -> bool {
+        // Lease gate disabled — network-first: get messages flowing
+        // before adding economic gates (lease/stake).
+        true
     }
 
     // ========================================================================
@@ -969,11 +939,10 @@ impl Zx01Node {
     /// In dev mode: always true (warn on unregistered).
     /// In prod mode: true only if SATI status is confirmed `Some(true)` or
     ///               still `None` (not yet checked — optimistic until BEACON fires check).
-    fn sati_gate_allows(&self, agent_id: &[u8; 32]) -> bool {
-        if self.dev_mode || self.exempt_agents.read().unwrap().contains(agent_id) {
-            return true;
-        }
-        !matches!(self.peer_states.sati_status(agent_id), Some(false))
+    fn sati_gate_allows(&self, _agent_id: &[u8; 32]) -> bool {
+        // Registration gate disabled — network-first: get messages flowing
+        // before adding economic gates (8004/SATI).
+        true
     }
 
     // ========================================================================
@@ -1047,7 +1016,7 @@ impl Zx01Node {
             Zx01BehaviourEvent::Kademlia(_) => {}
 
             Zx01BehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. }) => {
-                tracing::debug!("Identified {peer_id}: agent={}", info.agent_version);
+                tracing::info!("Identified {peer_id}: agent={}", info.agent_version);
                 for addr in &info.listen_addrs {
                     swarm
                         .behaviour_mut()
@@ -1056,7 +1025,19 @@ impl Zx01Node {
                 }
                 if let Ok(ed_pk) = info.public_key.try_into_ed25519() {
                     if let Ok(vk) = VerifyingKey::from_bytes(&ed_pk.to_bytes()) {
-                        self.peer_states.set_key_for_peer(&peer_id, vk);
+                        // The agent_id is the raw Ed25519 public key bytes.
+                        // Register the authoritative peer_id → agent_id mapping
+                        // from the identify handshake (direct connection), so
+                        // bilateral routing uses the actual peer rather than
+                        // the gossipsub propagation-source hop.
+                        let agent_id: [u8; 32] = ed_pk.to_bytes();
+                        tracing::info!(
+                            "Identify: mapping agent {} → peer {}",
+                            hex::encode(agent_id),
+                            peer_id,
+                        );
+                        self.peer_states.register_peer(agent_id, peer_id);
+                        self.peer_states.set_verifying_key(agent_id, vk);
                     }
                 }
             }
@@ -1220,8 +1201,11 @@ impl Zx01Node {
         // BEACONs are self-authenticating: extract VK from payload, validate
         // FIRST, then store only if the signature is valid. This prevents
         // attackers from overwriting a legitimate agent's VK with a forged one.
-        let last_nonce = self.peer_states.last_nonce(&env.sender);
+        // Use per-type nonce tracking: BEACONs get their own nonce lane so
+        // high-frequency BEACONs don't block lower-nonce non-BEACON messages
+        // that may arrive out of gossipsub propagation order.
         if env.msg_type == MsgType::Beacon {
+            let last_nonce = self.peer_states.last_beacon_nonce(&env.sender);
             let vk = match self.extract_beacon_vk(&env) {
                 Some(vk) => vk,
                 None => {
@@ -1235,6 +1219,7 @@ impl Zx01Node {
             }
             self.process_beacon_payload(&env, source_peer);
         } else {
+            let last_nonce = self.peer_states.last_nonce(&env.sender);
             let vk = match self.peer_states.verifying_key(&env.sender) {
                 Some(vk) => *vk,
                 None => {
@@ -1253,59 +1238,16 @@ impl Zx01Node {
 
         // Registration + Lease gates — checked after signature validation.
         // BEACONs are exempt: they ARE the trigger for both checks.
+        // Registration/lease gates disabled — network-first mode.
+        // All verification calls (8004, SATI, lease) skipped to avoid
+        // wasted RPC calls. Gates always return true.
+
+        // Update peer state (per-type nonce lane).
         if env.msg_type == MsgType::Beacon {
-            if self.peer_states.sati_status(&env.sender).is_none() {
-                // Primary gate: 8004 Solana Agent Registry (HTTP GraphQL, no RPC).
-                // If the agent is already registered in 8004, their existing
-                // identity is connected and they pass without needing a SATI mint.
-                if !self.config.registry_8004_disabled {
-                    let failed_8004 = self
-                        .reg8004_failures
-                        .get(&env.sender)
-                        .map(|t| t.elapsed().as_secs() < 3600)
-                        .unwrap_or(false);
-                    if !failed_8004 {
-                        self.verify_8004_registration(env.sender).await;
-                    }
-                }
-                // Legacy fallback: SATI SPL-mint check (only if 8004 did not verify).
-                if self.peer_states.sati_status(&env.sender).is_none() {
-                    let recently_failed = self
-                        .sati_rpc_failures
-                        .get(&env.sender)
-                        .map(|t| t.elapsed().as_secs() < 3600)
-                        .unwrap_or(false);
-                    if !recently_failed {
-                        self.verify_sati_registration(env.sender).await;
-                    }
-                }
-            }
-            if self.peer_states.lease_status(&env.sender).is_none()
-                || self.peer_states.last_active_epoch(&env.sender) < self.current_epoch
-            {
-                self.verify_peer_lease(env.sender).await;
-            }
+            self.peer_states.update_beacon_nonce(env.sender, env.nonce);
+        } else {
+            self.peer_states.update_nonce(env.sender, env.nonce);
         }
-
-        if !self.sati_gate_allows(&env.sender) {
-            tracing::warn!(
-                "Dropping {} from unregistered agent {}",
-                env.msg_type,
-                hex::encode(env.sender),
-            );
-            return;
-        }
-        if !self.lease_gate_allows(&env.sender) {
-            tracing::warn!(
-                "Dropping {} from deactivated agent {}",
-                env.msg_type,
-                hex::encode(env.sender),
-            );
-            return;
-        }
-
-        // Update peer state.
-        self.peer_states.update_nonce(env.sender, env.nonce);
         self.peer_states.touch_epoch(env.sender, self.current_epoch);
         self.reputation
             .record_activity(env.sender, self.current_epoch);
@@ -1434,10 +1376,18 @@ impl Zx01Node {
             }
         };
 
-        let vk = match self.peer_states.verifying_key(&env.sender).copied() {
-            Some(vk) => vk,
-            None => {
-                tracing::debug!("No VK for bilateral sender {}", hex::encode(env.sender),);
+        // The sender's agent_id IS its Ed25519 public key bytes — derive VK directly.
+        // This means bilateral messages work even before a gossipsub BEACON is received.
+        let vk = match VerifyingKey::from_bytes(&env.sender) {
+            Ok(vk) => {
+                // Cache for future lookups (e.g. latency tracking).
+                self.peer_states.set_verifying_key(env.sender, vk);
+                vk
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "Invalid sender pubkey in bilateral from {peer_id}: {e}"
+                );
                 return;
             }
         };
@@ -1448,51 +1398,7 @@ impl Zx01Node {
             return;
         }
 
-        // Registration check for bilateral senders not yet verified.
-        // Mirrors the BEACON path: 8004 first, SATI as fallback.
-        if self.peer_states.sati_status(&env.sender).is_none() {
-            if !self.config.registry_8004_disabled {
-                let failed_8004 = self
-                    .reg8004_failures
-                    .get(&env.sender)
-                    .map(|t| t.elapsed().as_secs() < 3600)
-                    .unwrap_or(false);
-                if !failed_8004 {
-                    self.verify_8004_registration(env.sender).await;
-                }
-            }
-            if self.peer_states.sati_status(&env.sender).is_none() {
-                let recently_failed = self
-                    .sati_rpc_failures
-                    .get(&env.sender)
-                    .map(|t| t.elapsed().as_secs() < 3600)
-                    .unwrap_or(false);
-                if !recently_failed {
-                    self.verify_sati_registration(env.sender).await;
-                }
-            }
-        }
-
-        // Registration + Lease gates for bilateral messages.
-        if !self.sati_gate_allows(&env.sender) {
-            tracing::warn!(
-                "Dropping bilateral {} from unregistered agent {}",
-                env.msg_type,
-                hex::encode(env.sender),
-            );
-            return;
-        }
-        if self.peer_states.last_active_epoch(&env.sender) < self.current_epoch {
-            self.verify_peer_lease(env.sender).await;
-        }
-        if !self.lease_gate_allows(&env.sender) {
-            tracing::warn!(
-                "Dropping bilateral {} from deactivated agent {}",
-                env.msg_type,
-                hex::encode(env.sender),
-            );
-            return;
-        }
+        // Registration/lease gates disabled — network-first mode.
 
         self.peer_states.update_nonce(env.sender, env.nonce);
         self.peer_states.touch_epoch(env.sender, self.current_epoch);
@@ -1555,11 +1461,23 @@ impl Zx01Node {
                 }));
             }
             MsgType::Accept => {
+                tracing::info!(
+                    "ACCEPT from {} for conversation {}",
+                    hex::encode(env.sender),
+                    hex::encode(env.conversation_id),
+                );
                 self.batch.record_accept(TaskSelection {
                     conversation_id: env.conversation_id,
                     counterparty: env.sender,
                     slot: self.current_slot,
                 });
+                self.push_to_aggregator(serde_json::json!({
+                    "msg_type":        "ACCEPT",
+                    "sender":          hex::encode(env.sender),
+                    "recipient":       hex::encode(env.recipient),
+                    "conversation_id": hex::encode(env.conversation_id),
+                    "slot":            self.current_slot,
+                }));
             }
             MsgType::NotarizeAssign => {
                 if env.payload.len() >= NOTARIZE_ASSIGN_VERIFIER_OFFSET {
@@ -1762,7 +1680,13 @@ impl Zx01Node {
 
         if let Ok(vk) = VerifyingKey::from_bytes(&vk_bytes) {
             self.peer_states.set_verifying_key(env.sender, vk);
-            self.peer_states.register_peer(env.sender, source_peer);
+            // Only use the gossipsub propagation source as the peer_id if
+            // identify has not yet established an authoritative mapping.
+            // Identify gives us the direct connection peer_id; gossipsub
+            // may deliver via a hop that is not the agent's own peer.
+            if self.peer_states.peer_id_for_agent(&env.sender).is_none() {
+                self.peer_states.register_peer(env.sender, source_peer);
+            }
             tracing::info!(
                 "BEACON: registered agent {} (peer {source_peer})",
                 hex::encode(env.sender),
@@ -1869,6 +1793,10 @@ impl Zx01Node {
         for env in pending {
             if let Err(e) = self.publish_envelope(swarm, &env) {
                 tracing::warn!("Queued broadcast flush failed ({}): {e}", env.msg_type);
+                // Re-queue so the next subscription event or BEACON timer retries.
+                if self.pending_broadcasts.len() < MAX_PENDING_BROADCASTS {
+                    self.pending_broadcasts.push(env);
+                }
             }
         }
     }
@@ -1990,6 +1918,34 @@ impl Zx01Node {
                             tracing::warn!("Escrow approve_payment failed: {e}");
                         }
                     });
+                }
+
+                // FEEDBACK sent → push to aggregator so the feed reflects the outcome.
+                if req.msg_type == MsgType::Feedback {
+                    if let Ok(fb) = FeedbackPayload::decode(&env.payload) {
+                        let raw_b64 = env
+                            .to_cbor()
+                            .ok()
+                            .map(|b| base64::engine::general_purpose::STANDARD.encode(&b));
+                        self.push_to_aggregator(serde_json::json!({
+                            "msg_type":        "FEEDBACK",
+                            "sender":          hex::encode(env.sender),
+                            "target_agent":    hex::encode(fb.target_agent),
+                            "score":           fb.score,
+                            "outcome":         fb.outcome,
+                            "is_dispute":      fb.is_dispute,
+                            "role":            fb.role,
+                            "conversation_id": hex::encode(fb.conversation_id),
+                            "slot":            self.current_slot,
+                            "raw_b64":         raw_b64,
+                        }));
+                        tracing::info!(
+                            "FEEDBACK sent → {} score={} outcome={}",
+                            hex::encode(fb.target_agent),
+                            fb.score,
+                            fb.outcome,
+                        );
+                    }
                 }
 
                 // ACCEPT sent → auto-assign a notary for this conversation (if pool non-empty).

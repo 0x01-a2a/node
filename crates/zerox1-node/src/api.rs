@@ -1085,7 +1085,7 @@ async fn send_envelope(
     }
 
     // Decode payload.
-    let payload = match B64.decode(&req.payload_b64) {
+    let raw_payload = match B64.decode(&req.payload_b64) {
         Ok(b) => b,
         Err(_) => {
             return (
@@ -1093,6 +1093,32 @@ async fn send_envelope(
                 Json(serde_json::json!({ "error": "payload_b64: invalid base64" })),
             )
         }
+    };
+
+    // If this is a FEEDBACK message and the payload is JSON (starts with '{'),
+    // convert it to the canonical CBOR FeedbackPayload wire format expected by
+    // the recipient node. The panel sends JSON {"score":N,"outcome":"..."} for
+    // convenience; this normalises it before forwarding over the mesh.
+    let payload = if msg_type == zerox1_protocol::message::MsgType::Feedback
+        && raw_payload.first() == Some(&b'{')
+    {
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw_payload) {
+            let score = v.get("score").and_then(|x| x.as_i64()).unwrap_or(0) as i8;
+            let outcome_str = v.get("outcome").and_then(|x| x.as_str()).unwrap_or("neutral");
+            let outcome: u8 = match outcome_str { "positive" => 2, "negative" => 0, _ => 1 };
+            zerox1_protocol::payload::FeedbackPayload {
+                conversation_id,
+                target_agent: recipient,
+                score,
+                outcome,
+                is_dispute: false,
+                role: zerox1_protocol::payload::FeedbackPayload::ROLE_PARTICIPANT,
+            }.encode()
+        } else {
+            raw_payload
+        }
+    } else {
+        raw_payload
     };
 
     // Send to node loop via oneshot.

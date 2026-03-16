@@ -5,15 +5,14 @@ use rand::rngs::OsRng;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-/// Agent identity: Ed25519 signing key + SATI mint address.
+/// Agent identity: Ed25519 signing key.
 ///
 /// The same Ed25519 secret drives both 0x01 envelope signing
 /// and the libp2p peer identity (doc 5 §4.1).
 pub struct AgentIdentity {
     pub signing_key: SigningKey,
     pub verifying_key: VerifyingKey,
-    /// SATI mint address (= agent ID in 0x01 envelopes).
-    /// In dev mode (no SATI registration) this is set to verifying_key bytes.
+    /// Agent ID = verifying_key bytes (Ed25519 pubkey = Solana pubkey, same curve).
     pub agent_id: [u8; 32],
     /// libp2p keypair derived from the same Ed25519 secret.
     pub libp2p_keypair: identity::Keypair,
@@ -23,13 +22,12 @@ impl AgentIdentity {
     #[allow(dead_code)]
     pub fn generate() -> Self {
         let signing_key = SigningKey::generate(&mut OsRng);
-        Self::from_signing_key(signing_key, None)
+        Self::from_signing_key(signing_key)
     }
 
-    pub fn from_signing_key(signing_key: SigningKey, sati_mint: Option<[u8; 32]>) -> Self {
+    pub fn from_signing_key(signing_key: SigningKey) -> Self {
         let verifying_key = signing_key.verifying_key();
-        // Dev mode: derive agent_id from verifying key bytes until SATI registration
-        let agent_id = sati_mint.unwrap_or_else(|| verifying_key.to_bytes());
+        let agent_id = verifying_key.to_bytes();
         let libp2p_keypair = to_libp2p_keypair(&signing_key);
         Self {
             signing_key,
@@ -59,20 +57,17 @@ impl AgentIdentity {
         Ok(())
     }
 
-    pub fn load(path: &Path, sati_mint: Option<[u8; 32]>) -> anyhow::Result<Self> {
+    pub fn load(path: &Path) -> anyhow::Result<Self> {
         let bytes = std::fs::read(path)?;
         let arr: [u8; 32] = bytes
             .try_into()
             .map_err(|_| anyhow::anyhow!("invalid key file: expected 32 bytes"))?;
-        Ok(Self::from_signing_key(
-            SigningKey::from_bytes(&arr),
-            sati_mint,
-        ))
+        Ok(Self::from_signing_key(SigningKey::from_bytes(&arr)))
     }
 
-    pub fn load_or_generate(path: &Path, sati_mint: Option<[u8; 32]>) -> anyhow::Result<Self> {
+    pub fn load_or_generate(path: &Path) -> anyhow::Result<Self> {
         if path.exists() {
-            let id = Self::load(path, sati_mint)?;
+            let id = Self::load(path)?;
             tracing::info!(
                 peer_id = %id.libp2p_keypair.public().to_peer_id(),
                 agent_id = %hex::encode(id.agent_id),
@@ -80,7 +75,7 @@ impl AgentIdentity {
             );
             Ok(id)
         } else {
-            let id = Self::from_signing_key(SigningKey::generate(&mut OsRng), sati_mint);
+            let id = Self::from_signing_key(SigningKey::generate(&mut OsRng));
             id.save(path)?;
             tracing::info!(
                 peer_id = %id.libp2p_keypair.public().to_peer_id(),

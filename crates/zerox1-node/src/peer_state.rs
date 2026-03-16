@@ -7,6 +7,7 @@ use std::collections::HashMap;
 const MAX_PEERS: usize = 10_000;
 
 /// Maximum number of identify keys buffered before a BEACON arrives.
+#[allow(dead_code)]
 const MAX_PENDING_KEYS: usize = 200;
 
 /// Per-peer cached state for envelope validation.
@@ -23,11 +24,6 @@ pub struct PeerEntry {
     pub verifying_key: Option<VerifyingKey>,
     /// libp2p PeerId for this agent (populated on connect + BEACON).
     pub peer_id: Option<PeerId>,
-    /// SATI registration status:
-    ///   None        = not yet checked
-    ///   Some(true)  = confirmed registered in SATI
-    ///   Some(false) = confirmed NOT registered
-    pub sati_status: Option<bool>,
     /// Lease status:
     ///   None        = not yet checked
     ///   Some(true)  = active lease (paid_through_epoch >= current_epoch or in grace)
@@ -40,13 +36,13 @@ pub struct PeerEntry {
 /// Thread-local in-memory peer state map.
 pub struct PeerStateMap {
     by_agent_id: HashMap<[u8; 32], PeerEntry>,
-    /// Durable replay floor for SATI-confirmed agents (non-BEACON).
+    /// Durable replay floor for agents (non-BEACON).
     /// Preserved across in-memory `by_agent_id` evictions so nonce replay
     /// protection does not reset under churn.
     confirmed_nonce_floor: HashMap<[u8; 32], u64>,
     /// Same as above but for BEACON nonces.
     confirmed_beacon_floor: HashMap<[u8; 32], u64>,
-    /// Reverse lookup: libp2p PeerId → 0x01 agent_id (SATI mint).
+    /// Reverse lookup: libp2p PeerId → 0x01 agent_id.
     peer_to_agent: HashMap<PeerId, [u8; 32]>,
     /// Keys received from the `identify` protocol before the peer has sent a
     /// BEACON.  Stored here temporarily and applied once register_peer() is
@@ -67,28 +63,11 @@ impl PeerStateMap {
 
     fn entry(&mut self, agent_id: [u8; 32]) -> &mut PeerEntry {
         if !self.by_agent_id.contains_key(&agent_id) && self.by_agent_id.len() >= MAX_PEERS {
-            // Prefer evicting peers that are NOT SATI-confirmed to protect
-            // established agents from being displaced by BEACON floods.
-            let evict_key = self
-                .by_agent_id
-                .iter()
-                .find(|(_, e)| !matches!(e.sati_status, Some(true)))
-                .map(|(k, _)| *k);
-            let evict_key = evict_key
-                // If all entries are SATI-confirmed, still evict one to enforce
-                // MAX_PEERS and prevent unbounded growth.
-                .or_else(|| self.by_agent_id.keys().next().copied());
+            let evict_key = self.by_agent_id.keys().next().copied();
             if let Some(evict_key) = evict_key {
                 if let Some(entry) = self.by_agent_id.remove(&evict_key) {
                     if let Some(pid) = entry.peer_id {
                         self.peer_to_agent.remove(&pid);
-                    }
-                    // Preserve replay floor for confirmed peers across eviction.
-                    if matches!(entry.sati_status, Some(true)) {
-                        let floor = self.confirmed_nonce_floor.entry(evict_key).or_insert(0);
-                        *floor = (*floor).max(entry.last_nonce);
-                        let bfloor = self.confirmed_beacon_floor.entry(evict_key).or_insert(0);
-                        *bfloor = (*bfloor).max(entry.last_beacon_nonce);
                     }
                 }
             }
@@ -120,22 +99,16 @@ impl PeerStateMap {
     pub fn update_nonce(&mut self, agent_id: [u8; 32], nonce: u64) {
         let entry = self.entry(agent_id);
         entry.last_nonce = nonce;
-        let is_confirmed = matches!(entry.sati_status, Some(true));
-        if is_confirmed {
-            let floor = self.confirmed_nonce_floor.entry(agent_id).or_insert(0);
-            *floor = (*floor).max(nonce);
-        }
+        let floor = self.confirmed_nonce_floor.entry(agent_id).or_insert(0);
+        *floor = (*floor).max(nonce);
     }
 
     /// Update the BEACON-specific nonce for this sender.
     pub fn update_beacon_nonce(&mut self, agent_id: [u8; 32], nonce: u64) {
         let entry = self.entry(agent_id);
         entry.last_beacon_nonce = nonce;
-        let is_confirmed = matches!(entry.sati_status, Some(true));
-        if is_confirmed {
-            let floor = self.confirmed_beacon_floor.entry(agent_id).or_insert(0);
-            *floor = (*floor).max(nonce);
-        }
+        let floor = self.confirmed_beacon_floor.entry(agent_id).or_insert(0);
+        *floor = (*floor).max(nonce);
     }
 
     pub fn verifying_key(&self, agent_id: &[u8; 32]) -> Option<&VerifyingKey> {
@@ -188,36 +161,11 @@ impl PeerStateMap {
     }
 
     // ========================================================================
-    // SATI registration status
-    // ========================================================================
-
-    /// Record the result of a SATI registration check.
-    pub fn set_sati_status(&mut self, agent_id: [u8; 32], registered: bool) {
-        let entry = self.entry(agent_id);
-        entry.sati_status = Some(registered);
-        let last_nonce = entry.last_nonce;
-        let last_beacon_nonce = entry.last_beacon_nonce;
-        if registered {
-            let floor = self.confirmed_nonce_floor.entry(agent_id).or_insert(0);
-            *floor = (*floor).max(last_nonce);
-            let bfloor = self.confirmed_beacon_floor.entry(agent_id).or_insert(0);
-            *bfloor = (*bfloor).max(last_beacon_nonce);
-        }
-    }
-
-    /// Returns the cached SATI status:
-    ///   `None`        — never checked
-    ///   `Some(true)`  — confirmed registered
-    ///   `Some(false)` — confirmed unregistered
-    pub fn sati_status(&self, agent_id: &[u8; 32]) -> Option<bool> {
-        self.by_agent_id.get(agent_id)?.sati_status
-    }
-
-    // ========================================================================
     // Lease status
     // ========================================================================
 
     /// Record the result of a lease status check.
+    #[allow(dead_code)]
     pub fn set_lease_status(&mut self, agent_id: [u8; 32], active: bool) {
         self.entry(agent_id).lease_status = Some(active);
     }
@@ -240,6 +188,7 @@ impl PeerStateMap {
 
     /// BEACON), stores the key immediately.  Otherwise, stashes it in
     /// `pending_keys`; it will be applied when `register_peer` is called.
+    #[allow(dead_code)]
     pub fn set_key_for_peer(&mut self, peer_id: &PeerId, vk: VerifyingKey) {
         if let Some(&agent_id) = self.peer_to_agent.get(peer_id) {
             let entry = self.entry(agent_id);

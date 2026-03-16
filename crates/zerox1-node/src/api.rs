@@ -2,7 +2,7 @@
 //!
 //! Visualization (read-only):
 //!   GET  /ws/events              — WebSocket stream of node events
-//!   GET  /peers                  — All known peers with SATI/lease status
+//!   GET  /peers                  — All known peers with lease status
 //!   GET  /reputation/{agent_id}  — Reputation vector for an agent
 //!   GET  /batch/{agent_id}/{epoch} — Batch summary (own node only)
 //!
@@ -73,7 +73,6 @@ use zerox1_protocol::{
 pub struct PeerSnapshot {
     pub agent_id: String,
     pub peer_id: Option<String>,
-    pub sati_ok: Option<bool>,
     pub lease_ok: Option<bool>,
     pub last_active_epoch: u64,
 }
@@ -124,13 +123,10 @@ pub enum ApiEvent {
         message_count: u32,
         batch_hash: String,
     },
+    #[allow(dead_code)]
     LeaseStatus {
         agent_id: String,
         active: bool,
-    },
-    SatiStatus {
-        agent_id: String,
-        registered: bool,
     },
 }
 

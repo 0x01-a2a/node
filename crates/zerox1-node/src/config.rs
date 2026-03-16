@@ -42,11 +42,6 @@ pub struct Config {
     #[arg(long, default_value = "https://api.devnet.solana.com")]
     pub rpc_url: String,
 
-    /// SATI mint address (hex, 32 bytes) = this agent's ID.
-    /// If absent, the node runs in dev mode with agent_id = verifying_key bytes.
-    #[arg(long, env = "ZX01_SATI_MINT")]
-    pub sati_mint: Option<String>,
-
     /// Display name for BEACON messages.
     /// If not set, defaults to the first 8 hex characters of the agent ID.
     #[arg(long, default_value = "")]
@@ -171,11 +166,11 @@ pub struct Config {
     #[arg(long, env = "ZX01_GEO_CITY")]
     pub geo_city: Option<String>,
 
-    /// GraphQL endpoint for the 8004 Solana Agent Registry (primary registration gate).
+    /// GraphQL endpoint for the 8004 Solana Agent Registry (registration gate).
     ///
     /// Agents registered in the 8004 registry are verified by querying their
     /// owner pubkey (= base58 of their Ed25519 agent_id bytes) against this
-    /// indexer — no Solana RPC required.  SATI remains as a legacy fallback.
+    /// indexer — no Solana RPC required.
     ///
     /// Devnet default; set ZX01_REGISTRY_8004_URL to the mainnet endpoint
     /// (https://8004.qnt.sh/v2/graphql) on mainnet deployments.
@@ -186,8 +181,7 @@ pub struct Config {
     )]
     pub registry_8004_url: String,
 
-    /// Disable the 8004 registry check and use SATI-only mode.
-    /// Legacy flag for operators who prefer the SATI SPL-mint gate.
+    /// Disable the 8004 registry gate (open/dev mode — all agents allowed).
     #[arg(long, env = "ZX01_REGISTRY_8004_DISABLED", default_value_t = false)]
     pub registry_8004_disabled: bool,
 
@@ -271,66 +265,6 @@ mod tests {
 
     fn base_config() -> Config {
         Config::try_parse_from(["zerox1-node"]).expect("default config parses")
-    }
-
-    // --- sati_mint_bytes ---
-
-    #[test]
-    fn sati_mint_bytes_none_when_absent() {
-        assert!(base_config().sati_mint_bytes().unwrap().is_none());
-    }
-
-    #[test]
-    fn sati_mint_bytes_parses_base58() {
-        // Devnet USDC mint — well-known 32-byte pubkey
-        let mut cfg = base_config();
-        cfg.sati_mint = Some("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU".to_string());
-        let bytes = cfg.sati_mint_bytes().unwrap().unwrap();
-        assert_eq!(bytes.len(), 32);
-        // Round-trip: bytes should match bs58 decode of the same string
-        let expected = bs58::decode("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU")
-            .into_vec()
-            .unwrap();
-        assert_eq!(&bytes[..], expected.as_slice());
-    }
-
-    #[test]
-    fn sati_mint_bytes_parses_64_char_hex() {
-        let mut cfg = base_config();
-        cfg.sati_mint = Some("aa".repeat(32)); // 64 hex chars = 32 bytes
-        let bytes = cfg.sati_mint_bytes().unwrap().unwrap();
-        assert_eq!(bytes, [0xaa_u8; 32]);
-    }
-
-    #[test]
-    fn sati_mint_bytes_parses_0x_prefixed_hex() {
-        let mut cfg = base_config();
-        cfg.sati_mint = Some(format!("0x{}", "bb".repeat(32)));
-        let bytes = cfg.sati_mint_bytes().unwrap().unwrap();
-        assert_eq!(bytes, [0xbb_u8; 32]);
-    }
-
-    #[test]
-    fn sati_mint_bytes_rejects_invalid_base58() {
-        let mut cfg = base_config();
-        cfg.sati_mint = Some("not!valid@address".to_string());
-        assert!(cfg.sati_mint_bytes().is_err());
-    }
-
-    #[test]
-    fn sati_mint_bytes_rejects_wrong_length_hex() {
-        let mut cfg = base_config();
-        // 0x-prefix → hex path, but only 16 bytes → should fail try_into
-        cfg.sati_mint = Some(format!("0x{}", "aa".repeat(16)));
-        assert!(cfg.sati_mint_bytes().is_err());
-    }
-
-    #[test]
-    fn sati_mint_bytes_whitespace_trimmed() {
-        let mut cfg = base_config();
-        cfg.sati_mint = Some(format!("  {}  ", "cc".repeat(32)));
-        let bytes = cfg.sati_mint_bytes().unwrap().unwrap();
-        assert_eq!(bytes, [0xcc_u8; 32]);
     }
 
     // --- all_bootstrap_peers ---
@@ -424,40 +358,4 @@ impl Config {
         }
     }
 
-    /// Parse SATI mint from a Solana address string to bytes32, if provided.
-    ///
-    /// Accepts both formats:
-    ///   - base58  (standard Solana format, what `create-sati-agent publish` outputs)
-    ///     e.g. "2LETZxjxSpEZzHM42Fp6RYrcuxtjLytdVUSgGVAbVrqi"
-    ///   - hex (legacy / manual usage)
-    ///     e.g. "0xabcdef..." or "abcdef..."
-    pub fn sati_mint_bytes(&self) -> anyhow::Result<Option<[u8; 32]>> {
-        match &self.sati_mint {
-            None => Ok(None),
-            Some(s) => {
-                let s = s.trim();
-                // Discriminate by prefix or length:
-                //   "0x..."  → explicit hex
-                //   64 chars → hex (32 bytes)
-                //   anything else → base58 (standard Solana pubkey, 43-44 chars)
-                // Length is more reliable than char-set inspection because a
-                // base58 address whose characters happen to all be 0-9/a-f
-                // would be wrongly decoded as hex if we used char checks.
-                let bytes = if s.starts_with("0x") || s.len() == 64 {
-                    // Hex path: strip optional "0x" prefix.
-                    hex::decode(s.trim_start_matches("0x"))
-                        .map_err(|e| anyhow::anyhow!("invalid sati_mint hex: {e}"))?
-                } else {
-                    // Base58 path: standard Solana pubkey format.
-                    bs58::decode(s)
-                        .into_vec()
-                        .map_err(|e| anyhow::anyhow!("invalid sati_mint base58: {e}"))?
-                };
-                let arr: [u8; 32] = bytes.try_into().map_err(|_| {
-                    anyhow::anyhow!("sati_mint must be 32 bytes (got a wrong-length address)")
-                })?;
-                Ok(Some(arr))
-            }
-        }
-    }
 }

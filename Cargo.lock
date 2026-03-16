@@ -9829,7 +9829,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "zerox1-protocol",
- "zerox1-sati-client",
 ]
 
 [[package]]
@@ -9845,22 +9844,6 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 1.0.69",
  "tiny-keccak",
-]
-
-[[package]]
-name = "zerox1-sati-client"
-version = "0.3.4"
-dependencies = [
- "anyhow",
- "serde",
- "solana-client",
- "solana-rpc-client",
- "solana-rpc-client-api",
- "solana-sdk",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "zerox1-protocol",
 ]
 
 [[package]]

@@ -13,7 +13,6 @@ use libp2p::{
     swarm::SwarmEvent, PeerId, Swarm,
 };
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
-use zerox1_sati_client::client::SatiClient;
 
 use zerox1_protocol::{
     batch::{FeedbackEvent, TaskSelection, TypedBid, VerifierAssignment},
@@ -69,8 +68,6 @@ const MAX_PENDING_BROADCASTS: usize = 20;
 /// Maximum number of distinct peers tracked in the rate-limit table.
 /// When full, expired entries are evicted; if still full the new peer is skipped.
 const MAX_RATE_LIMITER_PEERS: usize = 10_000;
-/// Maximum number of SATI RPC failure cache entries retained.
-const MAX_SATI_FAILURE_CACHE: usize = 50_000;
 /// Maximum number of 8004 registry failure cache entries retained.
 const MAX_REG8004_FAILURE_CACHE: usize = 50_000;
 
@@ -88,13 +85,10 @@ pub struct Zx01Node {
 
     /// Nonblocking Solana RPC client (slot polling + batch submission).
     rpc: RpcClient,
-    /// SATI registration checker.
-    sati: SatiClient,
     /// Kora paymaster client — present when --kora-url is configured.
     /// Enables gasless on-chain transactions (gas reimbursed in USDC, §4.4).
     kora: Option<KoraClient>,
-    /// True when running without a SATI mint (testing / local dev).
-    /// In dev mode, SATI failures produce warnings instead of message drops.
+    /// True when running with --registry-8004-disabled (open/dev mode).
     dev_mode: bool,
     /// Visualization API shared state (always present; server only started when
     /// --api-addr is configured).
@@ -134,17 +128,10 @@ pub struct Zx01Node {
     /// for each peer. Prevents flooding the aggregator with per-ping pushes.
     /// Only populated when --node-region is set.
     last_ping_push: HashMap<PeerId, std::time::Instant>,
-    /// Per-agent SATI RPC failure timestamps.
-    /// When `verify_sati_registration` returns an error (e.g. AccountNotFound on
-    /// devnet for infrastructure nodes), we record the time here and skip the
-    /// next check for 1 hour.  Without this, every BEACON from a reference node
-    /// that has no SATI mint triggers a fresh RPC call every ~30 seconds.
-    sati_rpc_failures: HashMap<[u8; 32], std::time::Instant>,
-    /// 8004 Solana Agent Registry client (primary registration gate).
-    /// Verifies peers by querying `agents(where:{owner:$base58})` against the
-    /// public GraphQL indexer — no on-chain RPC required.
+    /// 8004 Solana Agent Registry client.
+    #[allow(dead_code)]
     registry8004: Registry8004Client,
-    /// Per-agent 8004 registry HTTP failure timestamps (same 1-hour backoff as SATI).
+    /// Per-agent 8004 registry HTTP failure timestamps (1-hour backoff).
     reg8004_failures: HashMap<[u8; 32], std::time::Instant>,
     /// Agent IDs exempt from lease and registration checks.
     /// Shared with ApiState so the admin API can mutate it at runtime without restart.
@@ -165,17 +152,14 @@ impl Zx01Node {
         let epoch = current_epoch();
         let log_dir = config.log_dir.clone();
         let rpc = RpcClient::new(config.rpc_url.clone());
-        let sati = SatiClient::new(&config.rpc_url);
         // "none" disables Kora entirely; otherwise use the configured URL.
         let kora = if config.kora_url.eq_ignore_ascii_case("none") {
             None
         } else {
             Some(KoraClient::new(&config.kora_url))
         };
-        // Dev mode: both the primary (8004) and legacy (SATI) registration gates
-        // are inactive.  In dev mode, unregistered peers produce warnings instead
-        // of being dropped, allowing local testing without on-chain registration.
-        let dev_mode = config.registry_8004_disabled && config.sati_mint.is_none();
+        // Dev mode: 8004 registry gate disabled — all agents allowed through.
+        let dev_mode = config.registry_8004_disabled;
         let http_client = reqwest::Client::new();
         let registry8004 = Registry8004Client::new(
             &config.registry_8004_url,
@@ -317,17 +301,12 @@ impl Zx01Node {
 
         if dev_mode {
             tracing::warn!(
-                "Running in dev mode (no 8004 registry and no --sati-mint). \
-                 Registration verification is advisory only — unregistered peers are allowed."
-            );
-        } else if config.registry_8004_disabled {
-            tracing::info!(
-                "8004 registry disabled — using SATI-only registration gate (legacy mode)."
+                "Running in dev mode (--registry-8004-disabled). \
+                 All agents are allowed — registration gate inactive."
             );
         } else {
             tracing::info!(
-                "8004 Solana Agent Registry enabled as primary gate ({}). \
-                 SATI is legacy fallback.",
+                "8004 Solana Agent Registry gate enabled ({}).",
                 config.registry_8004_url
             );
         }
@@ -346,7 +325,6 @@ impl Zx01Node {
             logger,
             batch,
             rpc,
-            sati,
             kora,
             dev_mode,
             api,
@@ -366,7 +344,6 @@ impl Zx01Node {
             bootstrap_peers,
             pending_broadcasts: Vec::new(),
             last_ping_push: HashMap::new(),
-            sati_rpc_failures: HashMap::new(),
             registry8004,
             reg8004_failures: HashMap::new(),
             exempt_agents,
@@ -775,6 +752,7 @@ impl Zx01Node {
     /// Query lease status for `agent_id` and cache in peer_states.
     ///
     /// On RPC error: leaves status as None (will retry on next BEACON).
+    #[allow(dead_code)]
     async fn verify_peer_lease(&mut self, agent_id: [u8; 32]) {
         match lease::get_lease_status(&self.rpc, &agent_id).await {
             Ok(Some(status)) => {
@@ -818,6 +796,7 @@ impl Zx01Node {
     ///
     /// - Dev mode: always true
     /// - Prod mode: false only when lease_status = Some(false)
+    #[allow(dead_code)]
     fn lease_gate_allows(&self, _agent_id: &[u8; 32]) -> bool {
         // Lease gate disabled — network-first: get messages flowing
         // before adding economic gates (lease/stake).
@@ -839,84 +818,23 @@ impl Zx01Node {
     }
 
     // ========================================================================
-    // SATI registration verification
+    // 8004 Solana Agent Registry
     // ========================================================================
 
-    /// Query SATI for `agent_id` and cache the result in peer_states.
+    /// Query the 8004 registry for `agent_id`.
     ///
-    /// On RPC error the status is left as `None` (unchecked) so the next
-    /// message triggers a fresh attempt — infrastructure failures must not
-    /// permanently block legitimate agents.
-    async fn verify_sati_registration(&mut self, agent_id: [u8; 32]) {
-        match self.sati.is_registered(&agent_id).await {
-            Ok(true) => {
-                self.peer_states.set_sati_status(agent_id, true);
-                self.api.send_event(ApiEvent::SatiStatus {
-                    agent_id: hex::encode(agent_id),
-                    registered: true,
-                });
-                tracing::info!("SATI: agent {} ✓ registered", hex::encode(agent_id),);
-            }
-            Ok(false) => {
-                self.peer_states.set_sati_status(agent_id, false);
-                self.api.send_event(ApiEvent::SatiStatus {
-                    agent_id: hex::encode(agent_id),
-                    registered: false,
-                });
-                if self.dev_mode {
-                    tracing::debug!(
-                        "SATI: agent {} not registered (dev mode — allowed)",
-                        hex::encode(agent_id),
-                    );
-                } else {
-                    tracing::warn!(
-                        "SATI: agent {} NOT registered — future messages will be dropped",
-                        hex::encode(agent_id),
-                    );
-                }
-            }
-            Err(e) => {
-                // RPC failure (incl. AccountNotFound for infra nodes without a
-                // SATI mint).  Record the failure time so we back off for 1 hour
-                // before retrying — avoids flooding devnet RPC and log spam.
-                self.sati_rpc_failures
-                    .insert(agent_id, std::time::Instant::now());
-                tracing::warn!(
-                    "SATI check failed for {}: {e} (will retry in 1 h)",
-                    hex::encode(agent_id),
-                );
-            }
-        }
-    }
-
-    // ========================================================================
-    // 8004 Solana Agent Registry (primary gate)
-    // ========================================================================
-
-    /// Query the 8004 registry for `agent_id` and, if found, mark them as
-    /// verified in `peer_states` so the gate check passes.
-    ///
-    /// This is the "connect existing identity" path: an agent already registered
-    /// in the 8004 Solana registry is accepted without needing a SATI mint.
     /// Their Ed25519 `agent_id` bytes == their Solana pubkey == their `owner`
     /// field in the 8004 registry — no extra key material needed.
+    #[allow(dead_code)]
     async fn verify_8004_registration(&mut self, agent_id: [u8; 32]) {
         match self.registry8004.is_registered(&agent_id).await {
             Ok(true) => {
-                // Agent found and meets min_tier — connect their existing identity.
-                self.peer_states.set_sati_status(agent_id, true);
-                self.api.send_event(ApiEvent::SatiStatus {
-                    agent_id: hex::encode(agent_id),
-                    registered: true,
-                });
                 tracing::info!(
-                    "8004: agent {} verified (existing identity connected)",
+                    "8004: agent {} verified",
                     hex::encode(agent_id),
                 );
             }
             Ok(false) => {
-                // Not found in 8004 registry (or below min_tier).
-                // Do NOT set peer_states — let SATI fallback decide.
                 tracing::debug!(
                     "8004: agent {} not found in registry",
                     hex::encode(agent_id),
@@ -935,13 +853,9 @@ impl Zx01Node {
     }
 
     /// Returns true if this agent's messages should be forwarded.
-    ///
-    /// In dev mode: always true (warn on unregistered).
-    /// In prod mode: true only if SATI status is confirmed `Some(true)` or
-    ///               still `None` (not yet checked — optimistic until BEACON fires check).
-    fn sati_gate_allows(&self, _agent_id: &[u8; 32]) -> bool {
-        // Registration gate disabled — network-first: get messages flowing
-        // before adding economic gates (8004/SATI).
+    /// Gate currently disabled — network-first mode.
+    #[allow(dead_code)]
+    fn registration_gate_allows(&self, _agent_id: &[u8; 32]) -> bool {
         true
     }
 
@@ -1236,11 +1150,8 @@ impl Zx01Node {
             }
         }
 
-        // Registration + Lease gates — checked after signature validation.
-        // BEACONs are exempt: they ARE the trigger for both checks.
-        // Registration/lease gates disabled — network-first mode.
-        // All verification calls (8004, SATI, lease) skipped to avoid
-        // wasted RPC calls. Gates always return true.
+        // Registration + Lease gates disabled — network-first mode.
+        // Gates always return true; 8004 verification is passive (not blocking).
 
         // Update peer state (per-type nonce lane).
         if env.msg_type == MsgType::Beacon {
@@ -1696,7 +1607,6 @@ impl Zx01Node {
             let snap = PeerSnapshot {
                 agent_id: hex::encode(env.sender),
                 peer_id: Some(source_peer.to_string()),
-                sati_ok: self.peer_states.sati_status(&env.sender),
                 lease_ok: self.peer_states.lease_status(&env.sender),
                 last_active_epoch: self.peer_states.last_active_epoch(&env.sender),
             };
@@ -2190,27 +2100,10 @@ impl Zx01Node {
         self.batch = BatchAccumulator::new(new_epoch, self.current_slot);
         self.reputation.advance_epoch(new_epoch);
 
-        // Purge stale registration failure cache entries (TTL = 1 hour).
-        let sati_ttl = std::time::Duration::from_secs(3_600);
-        self.sati_rpc_failures
-            .retain(|_, ts| ts.elapsed() < sati_ttl);
-        // Hard cap: if still over limit (many fresh failures), evict oldest entries.
-        if self.sati_rpc_failures.len() > MAX_SATI_FAILURE_CACHE {
-            let over = self.sati_rpc_failures.len() - MAX_SATI_FAILURE_CACHE;
-            // Sort by elapsed descending (oldest first), take `over` to remove.
-            let mut by_age: Vec<_> = self
-                .sati_rpc_failures
-                .iter()
-                .map(|(k, ts)| (*k, ts.elapsed()))
-                .collect();
-            by_age.sort_unstable_by(|a, b| b.1.cmp(&a.1));
-            for (k, _) in by_age.into_iter().take(over) {
-                self.sati_rpc_failures.remove(&k);
-            }
-        }
-        // Same TTL + cap for the 8004 HTTP failure cache.
+        // Purge stale 8004 HTTP failure cache entries (TTL = 1 hour).
+        let ttl = std::time::Duration::from_secs(3_600);
         self.reg8004_failures
-            .retain(|_, ts| ts.elapsed() < sati_ttl);
+            .retain(|_, ts| ts.elapsed() < ttl);
         if self.reg8004_failures.len() > MAX_REG8004_FAILURE_CACHE {
             let over = self.reg8004_failures.len() - MAX_REG8004_FAILURE_CACHE;
             let mut by_age: Vec<_> = self

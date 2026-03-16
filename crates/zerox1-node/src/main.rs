@@ -34,8 +34,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = config::Config::parse();
-    let sati_mint = config.sati_mint_bytes()?;
-    let identity = identity::AgentIdentity::load_or_generate(&config.keypair_path, sati_mint)?;
+    let identity = identity::AgentIdentity::load_or_generate(&config.keypair_path)?;
 
     tracing::info!(
         agent_id = %hex::encode(identity.agent_id),

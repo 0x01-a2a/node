@@ -9,7 +9,6 @@ path = "src/main.rs"
 
 [dependencies]
 zerox1-protocol = { path = "../zerox1-protocol" }
-zerox1-sati-client = { path = "../zerox1-sati-client" }
 
 serde = { workspace = true }
 ciborium = { workspace = true }

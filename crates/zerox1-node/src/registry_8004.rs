@@ -20,8 +20,10 @@ pub const COLLECTION_MAINNET: &str = "DbjsWo7iUs7QZyJxLgNyVxvAAjQZCXroJHoGok8h8U
 /// Public Solana mainnet RPC used for 8004 registration blockhash + broadcast.
 /// Independent of the mesh `--rpc-url` so registration always lands on the
 /// correct network even when the node operator uses a custom/private RPC.
+#[allow(dead_code)]
 pub const RPC_MAINNET: &str = "https://api.mainnet-beta.solana.com";
 /// Public Solana devnet RPC — used for 8004 registration on devnet.
+#[allow(dead_code)]
 pub const RPC_DEVNET: &str = "https://api.devnet.solana.com";
 const MPL_CORE_PROGRAM: &str = "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d";
 /// `register` instruction discriminator from the IDL.

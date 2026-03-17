@@ -808,6 +808,7 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
         .route("/trade/dca/create", post(crate::trade::trade_dca_create_handler))
         .route("/trade/launchlab/buy", post(crate::launchlab::launchlab_buy_handler))
         .route("/trade/launchlab/sell", post(crate::launchlab::launchlab_sell_handler))
+        .route("/trade/cpmm/create-pool", post(crate::cpmm::cpmm_create_pool_handler))
         .route("/portfolio/history", get(portfolio_history))
         .route("/portfolio/balances", get(portfolio_balances));
 
@@ -1096,7 +1097,7 @@ async fn send_envelope(
         && raw_payload.first() == Some(&b'{')
     {
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw_payload) {
-            let score = v.get("score").and_then(|x| x.as_i64()).unwrap_or(0) as i8;
+            let score = v.get("score").and_then(|x| x.as_i64()).unwrap_or(0).clamp(-100, 100) as i8;
             let outcome_str = v.get("outcome").and_then(|x| x.as_str()).unwrap_or("neutral");
             let outcome: u8 = match outcome_str { "positive" => 2, "negative" => 0, _ => 1 };
             zerox1_protocol::payload::FeedbackPayload {

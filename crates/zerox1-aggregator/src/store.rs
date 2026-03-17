@@ -952,6 +952,57 @@ CREATE TABLE IF NOT EXISTS campaign_deliveries (
 );
 CREATE INDEX IF NOT EXISTS idx_cd_campaign ON campaign_deliveries(campaign_id);
 ",
+    // v10: Billing credit ledger (Circle Gateway + CCTP settlement)
+    "
+CREATE TABLE IF NOT EXISTS billing_accounts (
+    account_id      TEXT    PRIMARY KEY,
+    balance_usdc    INTEGER NOT NULL DEFAULT 0,
+    tier            TEXT    NOT NULL DEFAULT 'free',
+    payment_method  TEXT,
+    preferred_chain INTEGER,
+    payout_address  TEXT,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS billing_transactions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id      TEXT    NOT NULL REFERENCES billing_accounts(account_id),
+    tx_type         TEXT    NOT NULL,
+    amount_usdc     INTEGER NOT NULL,
+    payment_method  TEXT    NOT NULL,
+    reference       TEXT,
+    chain_domain    INTEGER,
+    status          TEXT    NOT NULL DEFAULT 'completed',
+    created_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_billing_tx_account ON billing_transactions(account_id, created_at);
+
+CREATE TABLE IF NOT EXISTS settlement_queue (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT    NOT NULL,
+    payer_account   TEXT    NOT NULL,
+    payee_account   TEXT    NOT NULL,
+    amount_usdc     INTEGER NOT NULL,
+    fee_usdc        INTEGER NOT NULL DEFAULT 0,
+    dest_chain      INTEGER,
+    dest_address    TEXT,
+    status          TEXT    NOT NULL DEFAULT 'pending',
+    cctp_tx_hash    TEXT,
+    created_at      INTEGER NOT NULL,
+    completed_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_settlement_status ON settlement_queue(status, created_at);
+",
+    // v11: Unique constraint on billing deposit references (prevents double-credit)
+    "
+CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_tx_deposit_ref
+    ON billing_transactions(account_id, reference) WHERE tx_type = 'deposit';
+",
+    // v12: skip_settlement flag for admin/enterprise accounts that bypass Circle CCTP
+    "
+ALTER TABLE billing_accounts ADD COLUMN skip_settlement INTEGER NOT NULL DEFAULT 0;
+",
 ];
 
 struct Db(rusqlite::Connection);
@@ -1902,8 +1953,6 @@ struct Inner {
     agents: HashMap<String, AgentReputation>,
     /// Bounded ring buffer of recent interactions (used as fallback when no SQLite).
     interactions: VecDeque<RawInteraction>,
-    /// Maps agent_id -> c_coefficient (clustering factor) derived from on-chain Solana tokens.
-    solana_flow_clusters: HashMap<String, f64>,
 }
 
 // ============================================================================
@@ -2129,7 +2178,6 @@ impl ReputationStore {
             inner: Arc::new(RwLock::new(Inner {
                 agents,
                 interactions: VecDeque::new(),
-                solana_flow_clusters: HashMap::new(),
             })),
             db: Arc::new(Mutex::new(Some(db))),
             started_at: now_secs(),
@@ -3456,45 +3504,9 @@ impl ReputationStore {
     }
 
     /// C coefficient for a single agent (0.0 when not in any cluster).
-    /// Uses the Solana on-chain Capital Flow graph (GAP-02) computed by the background indexer.
-    pub fn agent_c_coefficient(&self, agent_id: &str) -> f64 {
-        let inner = self.inner.read().unwrap();
-        inner
-            .solana_flow_clusters
-            .get(agent_id)
-            .copied()
-            .unwrap_or(0.0)
-    }
-
-    // =========================================================================
-    // External Indexer Hooks (GAP-02)
-    // =========================================================================
-
-    /// Returns the pubkeys of all agents currently in the local reputation store.
-    pub async fn get_active_agent_pubkeys(&self) -> anyhow::Result<Vec<String>> {
-        let inner = self.inner.read().unwrap();
-        Ok(inner.agents.keys().cloned().collect())
-    }
-
-    /// Stores the computed on-chain clusters. The C coefficient is derived from cluster size.
-    pub async fn update_capital_flow_clusters(
-        &self,
-        clusters: Vec<Vec<String>>,
-    ) -> anyhow::Result<()> {
-        let mut inner = self.inner.write().unwrap();
-        inner.solana_flow_clusters.clear();
-
-        for cluster_agents in clusters {
-            // C multiplier calculation based closely on the paper/placeholder logic.
-            // i.e., larger group of linked ownership = higher multiplier.
-            let suspicion = ((cluster_agents.len() - 1) as f64 / 10.0).min(1.0);
-            for agent_id in cluster_agents {
-                inner.solana_flow_clusters.insert(agent_id, suspicion);
-            }
-        }
-
-        tracing::debug!("Updated solana_flow_clusters map with on-chain data.");
-        Ok(())
+    /// Settlement-layer indexer can populate this in the future.
+    pub fn agent_c_coefficient(&self, _agent_id: &str) -> f64 {
+        0.0
     }
 
     /// Write a single reputation record to SQLite (fire-and-forget; failures are logged).
@@ -3844,6 +3856,541 @@ impl ReputationStore {
             tx.commit()?;
         }
         Ok(())
+    }
+    // =========================================================================
+    // Billing credit ledger (v10)
+    // =========================================================================
+
+    /// Create or fetch a billing account. Returns the account.
+    pub fn get_or_create_billing_account(
+        &self,
+        account_id: &str,
+    ) -> Option<crate::billing::BillingAccount> {
+        let db = self.db.lock().unwrap();
+        let conn = db.as_ref()?;
+        let now = now_secs() as i64;
+
+        // Try to fetch first.
+        let existing = conn.0.query_row(
+            "SELECT account_id, balance_usdc, tier, payment_method,
+                    preferred_chain, payout_address, skip_settlement, created_at, updated_at
+             FROM billing_accounts WHERE account_id = ?1",
+            rusqlite::params![account_id],
+            |row| {
+                Ok(crate::billing::BillingAccount {
+                    account_id: row.get(0)?,
+                    balance_usdc: row.get::<_, i64>(1)? as u64,
+                    tier: row.get(2)?,
+                    payment_method: row.get(3)?,
+                    preferred_chain: row.get::<_, Option<i64>>(4)?.map(|v| v as u32),
+                    payout_address: row.get(5)?,
+                    skip_settlement: row.get::<_, i64>(6)? != 0,
+                    created_at: row.get::<_, i64>(7)? as u64,
+                    updated_at: row.get::<_, i64>(8)? as u64,
+                })
+            },
+        );
+        match existing {
+            Ok(acc) => Some(acc),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                // Create a new account.
+                conn.0
+                    .execute(
+                        "INSERT INTO billing_accounts (account_id, balance_usdc, tier, created_at, updated_at)
+                         VALUES (?1, 0, 'free', ?2, ?2)",
+                        rusqlite::params![account_id, now],
+                    )
+                    .ok()?;
+                Some(crate::billing::BillingAccount {
+                    account_id: account_id.to_string(),
+                    balance_usdc: 0,
+                    tier: "free".to_string(),
+                    payment_method: None,
+                    preferred_chain: None,
+                    payout_address: None,
+                    skip_settlement: false,
+                    created_at: now as u64,
+                    updated_at: now as u64,
+                })
+            }
+            Err(e) => {
+                tracing::warn!("billing account query failed: {e}");
+                None
+            }
+        }
+    }
+
+    /// Credit an account and record the transaction. Returns updated balance.
+    /// Uses IMMEDIATE transaction to prevent concurrent credit races.
+    /// Relies on UNIQUE(account_id, reference) constraint (v11 migration) to
+    /// prevent double-credit — returns None if the reference was already used.
+    pub fn credit_account(
+        &self,
+        account_id: &str,
+        amount_usdc: u64,
+        method: &str,
+        reference: &str,
+        chain_domain: Option<u32>,
+    ) -> Option<crate::billing::BillingAccount> {
+        // Ensure account exists.
+        self.get_or_create_billing_account(account_id)?;
+
+        let db = self.db.lock().unwrap();
+        let conn = db.as_ref()?;
+        let now = now_secs() as i64;
+        let amt = amount_usdc as i64;
+
+        // BEGIN IMMEDIATE to prevent concurrent write races.
+        conn.0
+            .execute_batch("BEGIN IMMEDIATE")
+            .ok()?;
+
+        // Insert the transaction first — UNIQUE constraint rejects duplicate (account_id, reference).
+        let insert_ok = conn.0.execute(
+            "INSERT INTO billing_transactions (account_id, tx_type, amount_usdc, payment_method, reference, chain_domain, status, created_at)
+             VALUES (?1, 'deposit', ?2, ?3, ?4, ?5, 'completed', ?6)",
+            rusqlite::params![account_id, amt, method, reference, chain_domain.map(|v| v as i64), now],
+        );
+        if insert_ok.is_err() {
+            // Duplicate reference or other constraint violation.
+            let _ = conn.0.execute_batch("ROLLBACK");
+            return None;
+        }
+
+        // Credit the balance and update tier atomically.
+        let _ = conn.0.execute(
+            "UPDATE billing_accounts SET balance_usdc = balance_usdc + ?1, updated_at = ?2 WHERE account_id = ?3",
+            rusqlite::params![amt, now, account_id],
+        );
+        let new_balance: i64 = conn.0
+            .query_row(
+                "SELECT balance_usdc FROM billing_accounts WHERE account_id = ?1",
+                rusqlite::params![account_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let new_tier = crate::billing::tier_for_balance(new_balance as u64);
+        let _ = conn.0.execute(
+            "UPDATE billing_accounts SET tier = ?1 WHERE account_id = ?2",
+            rusqlite::params![new_tier, account_id],
+        );
+
+        conn.0.execute_batch("COMMIT").ok()?;
+
+        drop(db);
+        self.get_or_create_billing_account(account_id)
+    }
+
+    /// Debit an account atomically. Returns None if insufficient balance or no DB.
+    /// Uses `WHERE balance_usdc >= amount` guard to prevent overdraw under concurrency.
+    pub fn debit_account(
+        &self,
+        account_id: &str,
+        amount_usdc: u64,
+        tx_type: &str,
+        reference: &str,
+    ) -> Option<crate::billing::BillingAccount> {
+        let db = self.db.lock().unwrap();
+        let conn = db.as_ref()?;
+        let now = now_secs() as i64;
+        let amt = amount_usdc as i64;
+
+        // BEGIN IMMEDIATE to serialize concurrent debits.
+        conn.0.execute_batch("BEGIN IMMEDIATE").ok()?;
+
+        // Atomically debit only if sufficient balance.
+        let rows_affected = conn.0.execute(
+            "UPDATE billing_accounts SET balance_usdc = balance_usdc - ?1, updated_at = ?2
+             WHERE account_id = ?3 AND balance_usdc >= ?1",
+            rusqlite::params![amt, now, account_id],
+        ).unwrap_or(0);
+
+        if rows_affected == 0 {
+            let _ = conn.0.execute_batch("ROLLBACK");
+            return None;
+        }
+
+        let _ = conn.0.execute(
+            "INSERT INTO billing_transactions (account_id, tx_type, amount_usdc, payment_method, reference, status, created_at)
+             VALUES (?1, ?2, ?3, 'internal', ?4, 'completed', ?5)",
+            rusqlite::params![account_id, tx_type, amt, reference, now],
+        );
+
+        conn.0.execute_batch("COMMIT").ok()?;
+
+        drop(db);
+        self.get_or_create_billing_account(account_id)
+    }
+
+    /// List recent billing transactions for an account (newest first).
+    pub fn billing_transactions(
+        &self,
+        account_id: &str,
+        limit: usize,
+    ) -> Vec<crate::billing::BillingTransaction> {
+        let db = self.db.lock().unwrap();
+        let conn = match db.as_ref() {
+            Some(c) => c,
+            None => return vec![],
+        };
+        let mut stmt = match conn.0.prepare(
+            "SELECT id, account_id, tx_type, amount_usdc, payment_method, reference, chain_domain, status, created_at
+             FROM billing_transactions WHERE account_id = ?1
+             ORDER BY created_at DESC LIMIT ?2",
+        ) {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+        stmt.query_map(rusqlite::params![account_id, limit as i64], |row| {
+            Ok(crate::billing::BillingTransaction {
+                id: row.get(0)?,
+                account_id: row.get(1)?,
+                tx_type: row.get(2)?,
+                amount_usdc: row.get::<_, i64>(3)? as u64,
+                payment_method: row.get(4)?,
+                reference: row.get(5)?,
+                chain_domain: row.get::<_, Option<i64>>(6)?.map(|v| v as u32),
+                status: row.get(7)?,
+                created_at: row.get::<_, i64>(8)? as u64,
+            })
+        })
+        .ok()
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+    }
+
+    /// Update an account's preferred payout chain and address.
+    pub fn set_payout_preference(
+        &self,
+        account_id: &str,
+        chain: u32,
+        address: &str,
+    ) -> Option<()> {
+        let db = self.db.lock().unwrap();
+        let conn = db.as_ref()?;
+        let now = now_secs() as i64;
+        conn.0
+            .execute(
+                "UPDATE billing_accounts SET preferred_chain = ?1, payout_address = ?2, updated_at = ?3
+                 WHERE account_id = ?4",
+                rusqlite::params![chain as i64, address, now, account_id],
+            )
+            .ok()?;
+        Some(())
+    }
+
+    /// Enqueue a settlement for async CCTP payout.
+    pub fn enqueue_settlement(
+        &self,
+        conversation_id: &str,
+        payer: &str,
+        payee: &str,
+        amount_usdc: u64,
+        fee_usdc: u64,
+        dest_chain: Option<u32>,
+        dest_address: Option<&str>,
+    ) -> Option<i64> {
+        let db = self.db.lock().unwrap();
+        let conn = db.as_ref()?;
+        let now = now_secs() as i64;
+        conn.0
+            .execute(
+                "INSERT INTO settlement_queue (conversation_id, payer_account, payee_account, amount_usdc, fee_usdc, dest_chain, dest_address, status, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8)",
+                rusqlite::params![
+                    conversation_id, payer, payee,
+                    amount_usdc as i64, fee_usdc as i64,
+                    dest_chain.map(|v| v as i64), dest_address, now
+                ],
+            )
+            .ok()?;
+        Some(conn.0.last_insert_rowid())
+    }
+
+    /// Get all pending settlements for the background worker.
+    pub fn pending_settlements(&self) -> Vec<crate::billing::SettlementQueueEntry> {
+        let db = self.db.lock().unwrap();
+        let conn = match db.as_ref() {
+            Some(c) => c,
+            None => return vec![],
+        };
+        let mut stmt = match conn.0.prepare(
+            "SELECT id, conversation_id, payer_account, payee_account, amount_usdc, fee_usdc,
+                    dest_chain, dest_address, status, cctp_tx_hash, created_at, completed_at
+             FROM settlement_queue WHERE status = 'pending'
+             ORDER BY created_at ASC LIMIT 50",
+        ) {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+        stmt.query_map([], |row| {
+            Ok(crate::billing::SettlementQueueEntry {
+                id: row.get(0)?,
+                conversation_id: row.get(1)?,
+                payer_account: row.get(2)?,
+                payee_account: row.get(3)?,
+                amount_usdc: row.get::<_, i64>(4)? as u64,
+                fee_usdc: row.get::<_, i64>(5)? as u64,
+                dest_chain: row.get::<_, Option<i64>>(6)?.map(|v| v as u32),
+                dest_address: row.get(7)?,
+                status: row.get(8)?,
+                cctp_tx_hash: row.get(9)?,
+                created_at: row.get::<_, i64>(10)? as u64,
+                completed_at: row.get::<_, Option<i64>>(11)?.map(|v| v as u64),
+            })
+        })
+        .ok()
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+    }
+
+    /// Atomically claim a pending settlement for processing.
+    /// Returns true only if the row was in 'pending' state and is now 'processing'.
+    /// Prevents double-processing by concurrent workers.
+    pub fn claim_settlement(&self, id: i64) -> bool {
+        let db = self.db.lock().unwrap();
+        let conn = match db.as_ref() {
+            Some(c) => c,
+            None => return false,
+        };
+        let rows = conn
+            .0
+            .execute(
+                "UPDATE settlement_queue SET status = 'processing' WHERE id = ?1 AND status = 'pending'",
+                rusqlite::params![id],
+            )
+            .unwrap_or(0);
+        rows > 0
+    }
+
+    /// Set or clear the skip_settlement flag for an account.
+    /// When true: withdrawals/VERDICTs bypass Circle CCTP — payee is credited
+    /// internally and the operator handles actual USDC transfer off-band.
+    pub fn set_skip_settlement(&self, account_id: &str, skip: bool) -> Option<()> {
+        let db = self.db.lock().unwrap();
+        let conn = db.as_ref()?;
+        let now = now_secs() as i64;
+        let val: i64 = if skip { 1 } else { 0 };
+        conn.0
+            .execute(
+                "UPDATE billing_accounts SET skip_settlement = ?1, updated_at = ?2 WHERE account_id = ?3",
+                rusqlite::params![val, now, account_id],
+            )
+            .ok()?;
+        Some(())
+    }
+
+    // ── Admin billing queries ──────────────────────────────────────────
+
+    /// List all billing accounts, paginated (admin).
+    pub fn list_billing_accounts(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Vec<crate::billing::BillingAccount> {
+        let db = self.db.lock().unwrap();
+        let conn = match db.as_ref() {
+            Some(c) => c,
+            None => return vec![],
+        };
+        let mut stmt = match conn.0.prepare(
+            "SELECT account_id, balance_usdc, tier, payment_method,
+                    preferred_chain, payout_address, skip_settlement, created_at, updated_at
+             FROM billing_accounts ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2",
+        ) {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+        stmt.query_map(rusqlite::params![limit as i64, offset as i64], |row| {
+            Ok(crate::billing::BillingAccount {
+                account_id: row.get(0)?,
+                balance_usdc: row.get::<_, i64>(1)? as u64,
+                tier: row.get(2)?,
+                payment_method: row.get(3)?,
+                preferred_chain: row.get::<_, Option<i64>>(4)?.map(|v| v as u32),
+                payout_address: row.get(5)?,
+                skip_settlement: row.get::<_, i64>(6)? != 0,
+                created_at: row.get::<_, i64>(7)? as u64,
+                updated_at: row.get::<_, i64>(8)? as u64,
+            })
+        })
+        .ok()
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+    }
+
+    /// List settlement queue entries, optionally filtered by status (admin).
+    pub fn list_settlements(
+        &self,
+        limit: usize,
+        offset: usize,
+        status_filter: Option<&str>,
+    ) -> Vec<crate::billing::SettlementQueueEntry> {
+        let db = self.db.lock().unwrap();
+        let conn = match db.as_ref() {
+            Some(c) => c,
+            None => return vec![],
+        };
+        let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match status_filter {
+            Some(status) => (
+                "SELECT id, conversation_id, payer_account, payee_account, amount_usdc, fee_usdc,
+                        dest_chain, dest_address, status, cctp_tx_hash, created_at, completed_at
+                 FROM settlement_queue WHERE status = ?1
+                 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3"
+                    .to_string(),
+                vec![
+                    Box::new(status.to_string()),
+                    Box::new(limit as i64),
+                    Box::new(offset as i64),
+                ],
+            ),
+            None => (
+                "SELECT id, conversation_id, payer_account, payee_account, amount_usdc, fee_usdc,
+                        dest_chain, dest_address, status, cctp_tx_hash, created_at, completed_at
+                 FROM settlement_queue
+                 ORDER BY created_at DESC LIMIT ?1 OFFSET ?2"
+                    .to_string(),
+                vec![Box::new(limit as i64), Box::new(offset as i64)],
+            ),
+        };
+        let mut stmt = match conn.0.prepare(&sql) {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        stmt.query_map(param_refs.as_slice(), |row| {
+            Ok(crate::billing::SettlementQueueEntry {
+                id: row.get(0)?,
+                conversation_id: row.get(1)?,
+                payer_account: row.get(2)?,
+                payee_account: row.get(3)?,
+                amount_usdc: row.get::<_, i64>(4)? as u64,
+                fee_usdc: row.get::<_, i64>(5)? as u64,
+                dest_chain: row.get::<_, Option<i64>>(6)?.map(|v| v as u32),
+                dest_address: row.get(7)?,
+                status: row.get(8)?,
+                cctp_tx_hash: row.get(9)?,
+                created_at: row.get::<_, i64>(10)? as u64,
+                completed_at: row.get::<_, Option<i64>>(11)?.map(|v| v as u64),
+            })
+        })
+        .ok()
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+    }
+
+    /// Aggregate revenue stats (admin dashboard).
+    pub fn billing_revenue_stats(&self) -> crate::billing::RevenueStats {
+        let db = self.db.lock().unwrap();
+        let conn = match db.as_ref() {
+            Some(c) => c,
+            None => return crate::billing::RevenueStats::default(),
+        };
+
+        let total_deposits: i64 = conn
+            .0
+            .query_row(
+                "SELECT COALESCE(SUM(amount_usdc), 0) FROM billing_transactions WHERE tx_type = 'deposit' AND status = 'completed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        let total_withdrawals: i64 = conn
+            .0
+            .query_row(
+                "SELECT COALESCE(SUM(amount_usdc), 0) FROM billing_transactions WHERE tx_type = 'withdraw' AND status = 'completed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        let total_fees: i64 = conn
+            .0
+            .query_row(
+                "SELECT COALESCE(SUM(fee_usdc), 0) FROM settlement_queue WHERE status = 'completed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        let total_settled: i64 = conn
+            .0
+            .query_row(
+                "SELECT COALESCE(SUM(amount_usdc), 0) FROM settlement_queue WHERE status = 'completed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        let account_count: i64 = conn
+            .0
+            .query_row("SELECT COUNT(*) FROM billing_accounts", [], |r| r.get(0))
+            .unwrap_or(0);
+
+        let pending_settlements: i64 = conn
+            .0
+            .query_row(
+                "SELECT COUNT(*) FROM settlement_queue WHERE status = 'pending'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        // Tier breakdown.
+        let mut tier_counts = std::collections::HashMap::new();
+        if let Ok(mut stmt) = conn.0.prepare(
+            "SELECT tier, COUNT(*) FROM billing_accounts GROUP BY tier",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            }) {
+                for row in rows.flatten() {
+                    tier_counts.insert(row.0, row.1 as u64);
+                }
+            }
+        }
+
+        crate::billing::RevenueStats {
+            total_deposits_usdc: total_deposits as u64,
+            total_withdrawals_usdc: total_withdrawals as u64,
+            total_fees_usdc: total_fees as u64,
+            total_settled_usdc: total_settled as u64,
+            account_count: account_count as u64,
+            pending_settlements: pending_settlements as u64,
+            tier_counts,
+        }
+    }
+
+    /// Update a settlement entry's status (called by the settlement worker).
+    /// Uses optimistic lock: only updates if current status matches `expected_status`.
+    pub fn update_settlement_status(
+        &self,
+        id: i64,
+        expected_status: &str,
+        new_status: &str,
+        cctp_tx_hash: Option<&str>,
+    ) -> bool {
+        let db = self.db.lock().unwrap();
+        let conn = match db.as_ref() {
+            Some(c) => c,
+            None => return false,
+        };
+        let now = now_secs() as i64;
+        let completed = if new_status == "completed" || new_status == "failed" {
+            Some(now)
+        } else {
+            None
+        };
+        let rows = conn
+            .0
+            .execute(
+                "UPDATE settlement_queue SET status = ?1, cctp_tx_hash = ?2, completed_at = ?3
+                 WHERE id = ?4 AND status = ?5",
+                rusqlite::params![new_status, cctp_tx_hash, completed, id, expected_status],
+            )
+            .unwrap_or(0);
+        rows > 0
     }
 } // end impl ReputationStore
 

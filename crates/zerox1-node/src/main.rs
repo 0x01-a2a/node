@@ -2,14 +2,10 @@ mod api;
 #[cfg(feature = "bags")]
 pub mod bags;
 mod batch;
-mod challenge;
 mod config;
 mod constants;
-mod escrow;
 mod identity;
-mod inactive;
 mod kora;
-mod lease;
 mod logger;
 mod network;
 mod node;
@@ -17,8 +13,6 @@ mod peer_state;
 mod push_notary;
 mod registry_8004;
 mod reputation;
-mod stake_lock;
-mod submit;
 #[cfg(feature = "trade")]
 pub mod trade;
 

@@ -32,16 +32,13 @@ use crate::{
     batch::{current_epoch, now_micros, BatchAccumulator},
     config::Config,
     identity::AgentIdentity,
-    inactive,
     kora::KoraClient,
-    lease,
     logger::EnvelopeLogger,
     network::{Zx01Behaviour, Zx01BehaviourEvent},
     peer_state::PeerStateMap,
     push_notary,
     registry_8004::Registry8004Client,
     reputation::ReputationTracker,
-    submit,
 };
 
 // ============================================================================
@@ -279,6 +276,10 @@ impl Zx01Node {
             config.trade_rpc_url.clone(),
             #[cfg(feature = "trade")]
             config.jupiter_api_url.clone(),
+            #[cfg(feature = "trade")]
+            config.jupiter_fee_bps,
+            #[cfg(feature = "trade")]
+            config.jupiter_fee_account.clone(),
             http_client.clone(),
             config.registry_8004_collection.clone(),
             std::sync::Arc::new(identity.signing_key.clone()),
@@ -600,150 +601,29 @@ impl Zx01Node {
 
     /// Ensure this agent has both a stake lock and an initialized lease.
     /// Called once at startup before check_own_lease().
-    /// In dev mode, skip entirely.
+    ///
+    /// NOTE: On-chain stake/lease settlement has been moved to settlement/solana.
+    /// This is now a no-op; billing is handled by the aggregator account system.
     async fn ensure_stake_and_lease(&mut self) {
-        if self.dev_mode
-            || self
-                .exempt_agents
-                .read()
-                .unwrap()
-                .contains(&self.identity.agent_id)
-        {
-            tracing::debug!("Dev mode or exempt agent — skipping auto-onboard.");
-            return;
-        }
-
-        // GAP-1: Auto-stake if no stake account exists.
-        match crate::stake_lock::stake_exists(&self.rpc, &self.identity.agent_id).await {
-            Ok(false) => {
-                tracing::info!(
-                    "No stake account found — auto-staking {} USDC...",
-                    crate::stake_lock::MIN_STAKE_USDC as f64 / 1_000_000.0
-                );
-                if let Err(e) = crate::stake_lock::lock_stake_onchain(
-                    &self.rpc,
-                    &self.identity,
-                    self.kora.as_ref(),
-                )
-                .await
-                {
-                    tracing::warn!("Auto-stake failed: {e}. Agent may not pass peer verification.");
-                }
-            }
-            Ok(true) => tracing::debug!("Stake account exists."),
-            Err(e) => tracing::warn!("Stake check failed: {e}. Continuing optimistically."),
-        }
-
-        // GAP-2: Auto-init lease if no lease account exists.
-        match crate::lease::get_lease_status(&self.rpc, &self.identity.agent_id).await {
-            Ok(None) => {
-                tracing::info!("No lease account found — auto-initializing lease...");
-                if let Err(e) =
-                    crate::lease::init_lease_onchain(&self.rpc, &self.identity, self.kora.as_ref())
-                        .await
-                {
-                    tracing::warn!("Auto-init lease failed: {e}. Agent may be rejected by peers.");
-                }
-            }
-            Ok(Some(_)) => {} // Lease exists — check_own_lease() will handle renewal
-            Err(e) => tracing::warn!("Lease status check failed: {e}. Continuing optimistically."),
-        }
+        tracing::debug!("On-chain stake/lease check skipped (settlement decoupled).");
     }
 
     /// Check this agent's own lease on startup.
     ///
-    /// - No account: warn (agent must call `init_lease` before running)
-    /// - Deactivated: fatal — refuse to start
-    /// - Grace period: warn, continue (but should pay ASAP)
-    /// - Needs renewal: auto-renew immediately
+    /// NOTE: On-chain lease verification has been moved to settlement/solana.
+    /// This is now a no-op; billing is handled by the aggregator account system.
     async fn check_own_lease(&mut self) -> anyhow::Result<()> {
-        if self.dev_mode
-            || self
-                .exempt_agents
-                .read()
-                .unwrap()
-                .contains(&self.identity.agent_id)
-        {
-            tracing::debug!("Dev mode or exempt agent — skipping own lease check.");
-            return Ok(());
-        }
-
-        match lease::get_lease_status(&self.rpc, &self.identity.agent_id).await {
-            Ok(None) => {
-                tracing::warn!(
-                    "No lease account found for agent {}. \
-                     Call `init_lease` before running on the mesh.",
-                    hex::encode(self.identity.agent_id),
-                );
-            }
-            Ok(Some(status)) => {
-                if status.deactivated {
-                    anyhow::bail!(
-                        "Agent {} is DEACTIVATED — lease expired beyond grace period. \
-                         Cannot join the mesh.",
-                        hex::encode(self.identity.agent_id),
-                    );
-                }
-                if status.in_grace_period {
-                    tracing::warn!(
-                        "Agent {} is in grace period (paid_through={}, current={}). \
-                         Pay lease immediately to avoid deactivation.",
-                        hex::encode(self.identity.agent_id),
-                        status.paid_through_epoch,
-                        status.current_epoch,
-                    );
-                }
-                if status.needs_renewal() {
-                    tracing::info!("Lease near expiry — auto-renewing.");
-                    self.renew_own_lease().await;
-                } else {
-                    tracing::info!(
-                        "Lease OK: paid_through_epoch={} current_epoch={}",
-                        status.paid_through_epoch,
-                        status.current_epoch,
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Lease check failed (RPC): {e}. Continuing in optimistic mode.");
-            }
-        }
+        tracing::debug!("On-chain lease check skipped (settlement decoupled).");
         Ok(())
     }
 
     /// Check if own lease needs renewal and pay if so.
     /// Called at each epoch boundary.
-    async fn maybe_renew_own_lease(&mut self) {
-        if self.dev_mode
-            || self
-                .exempt_agents
-                .read()
-                .unwrap()
-                .contains(&self.identity.agent_id)
-        {
-            return;
-        }
-        match lease::get_lease_status(&self.rpc, &self.identity.agent_id).await {
-            Ok(Some(status)) if status.needs_renewal() => {
-                self.renew_own_lease().await;
-            }
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                tracing::warn!("Own lease account not found at epoch boundary.");
-            }
-            Err(e) => {
-                tracing::warn!("Lease check at epoch boundary failed: {e}");
-            }
-        }
-    }
+    ///
+    /// NOTE: On-chain lease has been moved to settlement/solana. No-op.
+    async fn maybe_renew_own_lease(&mut self) {}
 
-    async fn renew_own_lease(&mut self) {
-        if let Err(e) =
-            lease::pay_lease_onchain(&self.rpc, &self.identity, self.kora.as_ref()).await
-        {
-            tracing::error!("Lease renewal failed: {e}");
-        }
-    }
+    async fn renew_own_lease(&mut self) {}
 
     // ========================================================================
     // Peer lease verification
@@ -751,55 +631,16 @@ impl Zx01Node {
 
     /// Query lease status for `agent_id` and cache in peer_states.
     ///
-    /// On RPC error: leaves status as None (will retry on next BEACON).
+    /// NOTE: On-chain lease verification has been moved to settlement/solana.
+    /// All peers are treated as active; billing is handled by the aggregator.
     #[allow(dead_code)]
-    async fn verify_peer_lease(&mut self, agent_id: [u8; 32]) {
-        match lease::get_lease_status(&self.rpc, &agent_id).await {
-            Ok(Some(status)) => {
-                let active = status.is_active();
-                self.peer_states.set_lease_status(agent_id, active);
-                self.api.send_event(ApiEvent::LeaseStatus {
-                    agent_id: hex::encode(agent_id),
-                    active,
-                });
-                if active {
-                    tracing::debug!(
-                        "Lease: agent {} ✓ active (paid_through={})",
-                        hex::encode(agent_id),
-                        status.paid_through_epoch,
-                    );
-                } else {
-                    tracing::warn!(
-                        "Lease: agent {} DEACTIVATED — messages will be dropped",
-                        hex::encode(agent_id),
-                    );
-                }
-            }
-            Ok(None) => {
-                // No lease account — treat as inactive in prod mode.
-                self.peer_states.set_lease_status(agent_id, false);
-                tracing::warn!(
-                    "Lease: no account for agent {} — treating as inactive",
-                    hex::encode(agent_id),
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Lease check failed for {}: {e} (will retry on next BEACON)",
-                    hex::encode(agent_id),
-                );
-            }
-        }
+    async fn verify_peer_lease(&mut self, _agent_id: [u8; 32]) {
+        // On-chain lease verification moved to settlement/solana. No-op.
     }
 
     /// Returns true if this agent's messages should pass the lease gate.
-    ///
-    /// - Dev mode: always true
-    /// - Prod mode: false only when lease_status = Some(false)
     #[allow(dead_code)]
     fn lease_gate_allows(&self, _agent_id: &[u8; 32]) -> bool {
-        // Lease gate disabled — network-first: get messages flowing
-        // before adding economic gates (lease/stake).
         true
     }
 
@@ -1804,30 +1645,12 @@ impl Zx01Node {
                     let mut provider = [0u8; 32];
                     requester.copy_from_slice(&env.payload[1..33]);
                     provider.copy_from_slice(&env.payload[33..65]);
-                    let rpc_url = self.config.rpc_url.clone();
-                    let sk_bytes = self.identity.signing_key.to_bytes();
-                    let vk_bytes = self.identity.verifying_key.to_bytes();
-                    let conv_id = req.conversation_id;
-                    // notary_bytes = our own vk (we are the notary sending this VERDICT).
-                    let notary_bytes = vk_bytes;
-                    let kora = self.kora.clone();
-                    tokio::spawn(async move {
-                        use solana_rpc_client::nonblocking::rpc_client::RpcClient as SolanaRpc;
-                        if let Err(e) = crate::escrow::approve_payment_onchain(
-                            &SolanaRpc::new(rpc_url),
-                            sk_bytes,
-                            vk_bytes,
-                            requester,
-                            provider,
-                            conv_id,
-                            notary_bytes,
-                            kora.as_ref(),
-                        )
-                        .await
-                        {
-                            tracing::warn!("Escrow approve_payment failed: {e}");
-                        }
-                    });
+                    // On-chain escrow approval has been moved to settlement/solana.
+                    // The aggregator handles off-chain credit release.
+                    tracing::debug!(
+                        "VERDICT approve for conversation {} (on-chain escrow disabled)",
+                        hex::encode(req.conversation_id),
+                    );
                 }
 
                 // FEEDBACK sent → push to aggregator so the feed reflects the outcome.
@@ -2074,27 +1897,9 @@ impl Zx01Node {
             "n_hv":      ev.n_hv,
         }));
 
-        // GAP-06: Check SRI circuit breaker before on-chain submission.
-        // If the network-wide Systemic Risk Index exceeds the threshold the
-        // aggregator sets circuit_breaker_active=true; we pause submission to
-        // avoid contributing to a compromised epoch record.
-        let circuit_breaker = self.check_sri_circuit_breaker().await;
-        if circuit_breaker {
-            tracing::warn!(
-                "SRI circuit breaker ACTIVE — skipping on-chain batch submission for epoch {epoch}. \
-                 Network anomaly level exceeds 50%. Submission will resume when SRI drops."
-            );
-        } else if let Err(e) = submit::submit_batch_onchain(
-            &self.rpc,
-            &self.identity,
-            &batch,
-            epoch,
-            self.kora.as_ref(),
-        )
-        .await
-        {
-            tracing::error!("Batch submission failed for epoch {epoch}: {e}");
-        }
+        // On-chain batch submission has been moved to settlement/solana.
+        // The aggregator tracks batches off-chain via envelope ingest.
+        tracing::debug!("Epoch {epoch} batch finalized (on-chain submission disabled).");
 
         self.current_epoch = new_epoch;
         self.batch = BatchAccumulator::new(new_epoch, self.current_slot);
@@ -2143,15 +1948,8 @@ impl Zx01Node {
         }
 
         tracing::debug!("Running inactivity check for {} known agents", agents.len());
-        inactive::check_and_slash_inactive(
-            &self.rpc,
-            &self.identity,
-            self.kora.as_ref(),
-            &usdc_mint,
-            &agents,
-            &self.api,
-        )
-        .await;
+        // On-chain inactivity slashing has been moved to settlement/solana.
+        tracing::debug!("Inactivity check skipped (settlement decoupled).");
     }
 
     // ========================================================================

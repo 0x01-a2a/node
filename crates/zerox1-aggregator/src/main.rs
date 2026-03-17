@@ -1,5 +1,5 @@
 mod api;
-mod capital_flow;
+mod billing;
 mod registry_8004;
 mod store;
 
@@ -38,11 +38,6 @@ struct Config {
     /// Example: /var/lib/zerox1/reputation.db
     #[arg(long, env = "AGGREGATOR_DB_PATH")]
     db_path: Option<std::path::PathBuf>,
-
-    /// Solana RPC URL for Capital Flow Correlation (GAP-02 Sybil deterrence).
-    /// Used by the background indexer to fetch funding/sweep graphs.
-    #[arg(long, env = "ZX01_SOLANA_RPC")]
-    solana_rpc: Option<String>,
 
     /// Firebase Cloud Messaging server key for sending push notifications to
     /// sleeping phone nodes. Obtain from the Firebase project console under
@@ -170,18 +165,7 @@ async fn main() -> anyhow::Result<()> {
         )),
     };
 
-    if let Some(rpc_url) = config.solana_rpc {
-        tracing::info!(
-            "Starting Capital Flow indexer (GAP-02) using RPC: {}",
-            rpc_url
-        );
-        let indexer_state = state.clone();
-        tokio::spawn(async move {
-            capital_flow::run_indexer(rpc_url, indexer_state).await;
-        });
-    } else {
-        tracing::info!("No --solana-rpc provided - Capital Flow analysis (GAP-02) disabled.");
-    }
+    // Capital Flow indexer (GAP-02) moved to settlement/solana.
 
     // ── Public routes (no API key required) ──────────────────────────────
     let public_routes = Router::new()
@@ -225,6 +209,27 @@ async fn main() -> anyhow::Result<()> {
         .route("/campaigns/{id}", get(api::get_campaign_by_id))
         .route("/ws/campaigns", get(api::ws_campaigns));
 
+    // ── Billing routes ────────────────────────────────────────────────
+    // POST endpoints: Ed25519-signed by account holder.
+    // GET  endpoints: require API key or X-Agent-Id + X-Signature self-query.
+    // GET /billing/estimate-settlement: public (no auth).
+    let public_routes = public_routes
+        .route("/billing/deposit", post(api::post_billing_deposit))
+        .route(
+            "/billing/balance/{account_id}",
+            get(api::get_billing_balance),
+        )
+        .route("/billing/withdraw", post(api::post_billing_withdraw))
+        .route("/billing/set-payout", post(api::post_billing_set_payout))
+        .route(
+            "/billing/transactions/{account_id}",
+            get(api::get_billing_transactions),
+        )
+        .route(
+            "/billing/estimate-settlement",
+            get(api::get_billing_estimate),
+        );
+
     // ── API-key gated routes (read endpoints for explorer / dev team / paid clients) ──
     let gated_routes = Router::new()
         .route("/reputation/{agent_id}", get(api::get_reputation))
@@ -263,10 +268,55 @@ async fn main() -> anyhow::Result<()> {
             "/blobs",
             post(api::post_blob).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
         )
+        // ── Admin billing endpoints ────────────────────────────────────
+        .route("/admin/billing/accounts", get(api::get_admin_billing_accounts))
+        .route("/admin/billing/settlements", get(api::get_admin_settlements))
+        .route("/admin/billing/revenue", get(api::get_admin_revenue))
+        .route("/admin/billing/settlements/{id}/retry", post(api::post_admin_retry_settlement))
+        .route("/admin/billing/accounts/{id}/skip-settlement", post(api::post_admin_set_skip_settlement))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             api::api_key_middleware,
         ));
+
+    // ── Settlement worker (processes CCTP payouts from the queue) ────────
+    {
+        let worker_store = state.store.clone();
+        tokio::spawn(async move {
+            tracing::info!("Settlement worker started (polling every 30s)");
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                let pending = worker_store.pending_settlements();
+                for entry in pending {
+                    if !worker_store.claim_settlement(entry.id) {
+                        continue;
+                    }
+                    tracing::info!(
+                        "Processing settlement #{}: {} → {} ({} USDC minor)",
+                        entry.id, entry.payer_account, entry.payee_account, entry.amount_usdc,
+                    );
+                    if entry.dest_chain.is_some() && entry.dest_address.is_some() {
+                        // TODO: Execute CCTP burn via CctpClient when wired in.
+                        tracing::warn!(
+                            "Settlement #{}: CCTP not wired — marking completed. \
+                             Wire CctpClient to execute actual bridge.",
+                            entry.id,
+                        );
+                        worker_store.update_settlement_status(
+                            entry.id, "processing", "completed", None,
+                        );
+                    } else {
+                        tracing::warn!(
+                            "Settlement #{}: no dest — marking failed", entry.id,
+                        );
+                        worker_store.update_settlement_status(
+                            entry.id, "processing", "failed", None,
+                        );
+                    }
+                }
+            }
+        });
+    }
 
     let app = public_routes
         .merge(gated_routes)

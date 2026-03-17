@@ -1873,6 +1873,495 @@ fn uuid_v4() -> String {
     )
 }
 
+// ============================================================================
+// Billing endpoints (Circle Gateway + CCTP)
+// All mutation endpoints require Ed25519 signature from the account holder.
+// ============================================================================
+
+/// Helper: verify Ed25519 signature + timestamp freshness for billing requests.
+fn verify_billing_auth(
+    account_id: &str,
+    signature: &str,
+    timestamp: u64,
+    canonical_body: &[u8],
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    // Validate account_id format.
+    if let Err(e) = crate::billing::validate_account_id(account_id) {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error": e}))));
+    }
+    // Verify Ed25519 signature.
+    if let Err(_e) = verify_request_signature(account_id, signature, canonical_body) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "signature verification failed"})),
+        ));
+    }
+    // Check timestamp freshness (5 min window).
+    if let Err(e) = crate::billing::validate_timestamp(timestamp, 300) {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error": e}))));
+    }
+    Ok(())
+}
+
+/// POST /billing/deposit
+///
+/// Credit an account after a Gateway, Stripe, or direct deposit.
+/// Requires Ed25519 signature from the account holder.
+/// Duplicate references are rejected by UNIQUE constraint.
+pub async fn post_billing_deposit(
+    State(state): State<AppState>,
+    Json(req): Json<crate::billing::DepositRequest>,
+) -> impl IntoResponse {
+    // ── Input validation ────────────────────────────────────────────────
+    if let Err(e) = crate::billing::validate_account_id(&req.account_id) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
+    }
+    if req.amount_usdc == 0 || req.amount_usdc > crate::billing::MAX_DEPOSIT_USDC {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid amount"}))).into_response();
+    }
+    if let Err(e) = crate::billing::validate_reference(&req.reference) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
+    }
+    // Validate payment_method is known.
+    if req.payment_method.parse::<crate::billing::PaymentMethod>().is_err() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid payment_method: must be gateway|stripe|direct"}))).into_response();
+    }
+    // Validate chain_domain if present.
+    if let Some(domain) = req.chain_domain {
+        if !crate::billing::is_valid_chain_domain(domain) {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid chain_domain"}))).into_response();
+        }
+    }
+
+    // ── Ed25519 signature verification ──────────────────────────────────
+    let canonical = serde_json::to_vec(&json!({
+        "account_id": req.account_id,
+        "amount_usdc": req.amount_usdc,
+        "payment_method": req.payment_method,
+        "reference": req.reference,
+        "timestamp": req.timestamp,
+    }))
+    .unwrap_or_default();
+
+    if let Err((status, body)) =
+        verify_billing_auth(&req.account_id, &req.signature, req.timestamp, &canonical)
+    {
+        return (status, body).into_response();
+    }
+
+    // ── Credit account (UNIQUE constraint prevents double-credit) ───────
+    match state.store.credit_account(
+        &req.account_id,
+        req.amount_usdc,
+        &req.payment_method,
+        &req.reference,
+        req.chain_domain,
+    ) {
+        Some(acc) => {
+            tracing::info!(
+                "Billing deposit: {} += {} ({}) ref={}",
+                req.account_id, req.amount_usdc, req.payment_method, req.reference,
+            );
+            Json(json!(crate::billing::BalanceResponse::from(acc))).into_response()
+        }
+        None => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "duplicate reference or database error"})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /billing/balance/{account_id}
+///
+/// Requires `Authorization: Bearer <api_key>` (same as gated read endpoints)
+/// or `X-Agent-Id` + `X-Signature` headers for agent self-query.
+pub async fn get_billing_balance(
+    State(state): State<AppState>,
+    axum::extract::Path(account_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = crate::billing::validate_account_id(&account_id) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
+    }
+
+    // Auth: either API key or Ed25519 self-query.
+    let has_api_key = if !state.api_keys.is_empty() {
+        headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(|key| state.api_keys.iter().any(|k| k == key))
+            .unwrap_or(false)
+    } else {
+        true // dev mode: no API keys configured
+    };
+
+    let has_agent_sig = headers.get("x-agent-id").is_some()
+        && headers.get("x-signature").is_some();
+
+    if !has_api_key && !has_agent_sig {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "requires API key or X-Agent-Id + X-Signature headers"})),
+        )
+            .into_response();
+    }
+
+    // If using agent signature, verify it matches the account_id being queried.
+    if has_agent_sig && !has_api_key {
+        let agent_id = headers
+            .get("x-agent-id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let sig = headers
+            .get("x-signature")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if agent_id != account_id {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "can only query own balance"})),
+            )
+                .into_response();
+        }
+        // Signature over the account_id string.
+        if verify_request_signature(agent_id, sig, account_id.as_bytes()).is_err() {
+            return (StatusCode::UNAUTHORIZED, Json(json!({"error": "invalid signature"}))).into_response();
+        }
+    }
+
+    match state.store.get_or_create_billing_account(&account_id) {
+        Some(acc) => Json(json!(crate::billing::BalanceResponse::from(acc))).into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "billing database not available"})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /billing/withdraw
+///
+/// Debit an account and enqueue CCTP withdrawal.
+/// Requires Ed25519 signature from the account holder.
+pub async fn post_billing_withdraw(
+    State(state): State<AppState>,
+    Json(req): Json<crate::billing::WithdrawRequest>,
+) -> impl IntoResponse {
+    // ── Input validation ────────────────────────────────────────────────
+    if req.amount_usdc == 0 {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "amount must be > 0"}))).into_response();
+    }
+    if !crate::billing::is_valid_chain_domain(req.dest_chain) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid dest_chain"}))).into_response();
+    }
+    if let Err(e) = crate::billing::validate_address(&req.dest_address, req.dest_chain) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
+    }
+
+    // ── Ed25519 signature verification ──────────────────────────────────
+    let canonical = serde_json::to_vec(&json!({
+        "account_id": req.account_id,
+        "amount_usdc": req.amount_usdc,
+        "dest_chain": req.dest_chain,
+        "dest_address": req.dest_address,
+        "timestamp": req.timestamp,
+    }))
+    .unwrap_or_default();
+
+    if let Err((status, body)) =
+        verify_billing_auth(&req.account_id, &req.signature, req.timestamp, &canonical)
+    {
+        return (status, body).into_response();
+    }
+
+    // ── Check skip_settlement flag ──────────────────────────────────────
+    let skip = state
+        .store
+        .get_or_create_billing_account(&req.account_id)
+        .map(|a| a.skip_settlement)
+        .unwrap_or(false);
+
+    // ── Debit + enqueue settlement (or skip if flagged) ─────────────────
+    let reference = format!("{}:{}", req.dest_chain, req.dest_address);
+    match state.store.debit_account(&req.account_id, req.amount_usdc, "withdraw", &reference) {
+        Some(acc) => {
+            if skip {
+                tracing::info!(
+                    "Billing withdrawal (skip_settlement): {} -= {} → chain {} addr {} — operator handles payout",
+                    req.account_id, req.amount_usdc, req.dest_chain, req.dest_address,
+                );
+            } else {
+                state.store.enqueue_settlement(
+                    &format!("withdraw-{}", req.timestamp),
+                    &req.account_id,
+                    &req.account_id,
+                    req.amount_usdc,
+                    0,
+                    Some(req.dest_chain),
+                    Some(&req.dest_address),
+                );
+                tracing::info!(
+                    "Billing withdrawal: {} -= {} → chain {} addr {}",
+                    req.account_id, req.amount_usdc, req.dest_chain, req.dest_address,
+                );
+            }
+            Json(json!({
+                "account": crate::billing::BalanceResponse::from(acc),
+                "settlement_queued": !skip,
+            })).into_response()
+        }
+        None => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "insufficient balance or account not found"})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /billing/set-payout
+///
+/// Set the preferred chain and payout address for an account.
+/// Requires Ed25519 signature + timestamp freshness.
+pub async fn post_billing_set_payout(
+    State(state): State<AppState>,
+    Json(req): Json<crate::billing::SetPayoutRequest>,
+) -> impl IntoResponse {
+    // ── Input validation ────────────────────────────────────────────────
+    if !crate::billing::is_valid_chain_domain(req.preferred_chain) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid preferred_chain"}))).into_response();
+    }
+    if let Err(e) = crate::billing::validate_address(&req.payout_address, req.preferred_chain) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
+    }
+
+    // ── Ed25519 signature + timestamp ───────────────────────────────────
+    let canonical = serde_json::to_vec(&json!({
+        "account_id": req.account_id,
+        "preferred_chain": req.preferred_chain,
+        "payout_address": req.payout_address,
+        "timestamp": req.timestamp,
+    }))
+    .unwrap_or_default();
+
+    if let Err((status, body)) =
+        verify_billing_auth(&req.account_id, &req.signature, req.timestamp, &canonical)
+    {
+        return (status, body).into_response();
+    }
+
+    // ── Update preference ───────────────────────────────────────────────
+    state.store.get_or_create_billing_account(&req.account_id);
+    match state
+        .store
+        .set_payout_preference(&req.account_id, req.preferred_chain, &req.payout_address)
+    {
+        Some(()) => Json(json!({"ok": true})).into_response(),
+        None => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "failed to update payout preference"})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /billing/transactions/{account_id}?limit=50
+///
+/// Requires same auth as GET /billing/balance — API key or agent self-query.
+pub async fn get_billing_transactions(
+    State(state): State<AppState>,
+    axum::extract::Path(account_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    if let Err(e) = crate::billing::validate_account_id(&account_id) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
+    }
+
+    // Auth: API key or agent self-query (same logic as get_billing_balance).
+    let has_api_key = if !state.api_keys.is_empty() {
+        headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(|key| state.api_keys.iter().any(|k| k == key))
+            .unwrap_or(false)
+    } else {
+        true
+    };
+
+    let has_agent_sig = headers.get("x-agent-id").is_some()
+        && headers.get("x-signature").is_some();
+
+    if !has_api_key && !has_agent_sig {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "auth required"}))).into_response();
+    }
+
+    if has_agent_sig && !has_api_key {
+        let agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok()).unwrap_or("");
+        let sig = headers.get("x-signature").and_then(|v| v.to_str().ok()).unwrap_or("");
+        if agent_id != account_id {
+            return (StatusCode::FORBIDDEN, Json(json!({"error": "can only query own transactions"}))).into_response();
+        }
+        if verify_request_signature(agent_id, sig, account_id.as_bytes()).is_err() {
+            return (StatusCode::UNAUTHORIZED, Json(json!({"error": "invalid signature"}))).into_response();
+        }
+    }
+
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(50)
+        .min(500);
+    let offset = params
+        .get("offset")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    let _ = offset; // TODO: wire into store query when pagination needed
+    let txs = state.store.billing_transactions(&account_id, limit);
+    Json(json!(txs)).into_response()
+}
+
+/// GET /billing/estimate-settlement?amount_usdc=10&source_chain=5&dest_chain=6
+///
+/// Returns estimated fees for a cross-chain settlement. Public endpoint.
+pub async fn get_billing_estimate(
+    Query(params): Query<crate::billing::EstimateParams>,
+) -> impl IntoResponse {
+    // Validate inputs.
+    if !params.amount_usdc.is_finite() || params.amount_usdc <= 0.0 {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "amount_usdc must be positive"}))).into_response();
+    }
+    if !crate::billing::is_valid_chain_domain(params.source_chain) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid source_chain"}))).into_response();
+    }
+    if !crate::billing::is_valid_chain_domain(params.dest_chain) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid dest_chain"}))).into_response();
+    }
+
+    // Static fee estimate (replaced with live CCTP call when client is wired in).
+    let zerox1_fee = (params.amount_usdc * 0.01 * 1_000_000.0).round() / 1_000_000.0;
+    let protocol_fee = 0.10_f64;
+    let total = zerox1_fee + protocol_fee;
+
+    Json(json!({
+        "source_domain": params.source_chain,
+        "dest_domain": params.dest_chain,
+        "amount_usdc": format!("{:.6}", params.amount_usdc),
+        "protocol_fee_usdc": format!("{:.6}", protocol_fee),
+        "zerox1_fee_usdc": format!("{:.6}", zerox1_fee),
+        "total_fee_usdc": format!("{:.6}", total),
+        "estimated_time_seconds": 30,
+        "note": "Estimate only. Actual fees determined at settlement time via CCTP V2."
+    }))
+    .into_response()
+}
+
+// ============================================================================
+// Admin billing endpoints (API-key gated)
+// ============================================================================
+
+/// GET /admin/billing/accounts?limit=50&offset=0
+pub async fn get_admin_billing_accounts(
+    State(state): State<AppState>,
+    Query(params): Query<PaginationParams>,
+) -> impl IntoResponse {
+    let limit = params.limit.unwrap_or(50).min(500) as usize;
+    let offset = params.offset.unwrap_or(0) as usize;
+    let accounts = state.store.list_billing_accounts(limit, offset);
+    Json(json!({
+        "accounts": accounts,
+        "limit": limit,
+        "offset": offset,
+    }))
+    .into_response()
+}
+
+/// GET /admin/billing/settlements?limit=50&offset=0&status=pending
+pub async fn get_admin_settlements(
+    State(state): State<AppState>,
+    Query(params): Query<SettlementListParams>,
+) -> impl IntoResponse {
+    let limit = params.limit.unwrap_or(50).min(500) as usize;
+    let offset = params.offset.unwrap_or(0) as usize;
+    let settlements = state.store.list_settlements(limit, offset, params.status.as_deref());
+    Json(json!({
+        "settlements": settlements,
+        "limit": limit,
+        "offset": offset,
+    }))
+    .into_response()
+}
+
+/// GET /admin/billing/revenue
+pub async fn get_admin_revenue(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let stats = state.store.billing_revenue_stats();
+    Json(stats).into_response()
+}
+
+/// POST /admin/billing/accounts/{id}/skip-settlement
+///
+/// Toggle the skip_settlement flag for an account.
+/// When enabled, withdrawals and VERDICTs bypass Circle CCTP.
+/// The operator is responsible for executing the actual USDC transfer off-band
+/// (e.g. direct Solana SPL transfer, invoice, or wire).
+pub async fn post_admin_set_skip_settlement(
+    State(state): State<AppState>,
+    Path(account_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let skip = body.get("skip").and_then(|v| v.as_bool()).unwrap_or(false);
+    if let Err(e) = crate::billing::validate_account_id(&account_id) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
+    }
+    match state.store.set_skip_settlement(&account_id, skip) {
+        Some(()) => Json(json!({
+            "ok": true,
+            "account_id": account_id,
+            "skip_settlement": skip,
+        }))
+        .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "account not found (no DB or account does not exist)"})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /admin/billing/settlements/{id}/retry — retry a failed settlement
+pub async fn post_admin_retry_settlement(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let ok = state.store.update_settlement_status(id, "failed", "pending", None);
+    if ok {
+        Json(json!({"ok": true, "message": "Settlement re-queued"})).into_response()
+    } else {
+        (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "Settlement not in 'failed' state or not found"})),
+        )
+            .into_response()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PaginationParams {
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SettlementListParams {
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+    pub status: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -245,41 +245,7 @@ pub struct NegotiateAcceptRequest {
     pub message: Option<String>,
 }
 
-// ── Escrow endpoint types ─────────────────────────────────────────────────
-
-/// Request body for POST /escrow/lock.
-#[derive(Deserialize)]
-pub struct EscrowLockRequest {
-    /// Hex-encoded 32-byte agent_id of the provider (payment recipient).
-    pub provider: String,
-    /// Hex-encoded 16-byte conversation ID.
-    pub conversation_id: String,
-    /// Amount to lock in USDC microunits (e.g. 1_000_000 = 1 USDC).
-    pub amount_usdc_micro: u64,
-    /// Notary fee in USDC microunits. Default: amount / 10.
-    pub notary_fee: Option<u64>,
-    /// Solana slot timeout before provider can claim without approval. Default: 1000.
-    pub timeout_slots: Option<u64>,
-    /// Optional hex-encoded 32-byte agent_id of a designated notary.
-    pub notary: Option<String>,
-}
-
-/// Request body for POST /escrow/approve.
-#[derive(Deserialize)]
-pub struct EscrowApproveRequest {
-    /// Hex-encoded 32-byte agent_id of the requester (payer).
-    pub requester: String,
-    /// Hex-encoded 32-byte agent_id of the provider (payee).
-    pub provider: String,
-    /// Hex-encoded 16-byte conversation ID.
-    pub conversation_id: String,
-    /// Optional hex-encoded 32-byte notary agent_id (defaults to self).
-    pub notary: Option<String>,
-    /// Settlement amount in USDC microunits — used by Bags fee-sharing to compute
-    /// the routing cut. Optional so existing callers without this field still work.
-    #[cfg_attr(not(feature = "bags"), allow(dead_code))]
-    pub amount_usdc_micro: Option<u64>,
-}
+// Escrow endpoint types removed — on-chain settlement moved to settlement/solana.
 
 // (Removed duplicate PortfolioBalances)
 
@@ -449,6 +415,12 @@ pub struct ApiInner {
     /// Set to https://api.jup.ag with --jupiter-api-url for higher rate limits.
     #[cfg(feature = "trade")]
     pub(crate) jupiter_api_url: Option<String>,
+    /// Jupiter platform fee basis points (0 = disabled).
+    #[cfg(feature = "trade")]
+    pub(crate) jupiter_fee_bps: u16,
+    /// Jupiter referral fee token account (ATA) — receives platform fees.
+    #[cfg(feature = "trade")]
+    pub(crate) jupiter_fee_account: Option<String>,
     /// Kora paymaster client — present when --kora-url is configured.
     pub kora: Option<KoraClient>,
     /// Optional override for the 8004 base collection (required on mainnet).
@@ -510,6 +482,8 @@ impl ApiState {
         rpc_url: String,
         trade_rpc_url: String,
         #[cfg(feature = "trade")] jupiter_api_url: Option<String>,
+        #[cfg(feature = "trade")] jupiter_fee_bps: u16,
+        #[cfg(feature = "trade")] jupiter_fee_account: Option<String>,
         http_client: reqwest::Client,
         registry_8004_collection: Option<String>,
         node_signing_key: Arc<SigningKey>,
@@ -575,6 +549,10 @@ impl ApiState {
             trade_rpc_url,
             #[cfg(feature = "trade")]
             jupiter_api_url,
+            #[cfg(feature = "trade")]
+            jupiter_fee_bps,
+            #[cfg(feature = "trade")]
+            jupiter_fee_account,
             node_signing_key,
             http_client,
             is_mainnet,
@@ -781,8 +759,7 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
             post(registry_8004_register_local),
         )
         // Escrow
-        .route("/escrow/lock", post(escrow_lock))
-        .route("/escrow/approve", post(escrow_approve))
+        // Escrow routes removed — on-chain settlement moved to settlement/solana
         // Hot wallet sweep + x402 micropayments
         .route("/wallet/sweep", post(sweep_usdc))
         .route("/wallet/x402/pay", post(x402_pay))
@@ -3287,244 +3264,12 @@ pub(crate) fn derive_ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
     .0
 }
 
-// ============================================================================
-// Escrow handlers
-// ============================================================================
+// Escrow handlers removed — on-chain settlement moved to settlement/solana.
+// See settlement/solana/client/src/escrow.rs for the original implementation.
 
-/// POST /escrow/lock
-///
-/// Locks USDC in the 0x01 escrow program on behalf of this node's agent
-/// (requester) to pay a provider for completing a task.
-///
-/// The node uses its own keypair to sign the Solana transaction.
-/// `amount_usdc_micro` must match the agreed amount from the ACCEPT payload.
-async fn escrow_lock(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(req): Json<EscrowLockRequest>,
-) -> impl IntoResponse {
-    if require_api_secret_or_unauthorized(&state, &headers).is_some() {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({ "error": "unauthorized" })),
-        );
-    }
+// escrow_lock handler removed — on-chain settlement moved to settlement/solana.
 
-    let provider_bytes: [u8; 32] = match hex::decode(&req.provider)
-        .ok()
-        .and_then(|b| b.try_into().ok())
-    {
-        Some(a) => a,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "provider: invalid hex or not 32 bytes" })),
-            )
-        }
-    };
-
-    let conversation_id: [u8; 16] = match hex::decode(&req.conversation_id)
-        .ok()
-        .and_then(|b| b.try_into().ok())
-    {
-        Some(a) => a,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({ "error": "conversation_id: invalid hex or not 16 bytes" }),
-                ),
-            )
-        }
-    };
-
-    let notary_pubkey: Option<solana_sdk::pubkey::Pubkey> = match req.notary {
-        Some(ref hex_str) => match hex::decode(hex_str).ok().and_then(|b| b.try_into().ok()) {
-            Some(bytes) => Some(solana_sdk::pubkey::Pubkey::new_from_array(bytes)),
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "error": "notary: invalid hex or not 32 bytes" })),
-                )
-            }
-        },
-        None => None,
-    };
-
-    let amount = req.amount_usdc_micro;
-    if amount == 0 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "amount_usdc_micro must be > 0" })),
-        );
-    }
-    let notary_fee = req.notary_fee.unwrap_or(amount / 10);
-    let timeout_slots = req.timeout_slots.unwrap_or(1000);
-
-    let sk_bytes = state.0.node_signing_key.to_bytes();
-    let vk_bytes = state.0.node_signing_key.verifying_key().to_bytes();
-    let rpc_url = state.0.rpc_url.clone();
-    let kora = state.0.kora.clone();
-
-    use solana_rpc_client::nonblocking::rpc_client::RpcClient as SolanaRpc;
-    match crate::escrow::lock_payment_onchain(
-        &SolanaRpc::new(rpc_url),
-        sk_bytes,
-        vk_bytes,
-        provider_bytes,
-        conversation_id,
-        amount,
-        notary_fee,
-        notary_pubkey,
-        timeout_slots,
-        kora.as_ref(),
-    )
-    .await
-    {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        ),
-    }
-}
-
-/// POST /escrow/approve
-///
-/// Approves and releases a locked escrow payment to the provider.
-/// Must be called by the notary or requester after the provider has delivered.
-async fn escrow_approve(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(req): Json<EscrowApproveRequest>,
-) -> impl IntoResponse {
-    if require_api_secret_or_unauthorized(&state, &headers).is_some() {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({ "error": "unauthorized" })),
-        );
-    }
-
-    let requester_bytes: [u8; 32] = match hex::decode(&req.requester)
-        .ok()
-        .and_then(|b| b.try_into().ok())
-    {
-        Some(a) => a,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "requester: invalid hex or not 32 bytes" })),
-            )
-        }
-    };
-
-    let provider_bytes: [u8; 32] = match hex::decode(&req.provider)
-        .ok()
-        .and_then(|b| b.try_into().ok())
-    {
-        Some(a) => a,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "provider: invalid hex or not 32 bytes" })),
-            )
-        }
-    };
-
-    let conversation_id: [u8; 16] = match hex::decode(&req.conversation_id)
-        .ok()
-        .and_then(|b| b.try_into().ok())
-    {
-        Some(a) => a,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({ "error": "conversation_id: invalid hex or not 16 bytes" }),
-                ),
-            )
-        }
-    };
-
-    let sk_bytes = state.0.node_signing_key.to_bytes();
-    let vk_bytes = state.0.node_signing_key.verifying_key().to_bytes();
-
-    // Notary defaults to self (this node is acting as approver/notary).
-    let notary_bytes: [u8; 32] = match req.notary {
-        Some(ref hex_str) => match hex::decode(hex_str).ok().and_then(|b| b.try_into().ok()) {
-            Some(a) => a,
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "error": "notary: invalid hex or not 32 bytes" })),
-                )
-            }
-        },
-        None => vk_bytes,
-    };
-
-    let rpc_url = state.0.rpc_url.clone();
-    let kora = state.0.kora.clone();
-
-    use solana_rpc_client::nonblocking::rpc_client::RpcClient as SolanaRpc;
-    match crate::escrow::approve_payment_onchain(
-        &SolanaRpc::new(rpc_url),
-        sk_bytes,
-        vk_bytes,
-        requester_bytes,
-        provider_bytes,
-        conversation_id,
-        notary_bytes,
-        kora.as_ref(),
-    )
-    .await
-    {
-        Ok(()) => {
-            #[cfg(feature = "bags")]
-            if let Some(bags) = state.0.bags_config.as_ref() {
-                if let Some(amount_micro) = req.amount_usdc_micro {
-                    let fee = ((amount_micro as u128 * bags.fee_bps as u128) / 10_000) as u64;
-                    if fee >= bags.min_fee_micro {
-                        let bags = bags.clone();
-                        let sk = state.0.node_signing_key.clone();
-                        let rpc = state.0.trade_rpc_url.clone();
-                        let client = state.0.http_client.clone();
-                        let mainnet = state.0.is_trading_mainnet;
-                        let state2 = state.clone();
-                        tokio::spawn(async move {
-                            match crate::bags::distribute_fee(
-                                sk, fee, &bags, &rpc, &client, mainnet,
-                            )
-                            .await
-                            {
-                                Ok(txid) => {
-                                    tracing::info!(
-                                        "Bags escrow fee distributed: {txid} ({fee} micro)"
-                                    );
-                                    state2
-                                        .record_portfolio_event(PortfolioEvent::BagsFee {
-                                            amount_usdc: fee as f64 / 1_000_000.0,
-                                            txid,
-                                            timestamp: now_secs(),
-                                        })
-                                        .await;
-                                }
-                                Err(e) => {
-                                    tracing::warn!("Bags escrow fee distribution failed: {e}")
-                                }
-                            }
-                        });
-                    }
-                }
-            }
-            (StatusCode::OK, Json(serde_json::json!({ "ok": true })))
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        ),
-    }
-}
+// escrow_approve handler removed — on-chain settlement moved to settlement/solana.
 
 /// handler derives the destination ATA automatically).
 /// If `amount` is specified in the body, it sweeps that specific atomic amount.

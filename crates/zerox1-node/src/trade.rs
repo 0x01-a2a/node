@@ -200,10 +200,18 @@ pub async fn trade_swap_handler(
         .jupiter_api_url
         .as_deref()
         .unwrap_or(JUPITER_LITE_BASE);
-    let quote_url = format!(
-        "{}/swap/v1/quote?inputMint={}&outputMint={}&amount={}&slippageBps={}",
-        jupiter_base, req.input_mint, req.output_mint, req.amount, slippage
-    );
+    let fee_bps = state.inner().jupiter_fee_bps;
+    let quote_url = if fee_bps > 0 && state.inner().jupiter_fee_account.is_some() {
+        format!(
+            "{}/swap/v1/quote?inputMint={}&outputMint={}&amount={}&slippageBps={}&platformFeeBps={}",
+            jupiter_base, req.input_mint, req.output_mint, req.amount, slippage, fee_bps
+        )
+    } else {
+        format!(
+            "{}/swap/v1/quote?inputMint={}&outputMint={}&amount={}&slippageBps={}",
+            jupiter_base, req.input_mint, req.output_mint, req.amount, slippage
+        )
+    };
 
     let quote_res = match client.get(&quote_url).send().await {
         Ok(res) => res,
@@ -267,9 +275,15 @@ pub async fn trade_swap_handler(
                 "priorityLevel": "high"
             }
         }),
-        fee_account: kora_fee_payer_opt
-            .as_ref()
-            .map(|p: &solana_sdk::pubkey::Pubkey| p.to_string()),
+        // When Kora is active it sets the gas fee payer; otherwise use our
+        // Jupiter referral token account to collect platform fees.
+        fee_account: if kora_fee_payer_opt.is_some() {
+            kora_fee_payer_opt
+                .as_ref()
+                .map(|p: &solana_sdk::pubkey::Pubkey| p.to_string())
+        } else {
+            state.inner().jupiter_fee_account.clone()
+        },
     };
 
     let swap_url = format!("{}/swap/v1/swap", jupiter_base);

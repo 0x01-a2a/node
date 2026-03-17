@@ -250,6 +250,20 @@ pub struct Config {
     #[arg(long, env = "ZX01_JUPITER_API_URL")]
     pub jupiter_api_url: Option<String>,
 
+    /// Jupiter platform fee in basis points (1 bps = 0.01%).
+    /// Deducted from swap output and routed to `jupiter_fee_account`.
+    /// Max 100 bps (1%). Set 0 to disable. Default: 50 (0.5%).
+    #[cfg(feature = "trade")]
+    #[arg(long, env = "ZX01_JUPITER_FEE_BPS", default_value_t = 50)]
+    pub jupiter_fee_bps: u16,
+
+    /// Jupiter referral fee token account (base58 Solana token ATA).
+    /// Create via referral.jup.ag — receives platform fees from all swaps.
+    /// When unset, platform fees are not collected.
+    #[cfg(feature = "trade")]
+    #[arg(long, env = "ZX01_JUPITER_FEE_ACCOUNT")]
+    pub jupiter_fee_account: Option<String>,
+
     /// Zeroclaw workspace directory. When set, enables POST /skill/write,
     /// POST /skill/install-url, POST /skill/remove, GET /skill/list — the
     /// skill management REST API used by the skill-manager built-in skill.

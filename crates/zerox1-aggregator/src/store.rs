@@ -4080,16 +4080,7 @@ impl ReputationStore {
     }
 
     /// Enqueue a settlement for async CCTP payout.
-    pub fn enqueue_settlement(
-        &self,
-        conversation_id: &str,
-        payer: &str,
-        payee: &str,
-        amount_usdc: u64,
-        fee_usdc: u64,
-        dest_chain: Option<u32>,
-        dest_address: Option<&str>,
-    ) -> Option<i64> {
+    pub fn enqueue_settlement(&self, req: crate::billing::SettlementRequest<'_>) -> Option<i64> {
         let db = self.db.lock().unwrap();
         let conn = db.as_ref()?;
         let now = now_secs() as i64;
@@ -4098,9 +4089,9 @@ impl ReputationStore {
                 "INSERT INTO settlement_queue (conversation_id, payer_account, payee_account, amount_usdc, fee_usdc, dest_chain, dest_address, status, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8)",
                 rusqlite::params![
-                    conversation_id, payer, payee,
-                    amount_usdc as i64, fee_usdc as i64,
-                    dest_chain.map(|v| v as i64), dest_address, now
+                    req.conversation_id, req.payer, req.payee,
+                    req.amount_usdc as i64, req.fee_usdc as i64,
+                    req.dest_chain.map(|v| v as i64), req.dest_address, now
                 ],
             )
             .ok()?;

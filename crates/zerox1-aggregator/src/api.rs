@@ -2093,15 +2093,16 @@ pub async fn post_billing_withdraw(
                     req.account_id, req.amount_usdc, req.dest_chain, req.dest_address,
                 );
             } else {
-                state.store.enqueue_settlement(
-                    &format!("withdraw-{}", req.timestamp),
-                    &req.account_id,
-                    &req.account_id,
-                    req.amount_usdc,
-                    0,
-                    Some(req.dest_chain),
-                    Some(&req.dest_address),
-                );
+                let conv_id = format!("withdraw-{}", req.timestamp);
+                state.store.enqueue_settlement(crate::billing::SettlementRequest {
+                    conversation_id: &conv_id,
+                    payer: &req.account_id,
+                    payee: &req.account_id,
+                    amount_usdc: req.amount_usdc,
+                    fee_usdc: 0,
+                    dest_chain: Some(req.dest_chain),
+                    dest_address: Some(&req.dest_address),
+                });
                 tracing::info!(
                     "Billing withdrawal: {} -= {} → chain {} addr {}",
                     req.account_id, req.amount_usdc, req.dest_chain, req.dest_address,

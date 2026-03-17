@@ -84,6 +84,7 @@ pub struct Zx01Node {
     rpc: RpcClient,
     /// Kora paymaster client — present when --kora-url is configured.
     /// Enables gasless on-chain transactions (gas reimbursed in USDC, §4.4).
+    #[allow(dead_code)]
     kora: Option<KoraClient>,
     /// True when running with --registry-8004-disabled (open/dev mode).
     dev_mode: bool,
@@ -132,6 +133,7 @@ pub struct Zx01Node {
     reg8004_failures: HashMap<[u8; 32], std::time::Instant>,
     /// Agent IDs exempt from lease and registration checks.
     /// Shared with ApiState so the admin API can mutate it at runtime without restart.
+    #[allow(dead_code)]
     exempt_agents: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
 }
 
@@ -623,6 +625,7 @@ impl Zx01Node {
     /// NOTE: On-chain lease has been moved to settlement/solana. No-op.
     async fn maybe_renew_own_lease(&mut self) {}
 
+    #[allow(dead_code)]
     async fn renew_own_lease(&mut self) {}
 
     // ========================================================================
@@ -1934,7 +1937,7 @@ impl Zx01Node {
         if self.dev_mode {
             return;
         }
-        let usdc_mint = match self.usdc_mint {
+        let _usdc_mint = match self.usdc_mint {
             Some(ref m) => *m,
             None => {
                 tracing::debug!("Skipping inactivity check — no --usdc-mint configured.");
@@ -1964,6 +1967,7 @@ impl Zx01Node {
     /// Returns true if the circuit breaker is active (SRI > 0.50).
     /// Fails open (returns false) if no aggregator is configured or the
     /// request fails, so a network partition never blocks honest nodes.
+    #[allow(dead_code)]
     async fn check_sri_circuit_breaker(&self) -> bool {
         let url = match &self.aggregator_url {
             Some(u) => format!("{}/system/sri", u.trim_end_matches('/')),

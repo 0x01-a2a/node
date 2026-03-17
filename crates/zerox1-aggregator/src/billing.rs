@@ -195,6 +195,18 @@ pub struct SetPayoutRequest {
     pub timestamp: u64,
 }
 
+/// Internal request to enqueue a settlement — groups the 7 params to avoid clippy::too_many_arguments.
+#[derive(Debug)]
+pub struct SettlementRequest<'a> {
+    pub conversation_id: &'a str,
+    pub payer: &'a str,
+    pub payee: &'a str,
+    pub amount_usdc: u64,
+    pub fee_usdc: u64,
+    pub dest_chain: Option<u32>,
+    pub dest_address: Option<&'a str>,
+}
+
 /// GET /billing/estimate-settlement?amount_usdc=&source_chain=&dest_chain=
 #[derive(Debug, Deserialize)]
 pub struct EstimateParams {

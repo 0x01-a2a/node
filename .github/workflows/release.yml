@@ -60,7 +60,7 @@ jobs:
           restore-keys: cargo-registry-${{ runner.os }}-
 
       - name: Build zerox1-node
-        run: cargo build --release -p zerox1-node --target ${{ matrix.target }} --features zerox1-node/devnet
+        run: cargo build --release -p zerox1-node --target ${{ matrix.target }}
         env:
           CARGO_TERM_COLOR: always
 
@@ -106,7 +106,7 @@ jobs:
         run: cargo install cargo-ndk --locked --version "^3"
 
       - name: Build zerox1-node (Android ARM64)
-        run: cargo ndk --target aarch64-linux-android --platform 24 -- build --release -p zerox1-node --features zerox1-node/devnet,zerox1-node/trade,zerox1-node/bags
+        run: cargo ndk --target aarch64-linux-android --platform 24 -- build --release -p zerox1-node --features zerox1-node/bags
         env:
           CARGO_TERM_COLOR: always
 
@@ -160,65 +160,6 @@ jobs:
           name: zerox1-mailbox
           path: target/release/zerox1-mailbox
           if-no-files-found: error
-
-  # ── Build zerox1-challenger for all platforms (public bounty hunter) ──────
-  build-challenger:
-    name: Build challenger (${{ matrix.platform }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            platform: linux-x64
-            binary: zerox1-challenger
-
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            platform: darwin-arm64
-            binary: zerox1-challenger
-
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            platform: darwin-x64
-            binary: zerox1-challenger
-
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            platform: win32-x64
-            binary: zerox1-challenger.exe
-
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-registry-${{ runner.os }}-
-
-      - name: Build challenger
-        run: cargo build --release -p zerox1-challenger --target ${{ matrix.target }}
-        env:
-          CARGO_TERM_COLOR: always
-
-      - name: Upload challenger artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: zerox1-challenger-${{ matrix.platform }}
-          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
-          if-no-files-found: error
-
 
 
   # ── Publish zerox1-client to crates.io ───────────────────────────────────
@@ -363,7 +304,7 @@ jobs:
   # ── Create GitHub Release with binary attachments ─────────────────────────
   github-release:
     name: GitHub Release
-    needs: [build, build-android, build-server-services, build-challenger]
+    needs: [build, build-android, build-server-services]
     runs-on: ubuntu-latest
 
     steps:
@@ -376,17 +317,13 @@ jobs:
 
       - name: Rename artifacts for release
         run: |
-          cp artifacts/zerox1-node-darwin-arm64/zerox1-node            zerox1-node-darwin-arm64
-          cp artifacts/zerox1-node-darwin-x64/zerox1-node              zerox1-node-darwin-x64
-          cp artifacts/zerox1-node-linux-x64/zerox1-node               zerox1-node-linux-x64
-          cp artifacts/zerox1-node-win32-x64/zerox1-node.exe           zerox1-node-win32-x64.exe
-          cp artifacts/zerox1-aggregator/zerox1-aggregator             zerox1-aggregator-linux-x64
-          cp artifacts/zerox1-mailbox/zerox1-mailbox                   zerox1-mailbox-linux-x64
-          cp artifacts/zerox1-challenger-linux-x64/zerox1-challenger   zerox1-challenger-linux-x64
-          cp artifacts/zerox1-challenger-darwin-arm64/zerox1-challenger zerox1-challenger-darwin-arm64
-          cp artifacts/zerox1-challenger-darwin-x64/zerox1-challenger  zerox1-challenger-darwin-x64
-          cp artifacts/zerox1-challenger-win32-x64/zerox1-challenger.exe zerox1-challenger-win32-x64.exe
-          cp artifacts/zerox1-node-android-arm64/zerox1-node           zerox1-node-android-arm64
+          cp artifacts/zerox1-node-darwin-arm64/zerox1-node  zerox1-node-darwin-arm64
+          cp artifacts/zerox1-node-darwin-x64/zerox1-node    zerox1-node-darwin-x64
+          cp artifacts/zerox1-node-linux-x64/zerox1-node     zerox1-node-linux-x64
+          cp artifacts/zerox1-node-win32-x64/zerox1-node.exe zerox1-node-win32-x64.exe
+          cp artifacts/zerox1-aggregator/zerox1-aggregator   zerox1-aggregator-linux-x64
+          cp artifacts/zerox1-mailbox/zerox1-mailbox         zerox1-mailbox-linux-x64
+          cp artifacts/zerox1-node-android-arm64/zerox1-node zerox1-node-android-arm64
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -398,9 +335,5 @@ jobs:
             zerox1-node-win32-x64.exe
             zerox1-aggregator-linux-x64
             zerox1-mailbox-linux-x64
-            zerox1-challenger-linux-x64
-            zerox1-challenger-darwin-arm64
-            zerox1-challenger-darwin-x64
-            zerox1-challenger-win32-x64.exe
             zerox1-node-android-arm64
           generate_release_notes: true

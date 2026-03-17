@@ -94,7 +94,11 @@ impl EnvelopeLogger {
         let mut entries = Vec::new();
         let mut pos = 0;
         while pos + 4 <= data.len() {
-            let len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+            let len = u32::from_le_bytes(
+                data[pos..pos + 4]
+                    .try_into()
+                    .expect("4-byte window guaranteed by while condition"),
+            ) as usize;
             pos += 4;
             if pos + len > data.len() {
                 break;

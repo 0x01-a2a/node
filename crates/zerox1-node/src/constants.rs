@@ -8,11 +8,7 @@ use std::str::FromStr;
 // Mints and Treasury
 // ============================================================================
 
-/// USDC mint address.
-#[cfg(feature = "devnet")]
-pub const USDC_MINT_STR: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
-
-#[cfg(not(feature = "devnet"))]
+/// USDC mint address (mainnet).
 pub const USDC_MINT_STR: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
 /// Protocol treasury.

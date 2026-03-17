@@ -2219,8 +2219,7 @@ pub async fn get_billing_transactions(
         .get("offset")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
-    let _ = offset; // TODO: wire into store query when pagination needed
-    let txs = state.store.billing_transactions(&account_id, limit);
+    let txs = state.store.billing_transactions(&account_id, limit, offset);
     Json(json!(txs)).into_response()
 }
 

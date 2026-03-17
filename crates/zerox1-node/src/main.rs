@@ -14,6 +14,8 @@ mod push_notary;
 mod registry_8004;
 mod reputation;
 #[cfg(feature = "trade")]
+pub mod launchlab;
+#[cfg(feature = "trade")]
 pub mod trade;
 
 use clap::Parser;

@@ -292,7 +292,6 @@ const MAX_REGISTRY_PREPARE_PER_MINUTE: u32 = 10;
 /// Maximum `/registry/8004/register-submit` requests per 60-second window.
 const MAX_REGISTRY_SUBMIT_PER_MINUTE: u32 = 20;
 /// Maximum `/hosted/send` requests per 60-second window.
-const MAX_HOSTED_SENDS_PER_MINUTE: u32 = 120;
 /// Maximum Kora gas sponsorships per 24-hour window.
 /// After this, callers fall back to agent-pays-SOL.
 const MAX_KORA_DAILY_USES: u32 = 100;
@@ -393,9 +392,6 @@ pub struct ApiInner {
     registry_prepare_rate_limit: Mutex<RateLimitWindow>,
     /// Global rate limit window for `/registry/8004/register-submit`.
     registry_submit_rate_limit: Mutex<RateLimitWindow>,
-    /// Global rate limit window for `/hosted/send`.
-    hosted_send_rate_limit: Mutex<RateLimitWindow>,
-
     // 8004 registry helpers
     /// Solana RPC URL — used by registry endpoints for blockhash + broadcast.
     pub rpc_url: String,
@@ -421,6 +417,9 @@ pub struct ApiInner {
     /// Jupiter referral fee token account (ATA) — receives platform fees.
     #[cfg(feature = "trade")]
     pub(crate) jupiter_fee_account: Option<String>,
+    /// Raydium LaunchLab share fee receiver wallet — earns 0.1% per bonding-curve trade.
+    #[cfg(feature = "trade")]
+    pub(crate) launchlab_share_fee_wallet: Option<String>,
     /// Kora paymaster client — present when --kora-url is configured.
     pub kora: Option<KoraClient>,
     /// Optional override for the 8004 base collection (required on mainnet).
@@ -484,6 +483,7 @@ impl ApiState {
         #[cfg(feature = "trade")] jupiter_api_url: Option<String>,
         #[cfg(feature = "trade")] jupiter_fee_bps: u16,
         #[cfg(feature = "trade")] jupiter_fee_account: Option<String>,
+        #[cfg(feature = "trade")] launchlab_share_fee_wallet: Option<String>,
         http_client: reqwest::Client,
         registry_8004_collection: Option<String>,
         node_signing_key: Arc<SigningKey>,
@@ -541,10 +541,6 @@ impl ApiState {
                 window_start: now_secs(),
                 count: 0,
             }),
-            hosted_send_rate_limit: Mutex::new(RateLimitWindow {
-                window_start: now_secs(),
-                count: 0,
-            }),
             rpc_url,
             trade_rpc_url,
             #[cfg(feature = "trade")]
@@ -553,6 +549,8 @@ impl ApiState {
             jupiter_fee_bps,
             #[cfg(feature = "trade")]
             jupiter_fee_account,
+            #[cfg(feature = "trade")]
+            launchlab_share_fee_wallet,
             node_signing_key,
             http_client,
             is_mainnet,
@@ -579,6 +577,26 @@ impl ApiState {
             }),
             skill_workspace,
         }));
+
+        // Background task: evict expired hosted sessions every hour so the
+        // HashMap doesn't grow unbounded if tokens are registered but never used.
+        {
+            let evict_state = state.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
+                loop {
+                    interval.tick().await;
+                    let now = now_secs();
+                    let mut sessions = evict_state.0.hosted_sessions.write().await;
+                    let before = sessions.len();
+                    sessions.retain(|_, s| now.saturating_sub(s.created_at) < SESSION_TTL_SECS);
+                    let evicted = before - sessions.len();
+                    if evicted > 0 {
+                        tracing::info!("hosted session GC: evicted {evicted} expired sessions");
+                    }
+                }
+            });
+        }
 
         (state, outbound_rx, hosted_outbound_rx)
     }
@@ -788,6 +806,8 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
         .route("/trade/limit/orders", get(crate::trade::trade_limit_orders_handler))
         .route("/trade/limit/cancel", post(crate::trade::trade_limit_cancel_handler))
         .route("/trade/dca/create", post(crate::trade::trade_dca_create_handler))
+        .route("/trade/launchlab/buy", post(crate::launchlab::launchlab_buy_handler))
+        .route("/trade/launchlab/sell", post(crate::launchlab::launchlab_sell_handler))
         .route("/portfolio/history", get(portfolio_history))
         .route("/portfolio/balances", get(portfolio_balances));
 
@@ -1567,22 +1587,6 @@ async fn hosted_send(
         }
     };
 
-    // Rate limit: cap hosted sends to prevent mesh spam if a token is compromised.
-    {
-        let now = now_secs();
-        let mut rl = state.0.hosted_send_rate_limit.lock().await;
-        if now.saturating_sub(rl.window_start) >= 60 {
-            rl.window_start = now;
-            rl.count = 0;
-        }
-        if rl.count >= MAX_HOSTED_SENDS_PER_MINUTE {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(serde_json::json!({ "error": "rate limit exceeded — try again in 60s" })),
-            );
-        }
-        rl.count += 1;
-    }
 
     // Parse msg_type.
     let msg_type = match parse_msg_type(&req.msg_type) {
@@ -1746,21 +1750,6 @@ async fn hosted_negotiate_propose(
             )
         }
     };
-    {
-        let now = now_secs();
-        let mut rl = state.0.hosted_send_rate_limit.lock().await;
-        if now.saturating_sub(rl.window_start) >= 60 {
-            rl.window_start = now;
-            rl.count = 0;
-        }
-        if rl.count >= MAX_HOSTED_SENDS_PER_MINUTE {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(serde_json::json!({ "error": "rate limit exceeded — try again in 60s" })),
-            );
-        }
-        rl.count += 1;
-    }
     let recipient: [u8; 32] = match hex::decode(&req.recipient)
         .ok()
         .and_then(|b| b.try_into().ok())
@@ -1868,21 +1857,6 @@ async fn hosted_negotiate_counter(
             )
         }
     };
-    {
-        let now = now_secs();
-        let mut rl = state.0.hosted_send_rate_limit.lock().await;
-        if now.saturating_sub(rl.window_start) >= 60 {
-            rl.window_start = now;
-            rl.count = 0;
-        }
-        if rl.count >= MAX_HOSTED_SENDS_PER_MINUTE {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(serde_json::json!({ "error": "rate limit exceeded — try again in 60s" })),
-            );
-        }
-        rl.count += 1;
-    }
     let max_rounds = req.max_rounds.unwrap_or(2);
     if req.round == 0 || req.round > max_rounds {
         return (
@@ -1992,21 +1966,6 @@ async fn hosted_negotiate_accept(
             )
         }
     };
-    {
-        let now = now_secs();
-        let mut rl = state.0.hosted_send_rate_limit.lock().await;
-        if now.saturating_sub(rl.window_start) >= 60 {
-            rl.window_start = now;
-            rl.count = 0;
-        }
-        if rl.count >= MAX_HOSTED_SENDS_PER_MINUTE {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(serde_json::json!({ "error": "rate limit exceeded — try again in 60s" })),
-            );
-        }
-        rl.count += 1;
-    }
     let recipient: [u8; 32] = match hex::decode(&req.recipient)
         .ok()
         .and_then(|b| b.try_into().ok())

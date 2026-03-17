@@ -39,7 +39,7 @@ pub struct Config {
     pub no_default_bootstrap: bool,
 
     /// Solana RPC endpoint for slot queries and batch submission.
-    #[arg(long, default_value = "https://api.devnet.solana.com")]
+    #[arg(long, default_value = "https://api.mainnet-beta.solana.com")]
     pub rpc_url: String,
 
     /// Display name for BEACON messages.
@@ -263,6 +263,14 @@ pub struct Config {
     #[cfg(feature = "trade")]
     #[arg(long, env = "ZX01_JUPITER_FEE_ACCOUNT")]
     pub jupiter_fee_account: Option<String>,
+
+    /// Raydium LaunchLab share fee receiver wallet (base58 Solana pubkey).
+    /// Earns 0.1% of every LaunchLab bonding-curve buy/sell routed through
+    /// this node. Fees are paid atomically on-chain — no claiming step.
+    /// When unset, no share fee is collected.
+    #[cfg(feature = "trade")]
+    #[arg(long, env = "ZX01_LAUNCHLAB_SHARE_FEE_WALLET")]
+    pub launchlab_share_fee_wallet: Option<String>,
 
     /// Zeroclaw workspace directory. When set, enables POST /skill/write,
     /// POST /skill/install-url, POST /skill/remove, GET /skill/list — the

@@ -43,6 +43,5 @@ serde_json = { workspace = true }
 tower-http = { workspace = true }
 
 [features]
-devnet = []
-trade  = []
-bags   = ["trade"]
+trade = []
+bags  = ["trade"]

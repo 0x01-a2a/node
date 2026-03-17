@@ -4027,6 +4027,7 @@ impl ReputationStore {
         &self,
         account_id: &str,
         limit: usize,
+        offset: usize,
     ) -> Vec<crate::billing::BillingTransaction> {
         let db = self.db.lock().unwrap();
         let conn = match db.as_ref() {
@@ -4036,12 +4037,12 @@ impl ReputationStore {
         let mut stmt = match conn.0.prepare(
             "SELECT id, account_id, tx_type, amount_usdc, payment_method, reference, chain_domain, status, created_at
              FROM billing_transactions WHERE account_id = ?1
-             ORDER BY created_at DESC LIMIT ?2",
+             ORDER BY created_at DESC LIMIT ?2 OFFSET ?3",
         ) {
             Ok(s) => s,
             Err(_) => return vec![],
         };
-        stmt.query_map(rusqlite::params![account_id, limit as i64], |row| {
+        stmt.query_map(rusqlite::params![account_id, limit as i64, offset as i64], |row| {
             Ok(crate::billing::BillingTransaction {
                 id: row.get(0)?,
                 account_id: row.get(1)?,

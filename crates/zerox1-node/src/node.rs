@@ -282,6 +282,8 @@ impl Zx01Node {
             config.jupiter_fee_bps,
             #[cfg(feature = "trade")]
             config.jupiter_fee_account.clone(),
+            #[cfg(feature = "trade")]
+            config.launchlab_share_fee_wallet.clone(),
             http_client.clone(),
             config.registry_8004_collection.clone(),
             std::sync::Arc::new(identity.signing_key.clone()),
@@ -1175,7 +1177,11 @@ impl Zx01Node {
             MsgType::Propose => {
                 // Convention: first 16 bytes of payload = LE i128 bid amount.
                 let bid_value: i128 = if env.payload.len() >= BID_VALUE_LEN {
-                    i128::from_le_bytes(env.payload[..BID_VALUE_LEN].try_into().unwrap())
+                    i128::from_le_bytes(
+                        env.payload[..BID_VALUE_LEN]
+                            .try_into()
+                            .expect("slice length == BID_VALUE_LEN"),
+                    )
                 } else {
                     0
                 };
@@ -1190,7 +1196,11 @@ impl Zx01Node {
                 // Same bid extraction as PROPOSE — the counter-offered amount
                 // is in the first 16 bytes of the payload.
                 let bid_value: i128 = if env.payload.len() >= BID_VALUE_LEN {
-                    i128::from_le_bytes(env.payload[..BID_VALUE_LEN].try_into().unwrap())
+                    i128::from_le_bytes(
+                        env.payload[..BID_VALUE_LEN]
+                            .try_into()
+                            .expect("slice length == BID_VALUE_LEN"),
+                    )
                 } else {
                     0
                 };
@@ -1722,7 +1732,11 @@ impl Zx01Node {
         }
 
         // Use conversation_id[0..8] as an index seed for diverse selection.
-        let seed = u64::from_le_bytes(conversation_id[..8].try_into().unwrap());
+        let seed = u64::from_le_bytes(
+            conversation_id[..8]
+                .try_into()
+                .expect("conversation_id is [u8;16], first 8 bytes always fit [u8;8]"),
+        );
         let idx = (seed as usize) % candidates.len();
         let (notary_agent_id, notary_peer_id) = candidates[idx];
 

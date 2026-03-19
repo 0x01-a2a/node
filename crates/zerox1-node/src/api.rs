@@ -456,6 +456,15 @@ pub struct ApiInner {
     // Skill manager
     /// Zeroclaw workspace directory. When set, skill management endpoints are active.
     pub skill_workspace: Option<std::path::PathBuf>,
+
+    // MPP payment gate
+    /// MPP config for the hosting fee gate. None = gate disabled.
+    pub mpp: Option<crate::mpp::MppConfig>,
+    /// agent_id_hex → unix timestamp of last successful daily payment.
+    /// In-memory only — resets on restart; agents just pay again.
+    pub hosted_mpp_paid: Arc<RwLock<HashMap<String, u64>>>,
+    /// reference (base58) → (challenge, created_at unix)
+    pub mpp_challenges: Arc<Mutex<HashMap<String, (crate::mpp::MppChallenge, u64)>>>,
 }
 
 /// Cheaply cloneable shared state passed to all axum handlers.
@@ -493,6 +502,7 @@ impl ApiState {
         #[cfg(feature = "bags")] bags_config: Option<Arc<crate::bags::BagsConfig>>,
         #[cfg(feature = "bags")] bags_launch: Option<Arc<crate::bags::BagsLaunchClient>>,
         skill_workspace: Option<std::path::PathBuf>,
+        mpp: Option<crate::mpp::MppConfig>,
     ) -> (
         Self,
         mpsc::Receiver<OutboundRequest>,
@@ -576,6 +586,9 @@ impl ApiState {
                 count: 0,
             }),
             skill_workspace,
+            mpp,
+            hosted_mpp_paid: Arc::new(RwLock::new(HashMap::new())),
+            mpp_challenges: Arc::new(Mutex::new(HashMap::new())),
         }));
 
         // Background task: evict expired hosted sessions every hour so the
@@ -781,6 +794,9 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
         // Hot wallet sweep + x402 micropayments
         .route("/wallet/sweep", post(sweep_usdc))
         .route("/wallet/x402/pay", post(x402_pay))
+        // MPP — Machine Payment Protocol daily gate
+        .route("/mpp/challenge", get(mpp_challenge))
+        .route("/mpp/verify", post(mpp_verify))
         // Admin — exempt agent management (loopback only; requires api_secret)
         .route(
             "/admin/exempt",
@@ -1577,7 +1593,7 @@ async fn hosted_send(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Json(req): Json<HostedSendRequest>,
-) -> impl IntoResponse {
+) -> Response {
     let token = match resolve_hosted_token(&headers) {
         Some(t) => t,
         None => {
@@ -1585,9 +1601,22 @@ async fn hosted_send(
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({ "error": "missing Bearer token" })),
             )
+                .into_response()
         }
     };
 
+    // MPP gate — check if the agent has paid for today.
+    {
+        let agent_id_hex = {
+            let sessions = state.0.hosted_sessions.read().await;
+            sessions.get(&token).map(|s| hex::encode(s.agent_id))
+        };
+        if let Some(ref agent_hex) = agent_id_hex {
+            if let Some(resp) = check_mpp_gate(agent_hex, &state.0).await {
+                return resp;
+            }
+        }
+    }
 
     // Parse msg_type.
     let msg_type = match parse_msg_type(&req.msg_type) {
@@ -1597,6 +1626,7 @@ async fn hosted_send(
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "error": format!("unknown msg_type: {}", req.msg_type) })),
             )
+                .into_response()
         }
     };
 
@@ -1615,6 +1645,7 @@ async fn hosted_send(
                         serde_json::json!({ "error": "recipient required for bilateral messages" }),
                     ),
                 )
+                    .into_response()
             }
             Some(hex_str) => match hex::decode(hex_str) {
                 Ok(b) => match b.try_into() {
@@ -1624,6 +1655,7 @@ async fn hosted_send(
                             StatusCode::BAD_REQUEST,
                             Json(serde_json::json!({ "error": "recipient must be 32 bytes" })),
                         )
+                            .into_response()
                     }
                 },
                 Err(_) => {
@@ -1631,6 +1663,7 @@ async fn hosted_send(
                         StatusCode::BAD_REQUEST,
                         Json(serde_json::json!({ "error": "recipient: invalid hex" })),
                     )
+                        .into_response()
                 }
             },
         }
@@ -1645,6 +1678,7 @@ async fn hosted_send(
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({ "error": "conversation_id must be 16 bytes" })),
                 )
+                    .into_response()
             }
         },
         Err(_) => {
@@ -1652,6 +1686,7 @@ async fn hosted_send(
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "error": "conversation_id: invalid hex" })),
             )
+                .into_response()
         }
     };
 
@@ -1661,7 +1696,8 @@ async fn hosted_send(
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
             Json(serde_json::json!({ "error": "payload_hex: exceeds maximum envelope size" })),
-        );
+        )
+            .into_response();
     }
 
     // Decode payload.
@@ -1672,6 +1708,7 @@ async fn hosted_send(
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "error": "payload_hex: invalid hex" })),
             )
+                .into_response()
         }
     };
 
@@ -1686,6 +1723,7 @@ async fn hosted_send(
                     StatusCode::UNAUTHORIZED,
                     Json(serde_json::json!({ "error": "invalid token" })),
                 )
+                    .into_response()
             }
         };
 
@@ -1695,7 +1733,8 @@ async fn hosted_send(
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({ "error": "session expired" })),
-            );
+            )
+                .into_response();
         }
 
         // Rate limiting: sliding 60-second window.
@@ -1709,7 +1748,8 @@ async fn hosted_send(
             return (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(serde_json::json!({ "error": "rate limit exceeded" })),
-            );
+            )
+                .into_response();
         }
         session.sends_in_window += 1;
 
@@ -1730,10 +1770,11 @@ async fn hosted_send(
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({ "error": "node loop unavailable" })),
-        );
+        )
+            .into_response();
     }
 
-    (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
+    (StatusCode::NO_CONTENT, Json(serde_json::json!(null))).into_response()
 }
 
 /// POST /hosted/negotiate/propose — `Authorization: Bearer <token>`.
@@ -2063,7 +2104,7 @@ async fn ws_hosted_inbox_handler(
     headers: HeaderMap,
     Query(q): Query<HostedInboxQuery>,
     State(state): State<ApiState>,
-) -> impl IntoResponse {
+) -> Response {
     let token = resolve_hosted_token(&headers).or_else(|| {
         if q.token.is_some() {
             tracing::warn!(
@@ -2071,19 +2112,35 @@ async fn ws_hosted_inbox_handler(
                      Use Authorization: Bearer header instead."
             );
         }
-        q.token
+        q.token.clone()
     });
 
-    match token {
-        Some(t) => ws
-            .on_upgrade(|socket| ws_hosted_inbox_task(socket, state, t))
-            .into_response(),
-        None => (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({ "error": "missing Bearer token" })),
-        )
-            .into_response(),
+    let t = match token {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "missing Bearer token" })),
+            )
+                .into_response()
+        }
+    };
+
+    // MPP gate — check if the agent has paid for today.
+    {
+        let agent_id_hex = {
+            let sessions = state.0.hosted_sessions.read().await;
+            sessions.get(&t).map(|s| hex::encode(s.agent_id))
+        };
+        if let Some(ref agent_hex) = agent_id_hex {
+            if let Some(resp) = check_mpp_gate(agent_hex, &state.0).await {
+                return resp;
+            }
+        }
     }
+
+    ws.on_upgrade(|socket| ws_hosted_inbox_task(socket, state, t))
+        .into_response()
 }
 
 async fn ws_hosted_inbox_task(mut socket: WebSocket, state: ApiState, token: String) {
@@ -3230,6 +3287,229 @@ pub(crate) fn derive_ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
 // escrow_lock handler removed — on-chain settlement moved to settlement/solana.
 
 // escrow_approve handler removed — on-chain settlement moved to settlement/solana.
+
+// ============================================================================
+// MPP — Machine Payment Protocol (HTTP 402 daily gate)
+// ============================================================================
+
+#[derive(Deserialize)]
+struct MppVerifyRequest {
+    tx_sig: String,
+    reference: String,
+    /// Hex-encoded agent_id of the hosted agent making the payment.
+    agent_id: String,
+}
+
+/// Check whether the MPP gate allows access for the given hosted agent.
+///
+/// Returns `None` if access is allowed (gate disabled or agent has paid).
+/// Returns `Some(Response)` with HTTP 402 if payment is required.
+async fn check_mpp_gate(agent_id_hex: &str, state: &ApiInner) -> Option<Response> {
+    let mpp = match &state.mpp {
+        Some(m) if m.enabled => m,
+        _ => return None,
+    };
+
+    let now = crate::mpp::unix_now();
+    {
+        let paid = state.hosted_mpp_paid.read().await;
+        if let Some(&last_paid) = paid.get(agent_id_hex) {
+            if now.saturating_sub(last_paid) < 86_400 {
+                return None;
+            }
+        }
+    }
+
+    // Agent needs to pay — generate a fresh challenge and return 402.
+    let challenge = crate::mpp::generate_challenge(mpp);
+
+    // Prune expired challenges (older than 180s).
+    {
+        let mut challenges = state.mpp_challenges.lock().await;
+        let cutoff = now.saturating_sub(180);
+        challenges.retain(|_, (_, created_at)| *created_at >= cutoff);
+        challenges.insert(challenge.reference.clone(), (challenge.clone(), now));
+    }
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("X-MPP-Recipient", challenge.recipient.parse().unwrap());
+    headers.insert("X-MPP-Amount", challenge.amount.to_string().parse().unwrap());
+    headers.insert("X-MPP-Mint", challenge.mint.parse().unwrap());
+    headers.insert("X-MPP-Reference", challenge.reference.parse().unwrap());
+    headers.insert("X-MPP-Expires", challenge.expires_at.to_string().parse().unwrap());
+
+    let body = serde_json::json!({
+        "error": "payment_required",
+        "challenge": {
+            "recipient": challenge.recipient,
+            "amount": challenge.amount,
+            "mint": challenge.mint,
+            "reference": challenge.reference,
+            "expires_at": challenge.expires_at,
+        }
+    });
+
+    Some(
+        (
+            StatusCode::PAYMENT_REQUIRED,
+            headers,
+            Json(body),
+        )
+            .into_response(),
+    )
+}
+
+/// GET /mpp/challenge — generate a fresh MPP challenge.
+///
+/// Returns 404 if MPP is disabled.
+/// Returns a JSON challenge object with the payment details.
+async fn mpp_challenge(State(state): State<ApiState>) -> impl IntoResponse {
+    let mpp = match &state.0.mpp {
+        Some(m) if m.enabled => m,
+        _ => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "mpp not enabled" })),
+            )
+                .into_response()
+        }
+    };
+
+    let now = crate::mpp::unix_now();
+    let challenge = crate::mpp::generate_challenge(mpp);
+
+    // Prune expired challenges (older than 180s).
+    {
+        let mut challenges = state.0.mpp_challenges.lock().await;
+        let cutoff = now.saturating_sub(180);
+        challenges.retain(|_, (_, created_at)| *created_at >= cutoff);
+        challenges.insert(challenge.reference.clone(), (challenge.clone(), now));
+    }
+
+    Json(serde_json::json!({
+        "recipient": challenge.recipient,
+        "amount": challenge.amount,
+        "mint": challenge.mint,
+        "reference": challenge.reference,
+        "expires_at": challenge.expires_at,
+    }))
+    .into_response()
+}
+
+/// POST /mpp/verify — verify an MPP payment proof.
+///
+/// Body: `{ "tx_sig": "...", "reference": "...", "agent_id": "..." }`
+/// The request must include `Authorization: Bearer <hosted_token>` matching the agent_id.
+///
+/// Returns `{ "paid_until": <unix_timestamp> }` on success, or 402 on failure.
+async fn mpp_verify(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(req): Json<MppVerifyRequest>,
+) -> impl IntoResponse {
+    // MPP must be enabled.
+    if state.0.mpp.as_ref().map_or(true, |m| !m.enabled) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "mpp not enabled" })),
+        )
+            .into_response();
+    }
+
+    // Verify the token corresponds to the claimed agent_id.
+    let token = match resolve_hosted_token(&headers) {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "missing Bearer token" })),
+            )
+                .into_response()
+        }
+    };
+
+    {
+        let sessions = state.0.hosted_sessions.read().await;
+        match sessions.get(&token) {
+            Some(s) => {
+                let session_agent_hex = hex::encode(s.agent_id);
+                if session_agent_hex != req.agent_id {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(serde_json::json!({ "error": "agent_id does not match token" })),
+                    )
+                        .into_response();
+                }
+            }
+            None => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({ "error": "invalid token" })),
+                )
+                    .into_response()
+            }
+        }
+    }
+
+    // Look up the challenge by reference.
+    let challenge = {
+        let challenges = state.0.mpp_challenges.lock().await;
+        match challenges.get(&req.reference) {
+            Some((ch, _)) => ch.clone(),
+            None => {
+                return (
+                    StatusCode::PAYMENT_REQUIRED,
+                    Json(serde_json::json!({ "error": "challenge not found or expired" })),
+                )
+                    .into_response()
+            }
+        }
+    };
+
+    // Check challenge expiry.
+    if crate::mpp::unix_now() > challenge.expires_at {
+        return (
+            StatusCode::PAYMENT_REQUIRED,
+            Json(serde_json::json!({ "error": "challenge expired" })),
+        )
+            .into_response();
+    }
+
+    let proof = crate::mpp::MppProof {
+        tx_sig: req.tx_sig.clone(),
+        reference: req.reference.clone(),
+    };
+
+    let rpc_url = state.0.rpc_url.clone();
+    match crate::mpp::verify_payment(&proof, &challenge, &rpc_url).await {
+        Ok(true) => {
+            let now = crate::mpp::unix_now();
+            let paid_until = now + 86_400;
+            state
+                .0
+                .hosted_mpp_paid
+                .write()
+                .await
+                .insert(req.agent_id.clone(), now);
+            // Remove the used challenge.
+            state.0.mpp_challenges.lock().await.remove(&req.reference);
+            Json(serde_json::json!({ "paid_until": paid_until })).into_response()
+        }
+        Ok(false) => (
+            StatusCode::PAYMENT_REQUIRED,
+            Json(serde_json::json!({ "error": "payment verification failed" })),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::warn!("MPP verify_payment error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "payment verification error" })),
+            )
+                .into_response()
+        }
+    }
+}
 
 /// handler derives the destination ATA automatically).
 /// If `amount` is specified in the body, it sweeps that specific atomic amount.

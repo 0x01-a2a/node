@@ -8,6 +8,14 @@ edition.workspace = true
 # Only meaningful when the aggregator serves mobile nodes; off by default
 # so server-only deployments don't expose unfinished endpoints.
 data-bounty = []
+# Celo EVM settlement: executes approve_payment on ZeroxEscrow when a
+# VERDICT is queued with dest_chain = 42220 (mainnet) or 44787 (testnet).
+# Requires CELO_RPC_URL / CELO_ESCROW / CELO_PRIVATE_KEY to be set at runtime.
+celo-settlement = ["dep:zerox1-settlement-celo"]
+# Base EVM settlement: executes approve_payment on ZeroxEscrow when a
+# VERDICT is queued with dest_chain = 8453 (mainnet) or 84532 (testnet).
+# Requires BASE_RPC_URL / BASE_ESCROW / BASE_PRIVATE_KEY to be set at runtime.
+base-settlement = ["dep:zerox1-settlement-base"]
 
 [[bin]]
 name = "zerox1-aggregator"
@@ -33,3 +41,5 @@ reqwest    = { workspace = true }
 ed25519-dalek = "2.1"
 rand = "0.8"
 bs58 = "0.5"
+zerox1-settlement-celo = { path = "../../../settlement/celo/client", optional = true }
+zerox1-settlement-base = { path = "../../../settlement/base/client", optional = true }

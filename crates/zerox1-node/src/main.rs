@@ -7,6 +7,7 @@ mod constants;
 mod identity;
 mod kora;
 mod logger;
+mod mpp;
 mod network;
 mod node;
 mod peer_state;

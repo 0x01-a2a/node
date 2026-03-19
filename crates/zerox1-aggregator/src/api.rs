@@ -51,6 +51,16 @@ pub struct AppState {
     /// Empty = public access (dev mode). When non-empty, all read endpoints
     /// require `Authorization: Bearer <key>` matching one of these values.
     pub api_keys: Vec<String>,
+    /// Celo settlement client. Present when the aggregator is configured as
+    /// the notary for Celo escrows (CELO_RPC_URL + CELO_ESCROW +
+    /// CELO_PRIVATE_KEY all set). Calls `approvePayment` on VERDICT.
+    #[cfg(feature = "celo-settlement")]
+    pub celo_client: Option<std::sync::Arc<zerox1_settlement_celo::CeloClient>>,
+    /// Base settlement client. Present when the aggregator is configured as
+    /// the notary for Base escrows (BASE_RPC_URL + BASE_ESCROW +
+    /// BASE_PRIVATE_KEY all set). Calls `approvePayment` on VERDICT.
+    #[cfg(feature = "base-settlement")]
+    pub base_client: Option<std::sync::Arc<zerox1_settlement_base::BaseClient>>,
     /// Secret for POST /campaigns (operator-only). None = disabled.
     #[cfg(feature = "data-bounty")]
     pub operator_secret: Option<String>,
@@ -60,6 +70,21 @@ pub struct AppState {
     /// Rate-limit window for POST /campaigns (count, window_start).
     #[cfg(feature = "data-bounty")]
     pub campaign_rate_limit: std::sync::Arc<std::sync::Mutex<(u32, std::time::Instant)>>,
+
+    // MPP protocol fee gate
+    /// Enable the MPP protocol-fee gate for agents. Defaults to false (beta).
+    pub protocol_fee_enabled: bool,
+    /// Daily protocol fee for hosted agents in micro-USDC. Default 200_000 (0.2 USDC).
+    pub protocol_fee_hosted_usdc: u64,
+    /// Daily protocol fee for self-hosted agents in micro-USDC. Default 1_000_000 (1.0 USDC).
+    pub protocol_fee_self_hosted_usdc: u64,
+    /// Aggregator's USDC ATA (base58). Set via --protocol-fee-recipient.
+    pub protocol_fee_recipient_ata: Option<String>,
+    /// reference (base58) → (challenge, created_at unix)
+    pub protocol_fee_challenges:
+        std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, (crate::mpp::MppChallenge, u64)>>>,
+    /// Solana RPC URL for verifying protocol fee payments.
+    pub protocol_fee_rpc_url: String,
 }
 
 /// Check if the request carries a valid API key.
@@ -206,6 +231,23 @@ pub async fn ingest_envelope(
         }
     }
     tracing::debug!("Ingest: received event: {:?}", event);
+
+    // MPP protocol-fee soft gate: BEACON messages from agents that haven't
+    // paid silently drop off the mesh. We only gate BEACON (not other events)
+    // so existing interactions complete even if the daily fee lapsed.
+    if state.protocol_fee_enabled {
+        if let IngestEvent::Beacon(ref beacon_ev) = event {
+            if !state.store.protocol_payment_valid(&beacon_ev.sender) {
+                tracing::debug!(
+                    "MPP: BEACON from {} dropped — protocol fee not paid",
+                    &beacon_ev.sender[..8.min(beacon_ev.sender.len())]
+                );
+                // Return NO_CONTENT so the node doesn't know the agent was dropped.
+                return StatusCode::NO_CONTENT.into_response();
+            }
+        }
+    }
+
     if let Some(activity) = state.store.ingest(event) {
         if let Err(e) = state.activity_tx.send(activity) {
             tracing::warn!(
@@ -2360,6 +2402,174 @@ pub struct SettlementListParams {
     pub limit: Option<u64>,
     pub offset: Option<u64>,
     pub status: Option<String>,
+}
+
+// ============================================================================
+// MPP — protocol fee challenge + verify
+// ============================================================================
+
+fn unix_now_agg() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[derive(Deserialize)]
+pub struct MppProtocolFeeQuery {
+    pub kind: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct MppProtocolFeeVerifyRequest {
+    pub tx_sig: String,
+    pub reference: String,
+    pub agent_id: String,
+}
+
+/// GET /mpp/protocol-fee/challenge — generate a fresh MPP challenge for the protocol fee.
+///
+/// Query param: ?kind=hosted|self_hosted (default: hosted)
+/// Returns 404 if protocol fee gate is disabled.
+pub async fn mpp_protocol_fee_challenge(
+    State(state): State<AppState>,
+    Query(q): Query<MppProtocolFeeQuery>,
+) -> impl IntoResponse {
+    if !state.protocol_fee_enabled {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "protocol fee gate not enabled" })),
+        )
+            .into_response();
+    }
+
+    let recipient_ata = match &state.protocol_fee_recipient_ata {
+        Some(a) => a.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "protocol fee recipient not configured" })),
+            )
+                .into_response()
+        }
+    };
+
+    let kind = q.kind.as_deref().unwrap_or("hosted");
+    let daily_fee = if kind == "self_hosted" {
+        state.protocol_fee_self_hosted_usdc
+    } else {
+        state.protocol_fee_hosted_usdc
+    };
+
+    // USDC mint: use devnet address if rpc_url contains "devnet".
+    let usdc_mint = if state.protocol_fee_rpc_url.contains("devnet") {
+        "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+    } else {
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    };
+
+    let config = crate::mpp::MppConfig {
+        recipient_ata,
+        daily_fee,
+        usdc_mint: usdc_mint.to_string(),
+        enabled: true,
+    };
+
+    let now = unix_now_agg();
+    let challenge = crate::mpp::generate_challenge(&config);
+
+    // Prune expired challenges and store the new one.
+    {
+        let mut challenges = state.protocol_fee_challenges.lock().await;
+        let cutoff = now.saturating_sub(180);
+        challenges.retain(|_, (_, created_at)| *created_at >= cutoff);
+        challenges.insert(challenge.reference.clone(), (challenge.clone(), now));
+    }
+
+    Json(json!({
+        "recipient": challenge.recipient,
+        "amount": challenge.amount,
+        "mint": challenge.mint,
+        "reference": challenge.reference,
+        "expires_at": challenge.expires_at,
+        "kind": kind,
+    }))
+    .into_response()
+}
+
+/// POST /mpp/protocol-fee/verify — verify a protocol-fee payment.
+///
+/// Body: `{ "tx_sig": "...", "reference": "...", "agent_id": "..." }`
+/// On success: records in agent_protocol_payments and returns `{ "paid_until": <unix> }`.
+pub async fn mpp_protocol_fee_verify(
+    State(state): State<AppState>,
+    Json(req): Json<MppProtocolFeeVerifyRequest>,
+) -> impl IntoResponse {
+    if !state.protocol_fee_enabled {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "protocol fee gate not enabled" })),
+        )
+            .into_response();
+    }
+
+    // Look up challenge by reference.
+    let challenge = {
+        let challenges = state.protocol_fee_challenges.lock().await;
+        match challenges.get(&req.reference) {
+            Some((ch, _)) => ch.clone(),
+            None => {
+                return (
+                    StatusCode::PAYMENT_REQUIRED,
+                    Json(json!({ "error": "challenge not found or expired" })),
+                )
+                    .into_response()
+            }
+        }
+    };
+
+    if unix_now_agg() > challenge.expires_at {
+        return (
+            StatusCode::PAYMENT_REQUIRED,
+            Json(json!({ "error": "challenge expired" })),
+        )
+            .into_response();
+    }
+
+    let proof = crate::mpp::MppProof {
+        tx_sig: req.tx_sig.clone(),
+        reference: req.reference.clone(),
+    };
+
+    match crate::mpp::verify_payment(&proof, &challenge, &state.protocol_fee_rpc_url).await {
+        Ok(true) => {
+            let now = unix_now_agg();
+            let paid_until = now + 86_400;
+
+            // Record in SQLite.
+            if let Err(e) = state.store.record_protocol_payment(&req.agent_id, "hosted") {
+                tracing::warn!("MPP: failed to record protocol payment: {e}");
+            }
+
+            // Remove the used challenge.
+            state.protocol_fee_challenges.lock().await.remove(&req.reference);
+
+            Json(json!({ "paid_until": paid_until })).into_response()
+        }
+        Ok(false) => (
+            StatusCode::PAYMENT_REQUIRED,
+            Json(json!({ "error": "payment verification failed" })),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::warn!("MPP protocol fee verify error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "payment verification error" })),
+            )
+                .into_response()
+        }
+    }
 }
 
 #[cfg(test)]

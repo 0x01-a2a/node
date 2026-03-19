@@ -268,6 +268,56 @@ impl Zx01Node {
                 ))
             });
 
+        // ── MPP config: derive ATA from recipient wallet if enabled ──────────
+        let mpp_config: Option<crate::mpp::MppConfig> = if config.mpp_enabled {
+            match &config.mpp_recipient {
+                Some(recipient_str) => {
+                    match recipient_str.parse::<Pubkey>() {
+                        Ok(recipient_wallet) => {
+                            let usdc_mint_str = if config.rpc_url.contains("devnet") {
+                                crate::api::USDC_MINT_DEVNET
+                            } else {
+                                crate::api::USDC_MINT_MAINNET
+                            };
+                            match usdc_mint_str.parse::<Pubkey>() {
+                                Ok(mint) => {
+                                    let recipient_ata = crate::api::derive_ata(&recipient_wallet, &mint);
+                                    let daily_fee = (config.mpp_fee_usdc * 1_000_000.0) as u64;
+                                    tracing::info!(
+                                        "MPP gate enabled: recipient_ata={} daily_fee={} micro-USDC",
+                                        recipient_ata,
+                                        daily_fee
+                                    );
+                                    Some(crate::mpp::MppConfig {
+                                        recipient_ata,
+                                        daily_fee,
+                                        usdc_mint: mint,
+                                        enabled: true,
+                                    })
+                                }
+                                Err(e) => {
+                                    tracing::warn!("MPP: invalid USDC mint pubkey: {e}");
+                                    None
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("MPP: invalid --mpp-recipient pubkey '{recipient_str}': {e}");
+                            None
+                        }
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        "MPP: --mpp-enabled set but --mpp-recipient not provided. Gate disabled."
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let (api, outbound_rx, hosted_outbound_rx) = ApiState::new(
             identity.agent_id,
             config.agent_name.clone(),
@@ -295,6 +345,7 @@ impl Zx01Node {
             #[cfg(feature = "bags")]
             bags_launch,
             config.skill_workspace.clone(),
+            mpp_config,
         );
 
         // Load portfolio history from disk

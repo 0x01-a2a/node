@@ -278,6 +278,96 @@ pub struct Config {
     /// On Android this is set to {filesDir}/zw by NodeService.
     #[arg(long, env = "ZX01_SKILL_WORKSPACE")]
     pub skill_workspace: Option<PathBuf>,
+
+    // ── MPP — Machine Payment Protocol daily gate ─────────────────────────
+
+    /// Enable the MPP hosting-fee gate (HTTP 402).
+    /// When set, hosted agents must pay 1 USDC/day before using /hosted/send
+    /// or /ws/hosted/inbox. Disabled by default (beta).
+    #[arg(long, env = "ZX01_MPP_ENABLED", default_value_t = false)]
+    pub mpp_enabled: bool,
+
+    /// Daily hosting fee in USDC (floating point). Default: 1.0 USDC.
+    /// Converted to micro-USDC (× 1_000_000) at startup.
+    #[arg(long, env = "ZX01_MPP_FEE_USDC", default_value_t = 1.0f64)]
+    pub mpp_fee_usdc: f64,
+
+    /// Node operator wallet pubkey (base58 Solana pubkey).
+    /// When set and --mpp-enabled, the hosting-fee USDC ATA is derived from
+    /// this wallet and used as the payment recipient in MPP challenges.
+    #[arg(long, env = "ZX01_MPP_RECIPIENT")]
+    pub mpp_recipient: Option<String>,
+
+    // ── Celo EVM settlement ───────────────────────────────────────────────
+
+    /// Celo JSON-RPC endpoint.
+    /// Required to enable on-chain Celo settlement (escrow, lease, stake).
+    /// Mainnet: https://forno.celo.org  Testnet: https://celo-sepolia.drpc.org
+    #[arg(long, env = "ZX01_CELO_RPC_URL")]
+    pub celo_rpc_url: Option<String>,
+
+    /// Deployed AgentRegistry contract address on Celo (0x-prefixed hex, 42 chars).
+    /// Maps this node's 32-byte Ed25519 agent_id to a Celo EOA.
+    #[arg(long, env = "ZX01_CELO_REGISTRY")]
+    pub celo_registry: Option<String>,
+
+    /// Deployed ZeroxEscrow contract address on Celo.
+    #[arg(long, env = "ZX01_CELO_ESCROW")]
+    pub celo_escrow: Option<String>,
+
+    /// Deployed ZeroxLease contract address on Celo.
+    #[arg(long, env = "ZX01_CELO_LEASE")]
+    pub celo_lease: Option<String>,
+
+    /// Deployed ZeroxStakeLock contract address on Celo.
+    #[arg(long, env = "ZX01_CELO_STAKE_LOCK")]
+    pub celo_stake_lock: Option<String>,
+
+    /// Celo private key (0x-prefixed hex, 64 hex chars) for signing Celo transactions.
+    /// When set, the node can: call approvePayment/initLease/lock/register on Celo,
+    /// act as notary on Celo escrows, and auto-register in the AgentRegistry.
+    /// The corresponding EVM address is derived at startup and logged.
+    #[arg(long, env = "ZX01_CELO_PRIVATE_KEY")]
+    pub celo_private_key: Option<String>,
+
+    /// Auto-register this node's agent_id in the Celo AgentRegistry at startup.
+    /// Requires --celo-registry, --celo-rpc-url, and --celo-private-key.
+    /// No-op if already registered. Default: false (opt-in).
+    #[arg(long, env = "ZX01_CELO_AUTO_REGISTER", default_value_t = false)]
+    pub celo_auto_register: bool,
+
+    // ── Base settlement ───────────────────────────────────────────────────
+
+    /// Base JSON-RPC URL.
+    /// Mainnet: https://mainnet.base.org  Testnet: https://sepolia.base.org
+    #[arg(long, env = "ZX01_BASE_RPC_URL")]
+    pub base_rpc_url: Option<String>,
+
+    /// Deployed AgentRegistry contract address on Base.
+    #[arg(long, env = "ZX01_BASE_REGISTRY")]
+    pub base_registry: Option<String>,
+
+    /// Deployed ZeroxEscrow contract address on Base.
+    #[arg(long, env = "ZX01_BASE_ESCROW")]
+    pub base_escrow: Option<String>,
+
+    /// Deployed ZeroxLease contract address on Base.
+    #[arg(long, env = "ZX01_BASE_LEASE")]
+    pub base_lease: Option<String>,
+
+    /// Deployed ZeroxStakeLock contract address on Base.
+    #[arg(long, env = "ZX01_BASE_STAKE_LOCK")]
+    pub base_stake_lock: Option<String>,
+
+    /// Base private key (0x-prefixed hex, 64 hex chars) for signing Base transactions.
+    #[arg(long, env = "ZX01_BASE_PRIVATE_KEY")]
+    pub base_private_key: Option<String>,
+
+    /// Auto-register this node's agent_id in the Base AgentRegistry at startup.
+    /// Requires --base-registry, --base-rpc-url, and --base-private-key.
+    /// No-op if already registered. Default: false (opt-in).
+    #[arg(long, env = "ZX01_BASE_AUTO_REGISTER", default_value_t = false)]
+    pub base_auto_register: bool,
 }
 
 #[cfg(test)]

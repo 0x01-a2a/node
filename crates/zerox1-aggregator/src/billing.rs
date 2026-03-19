@@ -275,10 +275,30 @@ const KNOWN_DOMAINS: &[u32] = &[
     1420,  // HyperEVM
     64165, // Sonic
     65536, // Ink
+    // Celo — not a CCTP chain; uses direct Solidity contract settlement.
+    // Domain IDs map to chain IDs to avoid collision with CCTP domains.
+    42220, // Celo mainnet
+    44787, // Celo Alfajores testnet
+    8453,  // Base mainnet
+    84532, // Base Sepolia testnet
 ];
 
 pub fn is_valid_chain_domain(domain: u32) -> bool {
     KNOWN_DOMAINS.contains(&domain)
+}
+
+/// True when `domain` is a Celo chain (mainnet or testnet).
+/// Celo settlements are executed via direct Solidity contract calls, not CCTP.
+#[allow(dead_code)] // used by the celo-settlement feature in main.rs
+pub fn is_celo_domain(domain: u32) -> bool {
+    matches!(domain, 42220 | 44787)
+}
+
+/// True when `domain` is a Base chain (mainnet or testnet).
+/// Base settlements are executed via direct Solidity contract calls, not CCTP.
+#[allow(dead_code)] // used by the base-settlement feature in main.rs
+pub fn is_base_domain(domain: u32) -> bool {
+    matches!(domain, 8453 | 84532)
 }
 
 pub fn validate_account_id(id: &str) -> Result<(), &'static str> {
@@ -330,8 +350,8 @@ pub fn validate_address(addr: &str, chain_domain: u32) -> Result<(), &'static st
                 return Err("invalid base58 characters in Solana address");
             }
         }
-        // EVM chains: 0x-prefixed hex, 42 chars
-        0 | 1 | 2 | 3 | 6 | 7 | 11 | 12 | 16 | 25 | 1420 | 64165 | 65536 => {
+        // EVM chains: 0x-prefixed hex, 42 chars (includes Celo 42220/44787, Base 8453/84532)
+        0 | 1 | 2 | 3 | 6 | 7 | 11 | 12 | 16 | 25 | 1420 | 42220 | 44787 | 8453 | 84532 | 64165 | 65536 => {
             if !addr.starts_with("0x") && !addr.starts_with("0X") {
                 return Err("EVM address must start with 0x");
             }

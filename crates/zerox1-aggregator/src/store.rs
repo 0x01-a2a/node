@@ -1003,6 +1003,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_tx_deposit_ref
     "
 ALTER TABLE billing_accounts ADD COLUMN skip_settlement INTEGER NOT NULL DEFAULT 0;
 ",
+    // v13: MPP protocol payment ledger — tracks daily agent payments
+    "
+CREATE TABLE IF NOT EXISTS agent_protocol_payments (
+    agent_id  TEXT PRIMARY KEY,
+    last_paid INTEGER NOT NULL,
+    kind      TEXT NOT NULL DEFAULT 'hosted'
+);
+",
 ];
 
 struct Db(rusqlite::Connection);
@@ -4383,6 +4391,46 @@ impl ReputationStore {
             )
             .unwrap_or(0);
         rows > 0
+    }
+    // ── MPP protocol payment helpers ──────────────────────────────────────
+
+    /// Record a successful MPP protocol payment for an agent.
+    pub fn record_protocol_payment(&self, agent_id: &str, kind: &str) -> rusqlite::Result<()> {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            let now = now_secs() as i64;
+            conn.0.execute(
+                "INSERT INTO agent_protocol_payments (agent_id, last_paid, kind)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(agent_id) DO UPDATE SET
+                     last_paid = excluded.last_paid,
+                     kind      = excluded.kind",
+                rusqlite::params![agent_id, now, kind],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Check whether an agent has a valid protocol payment (within last 86400s).
+    pub fn protocol_payment_valid(&self, agent_id: &str) -> bool {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            let result: rusqlite::Result<i64> = conn.0.query_row(
+                "SELECT last_paid FROM agent_protocol_payments WHERE agent_id = ?1",
+                rusqlite::params![agent_id],
+                |row| row.get(0),
+            );
+            match result {
+                Ok(last_paid) => {
+                    let now = now_secs() as i64;
+                    (now - last_paid) < 86_400
+                }
+                Err(_) => false,
+            }
+        } else {
+            // No DB configured — allow all (in-memory mode).
+            true
+        }
     }
 } // end impl ReputationStore
 

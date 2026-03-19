@@ -45,7 +45,9 @@ pub struct MppProof {
 pub fn generate_challenge(config: &MppConfig) -> MppChallenge {
     // Use ed25519_dalek to generate a random keypair; the public key bytes
     // become the reference pubkey added to the tx accounts list.
-    let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+    let mut secret = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret);
     let ref_bytes: [u8; 32] = signing_key.verifying_key().to_bytes();
     let reference = bs58::encode(ref_bytes).into_string();
 

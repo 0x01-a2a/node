@@ -44,15 +44,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout settlement repo (for [patch.crates-io])
-        uses: actions/checkout@v4
-        with:
-          repository: 0x01-a2a/settlement
-          path: _settlement
-
-      - name: Point patch.crates-io at local settlement
-        run: sed -i 's|path = "../settlement/|path = "_settlement/|g' Cargo.toml
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -87,15 +78,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Checkout settlement repo (for [patch.crates-io])
-        uses: actions/checkout@v4
-        with:
-          repository: 0x01-a2a/settlement
-          path: _settlement
-
-      - name: Point patch.crates-io at local settlement
-        run: sed -i 's|path = "../settlement/|path = "_settlement/|g' Cargo.toml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -142,15 +124,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout settlement repo (for [patch.crates-io])
-        uses: actions/checkout@v4
-        with:
-          repository: 0x01-a2a/settlement
-          path: _settlement
-
-      - name: Point patch.crates-io at local settlement
-        run: sed -i 's|path = "../settlement/|path = "_settlement/|g' Cargo.toml
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -196,15 +169,6 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Checkout settlement repo (for [patch.crates-io])
-        uses: actions/checkout@v4
-        with:
-          repository: 0x01-a2a/settlement
-          path: _settlement
-
-      - name: Point patch.crates-io at local settlement
-        run: sed -i 's|path = "../settlement/|path = "_settlement/|g' Cargo.toml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

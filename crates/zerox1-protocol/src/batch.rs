@@ -48,21 +48,18 @@ pub struct VerifierAssignment {
 /// entries in the daily BehaviorBatch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FeedbackEvent {
-    /// Task rated (= SATI task_ref).
+    /// Task rated.
     pub conversation_id: [u8; 16],
     /// Agent who gave the feedback.
     pub from_agent: [u8; 32],
     /// Score: -100 to +100.
     pub score: i8,
-    /// Outcome: 0=Negative, 1=Neutral, 2=Positive (SATI-compatible).
+    /// Outcome: 0=Negative, 1=Neutral, 2=Positive.
     pub outcome: u8,
     /// Role: 0=rated as participant, 1=rated as notary.
     pub role: u8,
     /// Slot of FEEDBACK message.
     pub slot: u64,
-    /// keccak256 of SATI FeedbackV1 compressed account address.
-    /// [0u8; 32] if SATI attestation not yet submitted.
-    pub sati_attestation_hash: [u8; 32],
 }
 
 // ============================================================================
@@ -76,7 +73,7 @@ pub struct FeedbackEvent {
 #[derive(Debug, Clone)]
 pub struct BehaviorBatch {
     // --- Identity and epoch bounds ------------------------------------------
-    /// Agent ID = SATI mint address.
+    /// Agent Ed25519 pubkey (32 bytes).
     pub agent_id: [u8; 32],
     /// Zero-based epoch counter (increments each 0x01 day).
     pub epoch_number: u64,
@@ -303,7 +300,6 @@ fn encode_feedback_events(events: &[FeedbackEvent]) -> Value {
                     Value::Integer(e.outcome.into()),
                     Value::Integer(e.role.into()),
                     Value::Integer(e.slot.into()),
-                    Value::Bytes(e.sati_attestation_hash.to_vec()),
                 ])
             })
             .collect(),
@@ -345,7 +341,6 @@ mod tests {
                 outcome: 2,
                 role: 0,
                 slot: 1_100,
-                sati_attestation_hash: [0u8; 32],
             }],
             overflow: false,
             overflow_data_hash: [0u8; 32],

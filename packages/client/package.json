@@ -3,12 +3,19 @@
   "version": "0.1.0",
   "description": "0x01 app-layer client SDK — talk to nodes and the aggregator without running an agent",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/0x01-a2a/node.git",
+    "directory": "packages/client"
+  },
+  "homepage": "https://0x01.world",
+  "keywords": ["zerox1", "0x01", "agent", "mesh", "p2p", "sdk", "hosted"],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js",
       "types": "./dist/index.d.ts"
     }
   },
@@ -21,7 +28,7 @@
   },
   "dependencies": {
     "ws": "^8.18.0",
-    "@zerox1/core": "file:../core"
+    "@zerox1/core": "^0.1.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

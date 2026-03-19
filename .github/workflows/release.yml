@@ -44,6 +44,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout settlement repo (for [patch.crates-io])
+        uses: actions/checkout@v4
+        with:
+          repository: 0x01-a2a/settlement
+          path: _settlement
+
+      - name: Point patch.crates-io at local settlement
+        run: sed -i 's|path = "../settlement/|path = "_settlement/|g' Cargo.toml
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -78,6 +87,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Checkout settlement repo (for [patch.crates-io])
+        uses: actions/checkout@v4
+        with:
+          repository: 0x01-a2a/settlement
+          path: _settlement
+
+      - name: Point patch.crates-io at local settlement
+        run: sed -i 's|path = "../settlement/|path = "_settlement/|g' Cargo.toml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -124,6 +142,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout settlement repo (for [patch.crates-io])
+        uses: actions/checkout@v4
+        with:
+          repository: 0x01-a2a/settlement
+          path: _settlement
+
+      - name: Point patch.crates-io at local settlement
+        run: sed -i 's|path = "../settlement/|path = "_settlement/|g' Cargo.toml
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -169,6 +196,15 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+
+      - name: Checkout settlement repo (for [patch.crates-io])
+        uses: actions/checkout@v4
+        with:
+          repository: 0x01-a2a/settlement
+          path: _settlement
+
+      - name: Point patch.crates-io at local settlement
+        run: sed -i 's|path = "../settlement/|path = "_settlement/|g' Cargo.toml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -337,3 +373,69 @@ jobs:
             zerox1-mailbox-linux-x64
             zerox1-node-android-arm64
           generate_release_notes: true
+
+  # ── Publish @zerox1/core and @zerox1/client to npm ───────────────────────
+  publish-packages:
+    name: Publish npm SDK packages
+    needs: [build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Set version from tag
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          node -e "
+            const fs = require('fs');
+            // Bump core version
+            const corePkg = JSON.parse(fs.readFileSync('packages/core/package.json', 'utf8'));
+            corePkg.version = process.env.TAG;
+            fs.writeFileSync('packages/core/package.json', JSON.stringify(corePkg, null, 2) + '\n');
+            // Bump client version + point @zerox1/core dep at new version
+            const clientPkg = JSON.parse(fs.readFileSync('packages/client/package.json', 'utf8'));
+            clientPkg.version = process.env.TAG;
+            clientPkg.dependencies['@zerox1/core'] = process.env.TAG;
+            fs.writeFileSync('packages/client/package.json', JSON.stringify(clientPkg, null, 2) + '\n');
+          "
+        env:
+          TAG: ${{ github.ref_name }}
+
+      - name: Build and publish @zerox1/core
+        working-directory: packages/core
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          npm ci
+          npm run build
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://registry.npmjs.org/@zerox1%2Fcore/$TAG")
+          if [ "$STATUS" = "200" ]; then
+            echo "@zerox1/core $TAG already on npm — skipping"
+          else
+            npm publish --access public
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Build and publish @zerox1/client
+        working-directory: packages/client
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          # Use local core (just published; avoids registry propagation race)
+          npm install --no-save file:../core
+          npm run build
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://registry.npmjs.org/@zerox1%2Fclient/$TAG")
+          if [ "$STATUS" = "200" ]; then
+            echo "@zerox1/client $TAG already on npm — skipping"
+          else
+            npm publish --access public
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

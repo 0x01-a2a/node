@@ -5,14 +5,6 @@
 /// Protocol version byte included in every envelope.
 pub const PROTOCOL_VERSION: u8 = 0x01;
 
-// --- Identity ---------------------------------------------------------------
-
-/// SATI program ID on Solana mainnet (and devnet — same address).
-pub const SATI_PROGRAM_ID: &str = "satiRkxEiwZ51cv8PRu8UMzuaqeaNU9jABo6oAFMsLe";
-
-/// SATI address lookup table (mainnet).
-pub const SATI_LOOKUP_TABLE: &str = "fDinDQsTpN7Momkv7AxKT9oSyQam8xG2UD7v6vHu8LJ";
-
 // --- Epoch ------------------------------------------------------------------
 
 /// 0x01 epoch length in seconds (1 day).

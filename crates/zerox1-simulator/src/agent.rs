@@ -302,7 +302,6 @@ fn build<R: Rng>(
         },
         role: 0,
         slot: *message_slots.last().unwrap_or(&0),
-        sati_attestation_hash: [0u8; 32],
     }];
 
     let batch = BehaviorBatch {

@@ -319,7 +319,6 @@ mod tests {
                 outcome: 2,
                 role: 0,
                 slot: 500,
-                sati_attestation_hash: [0u8; 32],
             }],
             overflow: false,
             overflow_data_hash: [0u8; 32],

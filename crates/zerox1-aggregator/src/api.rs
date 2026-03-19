@@ -85,6 +85,18 @@ pub struct AppState {
         std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, (crate::mpp::MppChallenge, u64)>>>,
     /// Solana RPC URL for verifying protocol fee payments.
     pub protocol_fee_rpc_url: String,
+
+    // ── Identity verification (GET /identity/verify/:agent_id_hex) ──────
+    /// When true (--registry-8004-disabled), all identity checks return verified=true.
+    pub identity_dev_mode: bool,
+    /// Agent IDs exempt from identity checks (hex strings).
+    /// Populated from AGGREGATOR_EXEMPT_AGENTS env var (comma-separated hex).
+    pub exempt_agents: std::sync::Arc<std::collections::HashSet<[u8; 32]>>,
+    /// In-memory cache for identity verification results.
+    /// agent_id → (verified, cached_at). TTL = 1 hour.
+    pub identity_cache: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<[u8; 32], (bool, std::time::Instant)>>,
+    >,
 }
 
 /// Check if the request carries a valid API key.
@@ -1433,9 +1445,8 @@ pub async fn get_agents_by_owner(
 ///
 /// Uploads a media blob.
 /// Required Headers:
-///   X-0x01-Agent-Id:  Hex-encoded 32-byte agent identity (SATI mint in SATI
-///                     mode; Ed25519 verifying key in dev mode).  Used for
-///                     reputation / tier lookup.
+///   X-0x01-Agent-Id:  Hex-encoded 32-byte agent identity (Ed25519 pubkey).
+///                     Used for reputation / tier lookup.
 ///   X-0x01-Signer:   Hex-encoded 32-byte Ed25519 verifying key that produced
 ///                     X-0x01-Signature.  Optional: falls back to X-0x01-Agent-Id
 ///                     when absent (dev mode — agent_id == verifying key).
@@ -1470,8 +1481,7 @@ pub async fn post_blob(
         .get("X-0x01-Signature")
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    // X-0x01-Signer is the actual Ed25519 verifying key, which may differ from
-    // agent_id in SATI mode (where agent_id = SATI mint address).
+    // X-0x01-Signer is the Ed25519 verifying key. Falls back to agent_id in dev mode.
     let signer_hex = headers
         .get("X-0x01-Signer")
         .and_then(|h| h.to_str().ok())
@@ -1510,8 +1520,7 @@ pub async fn post_blob(
     }
 
     // 2. Verify Signature
-    // Use X-0x01-Signer for the crypto check; it equals X-0x01-Agent-Id in
-    // dev mode, but is the node's Ed25519 key in SATI/8004 mode.
+    // Use X-0x01-Signer for the crypto check; it equals X-0x01-Agent-Id in dev mode.
     // Try hex decoding first (legacy), then base58 (8004).
     let signer_bytes = if let Ok(b) = hex::decode(signer_hex) {
         b
@@ -1587,9 +1596,7 @@ pub async fn post_blob(
         .is_registered_b58(agent_id_hex)
         .await
         .unwrap_or(false);
-    let is_claimed = is_registered || state.store.is_agent_claimed(agent_id_hex);
-
-    let max_size = if is_claimed || score >= 100.0 {
+    let max_size = if is_registered || score >= 100.0 {
         10 * 1024 * 1024 // 10 MB
     } else if score >= 50.0 {
         2 * 1024 * 1024 // 2 MB
@@ -2568,6 +2575,146 @@ pub async fn mpp_protocol_fee_verify(
                 Json(json!({ "error": "payment verification error" })),
             )
                 .into_response()
+        }
+    }
+}
+
+// ============================================================================
+// Identity verification  (GET /identity/verify/:agent_id_hex)
+// ============================================================================
+
+/// Response body for GET /identity/verify/:agent_id_hex.
+#[derive(serde::Serialize)]
+pub struct IdentityVerifyResponse {
+    pub verified: bool,
+    pub source: String,
+}
+
+/// TTL for identity cache entries.
+const IDENTITY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3_600);
+
+/// GET /identity/verify/:agent_id_hex
+///
+/// Centralised identity gate for 0x01 nodes.  The node calls this instead of
+/// querying 8004 + SATI directly so all the registry logic lives in one place.
+///
+/// Verification order:
+///   1. dev_mode (--registry-8004-disabled on the aggregator) → verified, source="dev"
+///   2. exempt_agents whitelist → verified, source="exempt"
+///   3. In-memory cache (1 h TTL) → return cached result
+///   4. 8004 GraphQL indexer → verified, source="8004"
+///   5. Not registered → not verified, source="none"
+///   6. Network error → HTTP 503 (node should fail-open and back off)
+pub async fn verify_identity(
+    State(state): State<AppState>,
+    Path(agent_id_hex): Path<String>,
+) -> axum::response::Response {
+    // ── Validate input ────────────────────────────────────────────────────
+    if agent_id_hex.len() != 64 || !agent_id_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "agent_id_hex must be a 64-character hex string" })),
+        )
+            .into_response();
+    }
+    let bytes = match hex::decode(&agent_id_hex) {
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid hex" })),
+            )
+                .into_response()
+        }
+    };
+    let agent_id: [u8; 32] = match bytes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "agent_id must be 32 bytes" })),
+            )
+                .into_response()
+        }
+    };
+
+    // ── 1. Dev mode ───────────────────────────────────────────────────────
+    if state.identity_dev_mode {
+        return Json(IdentityVerifyResponse {
+            verified: true,
+            source: "dev".to_string(),
+        })
+        .into_response();
+    }
+
+    // ── 2. Exempt agents whitelist ────────────────────────────────────────
+    if state.exempt_agents.contains(&agent_id) {
+        return Json(IdentityVerifyResponse {
+            verified: true,
+            source: "exempt".to_string(),
+        })
+        .into_response();
+    }
+
+    // ── 3. In-memory cache ────────────────────────────────────────────────
+    {
+        let cache = state.identity_cache.lock().unwrap();
+        if let Some((verified, cached_at)) = cache.get(&agent_id) {
+            if cached_at.elapsed() < IDENTITY_CACHE_TTL {
+                return Json(IdentityVerifyResponse {
+                    verified: *verified,
+                    source: if *verified {
+                        "cache".to_string()
+                    } else {
+                        "cache:none".to_string()
+                    },
+                })
+                .into_response();
+            }
+        }
+    }
+
+    // ── 4. 8004 registry query ────────────────────────────────────────────
+    let agent_b58 = bs58::encode(&agent_id).into_string();
+    match state.registry.is_registered_b58(&agent_b58).await {
+        Ok(true) => {
+            state
+                .identity_cache
+                .lock()
+                .unwrap()
+                .insert(agent_id, (true, std::time::Instant::now()));
+            return Json(IdentityVerifyResponse {
+                verified: true,
+                source: "8004".to_string(),
+            })
+            .into_response();
+        }
+        Ok(false) => {
+            state
+                .identity_cache
+                .lock()
+                .unwrap()
+                .insert(agent_id, (false, std::time::Instant::now()));
+            return Json(IdentityVerifyResponse {
+                verified: false,
+                source: "none".to_string(),
+            })
+            .into_response();
+        }
+        Err(e) => {
+            // ── 7. Network error on 8004 — return 503 so the node fails open ──
+            tracing::warn!(
+                "identity/verify: 8004 check failed for {} — returning 503: {e}",
+                &agent_id_hex[..8]
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "identity check temporarily unavailable",
+                    "detail": e.to_string(),
+                })),
+            )
+                .into_response();
         }
     }
 }

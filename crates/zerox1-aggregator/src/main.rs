@@ -185,6 +185,19 @@ struct Config {
         default_value = "https://api.devnet.solana.com"
     )]
     protocol_fee_rpc_url: String,
+
+    // ── Identity verification ─────────────────────────────────────────────
+
+    /// Disable the 8004 + SATI identity gate.
+    /// When set, GET /identity/verify/:id always returns verified=true.
+    /// Use only in development / closed-network deployments.
+    #[arg(long, env = "ZX01_REGISTRY_8004_DISABLED", default_value_t = false)]
+    registry_8004_disabled: bool,
+
+    /// Comma-separated hex agent IDs that bypass identity checks.
+    /// Useful for genesis/genesis-relay nodes and internal tooling.
+    #[arg(long, env = "AGGREGATOR_EXEMPT_AGENTS", value_delimiter = ',')]
+    exempt_agents: Vec<String>,
 }
 
 #[tokio::main]
@@ -262,6 +275,31 @@ async fn main() -> anyhow::Result<()> {
     let protocol_fee_self_hosted_usdc = (config.protocol_fee_self_hosted_usdc * 1_000_000.0) as u64;
     let protocol_fee_rpc_url = config.protocol_fee_rpc_url.clone();
 
+    // ── Identity verification: build exempt set ──────────────────────────
+    let identity_dev_mode = config.registry_8004_disabled;
+    if identity_dev_mode {
+        tracing::warn!(
+            "Identity dev mode enabled (--registry-8004-disabled). \
+             GET /identity/verify/* always returns verified=true."
+        );
+    }
+    let mut exempt_set = std::collections::HashSet::<[u8; 32]>::new();
+    for hex_str in &config.exempt_agents {
+        match hex::decode(hex_str) {
+            Ok(bytes) => match <[u8; 32]>::try_from(bytes.as_slice()) {
+                Ok(arr) => {
+                    exempt_set.insert(arr);
+                    tracing::info!("Aggregator exempt agent: {}", hex_str);
+                }
+                Err(_) => tracing::warn!(
+                    "Exempt agent '{}' is not 32 bytes — skipped",
+                    hex_str
+                ),
+            },
+            Err(_) => tracing::warn!("Exempt agent '{}' is not valid hex — skipped", hex_str),
+        }
+    }
+
     let state = AppState {
         store,
         ingest_secret: config.ingest_secret,
@@ -292,6 +330,11 @@ async fn main() -> anyhow::Result<()> {
             std::collections::HashMap::new(),
         )),
         protocol_fee_rpc_url,
+        identity_dev_mode,
+        exempt_agents: std::sync::Arc::new(exempt_set),
+        identity_cache: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     };
 
     // Capital Flow indexer (GAP-02) moved to settlement/solana.
@@ -339,6 +382,12 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/mpp/protocol-fee/verify",
             post(api::mpp_protocol_fee_verify),
+        )
+        // Identity verification endpoint — called by nodes to check BEACON senders.
+        // Public: nodes have no API key; ingest_secret only applies to /ingest/*.
+        .route(
+            "/identity/verify/{agent_id_hex}",
+            get(api::verify_identity),
         );
     // DataBounty campaigns — only compiled when the data-bounty feature is enabled
     #[cfg(feature = "data-bounty")]

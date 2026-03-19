@@ -3,11 +3,19 @@
   "version": "0.1.0",
   "description": "0x01 core protocol — types, codec, and Ed25519 crypto. Zero I/O, runs everywhere.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/0x01-a2a/node.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://0x01.world",
+  "keywords": ["zerox1", "0x01", "agent", "mesh", "p2p", "sdk"],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "require": "./dist/index.js",
+      "default": "./dist/index.js",
       "types": "./dist/index.d.ts"
     }
   },

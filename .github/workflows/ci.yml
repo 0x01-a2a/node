@@ -18,6 +18,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout settlement repo (for [patch.crates-io])
+        uses: actions/checkout@v4
+        with:
+          repository: 0x01-a2a/settlement
+          path: _settlement
+
+      - name: Point patch.crates-io at local settlement
+        run: sed -i 's|path = "../settlement/|path = "_settlement/|g' Cargo.toml
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -61,10 +70,25 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install SDK dependencies
-        working-directory: sdk
-        run: npm ci
+      - name: Build @zerox1/core
+        working-directory: packages/core
+        run: npm ci && npm run build
 
-      - name: TypeScript typecheck
-        working-directory: sdk
+      - name: Typecheck @zerox1/core
+        working-directory: packages/core
+        run: npx tsc --noEmit
+
+      - name: Install @zerox1/client with local core
+        working-directory: packages/client
+        run: |
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.dependencies['@zerox1/core'] = 'file:../core';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+          "
+          npm install
+
+      - name: Typecheck @zerox1/client
+        working-directory: packages/client
         run: npx tsc --noEmit

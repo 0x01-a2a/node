@@ -21,7 +21,7 @@ fn is_valid_agent_id(id: &str) -> bool {
     if id.is_empty() || id.len() > 64 {
         return false;
     }
-    // Legacy: 64 hex chars (SATI mint)
+    // Hex-encoded Ed25519 pubkey (64 chars)
     if id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()) {
         return true;
     }
@@ -2208,14 +2208,6 @@ impl ReputationStore {
             .get(agent_id)
             .map(|r| r.average_score)
             .unwrap_or(0.0)
-    }
-
-    /// Return true if the agent has a claimed owner.
-    pub fn is_agent_claimed(&self, agent_id: &str) -> bool {
-        self.ownership_claimed
-            .lock()
-            .unwrap()
-            .contains_key(agent_id)
     }
 
     // ========================================================================

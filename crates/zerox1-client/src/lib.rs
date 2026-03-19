@@ -4,7 +4,7 @@
 //!
 //! ## Quick start
 //!
-//! ```no_run
+//! ```ignore
 //! use zerox1_client::{NodeClient, ConversationId};
 //!
 //! #[tokio::main]

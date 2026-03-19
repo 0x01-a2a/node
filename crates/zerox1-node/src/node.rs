@@ -37,7 +37,6 @@ use crate::{
     network::{Zx01Behaviour, Zx01BehaviourEvent},
     peer_state::PeerStateMap,
     push_notary,
-    registry_8004::Registry8004Client,
     reputation::ReputationTracker,
 };
 
@@ -65,7 +64,7 @@ const MAX_PENDING_BROADCASTS: usize = 20;
 /// Maximum number of distinct peers tracked in the rate-limit table.
 /// When full, expired entries are evicted; if still full the new peer is skipped.
 const MAX_RATE_LIMITER_PEERS: usize = 10_000;
-/// Maximum number of 8004 registry failure cache entries retained.
+/// Maximum number of identity-check failure cache entries retained.
 const MAX_REG8004_FAILURE_CACHE: usize = 50_000;
 
 // ============================================================================
@@ -109,6 +108,12 @@ pub struct Zx01Node {
     aggregator_url: Option<String>,
     /// Shared secret sent in Authorization header when pushing to the aggregator.
     aggregator_secret: Option<String>,
+    /// App webhook URL — every validated inbound envelope is POSTed here.
+    app_webhook_url: Option<String>,
+    /// Bearer token for the app webhook Authorization header.
+    app_webhook_secret: Option<String>,
+    /// Msg type filter for the app webhook. Empty = all types.
+    app_webhook_types: std::collections::HashSet<String>,
     /// Shared HTTP client for aggregator pushes — avoids per-push TCP setup.
     http_client: reqwest::Client,
     /// Per-peer message rate limiter: PeerId → (count_in_window, window_start).
@@ -126,10 +131,8 @@ pub struct Zx01Node {
     /// for each peer. Prevents flooding the aggregator with per-ping pushes.
     /// Only populated when --node-region is set.
     last_ping_push: HashMap<PeerId, std::time::Instant>,
-    /// 8004 Solana Agent Registry client.
-    #[allow(dead_code)]
-    registry8004: Registry8004Client,
-    /// Per-agent 8004 registry HTTP failure timestamps (1-hour backoff).
+    /// Per-agent identity-check failure timestamps (1-hour backoff).
+    /// Prevents hammering the aggregator when /identity/verify returns 503.
     reg8004_failures: HashMap<[u8; 32], std::time::Instant>,
     /// Agent IDs exempt from lease and registration checks.
     /// Shared with ApiState so the admin API can mutate it at runtime without restart.
@@ -160,14 +163,16 @@ impl Zx01Node {
         // Dev mode: 8004 registry gate disabled — all agents allowed through.
         let dev_mode = config.registry_8004_disabled;
         let http_client = reqwest::Client::new();
-        let registry8004 = Registry8004Client::new(
-            &config.registry_8004_url,
-            http_client.clone(),
-            config.registry_8004_min_tier,
-        );
         let usdc_mint = config.usdc_mint_pubkey().ok().flatten();
         let aggregator_url = validated_aggregator_url(config.aggregator_url.clone());
         let aggregator_secret = config.aggregator_secret.clone();
+        let app_webhook_url = config.app_webhook_url.clone();
+        let app_webhook_secret = config.app_webhook_secret.clone();
+        let app_webhook_types: std::collections::HashSet<String> = config
+            .app_webhook_types
+            .iter()
+            .map(|s| s.to_uppercase())
+            .collect();
         // ── Exempt agents: load persisted runtime mutations + merge env/CLI config ──
         let exempt_persist_path = config.log_dir.join("exempt_agents.json");
         let mut exempt_set = std::collections::HashSet::<[u8; 32]>::new();
@@ -358,12 +363,12 @@ impl Zx01Node {
         if dev_mode {
             tracing::warn!(
                 "Running in dev mode (--registry-8004-disabled). \
-                 All agents are allowed — registration gate inactive."
+                 Identity checks delegated to aggregator in dev mode — all agents allowed."
             );
         } else {
             tracing::info!(
-                "8004 Solana Agent Registry gate enabled ({}).",
-                config.registry_8004_url
+                "Identity verification delegated to aggregator at {}.",
+                config.aggregator_url.as_deref().unwrap_or("(no aggregator URL configured)")
             );
         }
 
@@ -371,6 +376,15 @@ impl Zx01Node {
             tracing::info!("Kora paymaster enabled — on-chain transactions use gasless USDC path.");
         } else {
             tracing::info!("No --kora-url set — on-chain transactions require SOL for gas.");
+        }
+
+        if let Some(ref url) = app_webhook_url {
+            if app_webhook_types.is_empty() {
+                tracing::info!("App webhook: {} (all msg types)", url);
+            } else {
+                let types: Vec<&str> = app_webhook_types.iter().map(|s| s.as_str()).collect();
+                tracing::info!("App webhook: {} (filter: {})", url, types.join(","));
+            }
         }
 
         Ok(Self {
@@ -394,13 +408,15 @@ impl Zx01Node {
             usdc_mint,
             aggregator_url,
             aggregator_secret,
+            app_webhook_url,
+            app_webhook_secret,
+            app_webhook_types,
             http_client,
             rate_limiter: std::collections::HashMap::new(),
             notary_pool: HashMap::new(),
             bootstrap_peers,
             pending_broadcasts: Vec::new(),
             last_ping_push: HashMap::new(),
-            registry8004,
             reg8004_failures: HashMap::new(),
             exempt_agents,
         })
@@ -715,36 +731,135 @@ impl Zx01Node {
     }
 
     // ========================================================================
-    // 8004 Solana Agent Registry
+    // Identity verification (delegated to aggregator)
     // ========================================================================
 
-    /// Query the 8004 registry for `agent_id`.
+    /// Check whether `agent_id` is verified, via the aggregator's
+    /// `/identity/verify/:hex` endpoint.
     ///
-    /// Their Ed25519 `agent_id` bytes == their Solana pubkey == their `owner`
-    /// field in the 8004 registry — no extra key material needed.
+    /// Logic:
+    ///   1. dev_mode → return true immediately (no network call)
+    ///   2. exempt_agents → return true immediately
+    ///   3. local failure cache (1 h) → return false (don't hammer aggregator)
+    ///   4. GET {aggregator_url}/identity/verify/{hex} (10 s timeout)
+    ///   5. HTTP 503 → insert failure, return true (fail-open)
+    ///   6. verified: true → clear failure, return true
+    ///   7. verified: false → insert failure, return false
+    ///   8. any other error → insert failure, return true (fail-open)
     #[allow(dead_code)]
-    async fn verify_8004_registration(&mut self, agent_id: [u8; 32]) {
-        match self.registry8004.is_registered(&agent_id).await {
-            Ok(true) => {
-                tracing::info!(
-                    "8004: agent {} verified",
-                    hex::encode(agent_id),
-                );
+    async fn check_identity(&mut self, agent_id: &[u8; 32]) -> bool {
+        // 1. Dev mode
+        if self.dev_mode {
+            return true;
+        }
+
+        // 2. Exempt agents
+        if let Ok(exempt) = self.exempt_agents.read() {
+            if exempt.contains(agent_id) {
+                return true;
             }
-            Ok(false) => {
-                tracing::debug!(
-                    "8004: agent {} not found in registry",
-                    hex::encode(agent_id),
+        }
+
+        // 3. Local failure cache
+        let backoff = std::time::Duration::from_secs(3_600);
+        if let Some(ts) = self.reg8004_failures.get(agent_id) {
+            if ts.elapsed() < backoff {
+                return false;
+            }
+        }
+
+        // 4. Aggregator call
+        let aggregator_url = match &self.aggregator_url {
+            Some(u) => u.clone(),
+            None => {
+                // No aggregator configured — fail open.
+                return true;
+            }
+        };
+        let hex = hex::encode(agent_id);
+        let url = format!("{aggregator_url}/identity/verify/{hex}");
+
+        let result = self
+            .http_client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await;
+
+        match result {
+            Ok(resp) if resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE => {
+                // 5. 503 — aggregator temporarily unavailable, fail open
+                tracing::warn!(
+                    "identity/verify: aggregator returned 503 for {} — failing open",
+                    &hex[..8]
                 );
+                self.reg8004_failures
+                    .insert(*agent_id, std::time::Instant::now());
+                true
+            }
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<serde_json::Value>().await {
+                    Ok(body) => {
+                        let verified = body
+                            .get("verified")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let source = body
+                            .get("source")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("unknown");
+                        if verified {
+                            // 6. Verified — clear any stale failure
+                            self.reg8004_failures.remove(agent_id);
+                            tracing::debug!(
+                                "identity/verify: {} verified (source={})",
+                                &hex[..8],
+                                source
+                            );
+                        } else {
+                            // 7. Not verified — cache the negative result
+                            self.reg8004_failures
+                                .insert(*agent_id, std::time::Instant::now());
+                            tracing::debug!(
+                                "identity/verify: {} NOT verified (source={})",
+                                &hex[..8],
+                                source
+                            );
+                        }
+                        verified
+                    }
+                    Err(e) => {
+                        // 8. JSON parse error — fail open
+                        tracing::warn!(
+                            "identity/verify: failed to parse response for {}: {e}",
+                            &hex[..8]
+                        );
+                        self.reg8004_failures
+                            .insert(*agent_id, std::time::Instant::now());
+                        true
+                    }
+                }
+            }
+            Ok(resp) => {
+                // 8. Unexpected HTTP status — fail open
+                tracing::warn!(
+                    "identity/verify: unexpected HTTP {} for {} — failing open",
+                    resp.status(),
+                    &hex[..8]
+                );
+                self.reg8004_failures
+                    .insert(*agent_id, std::time::Instant::now());
+                true
             }
             Err(e) => {
-                // Network / HTTP error — back off for 1 hour.
-                self.reg8004_failures
-                    .insert(agent_id, std::time::Instant::now());
+                // 8. Network error — fail open
                 tracing::warn!(
-                    "8004 check failed for {}: {e} (will retry in 1 h)",
-                    hex::encode(agent_id),
+                    "identity/verify: network error for {}: {e} — failing open",
+                    &hex[..8]
                 );
+                self.reg8004_failures
+                    .insert(*agent_id, std::time::Instant::now());
+                true
             }
         }
     }
@@ -1075,6 +1190,9 @@ impl Zx01Node {
         // Push to agent inbox.
         self.api.push_inbound(&env, self.current_slot);
 
+        // Forward to community app webhook (if configured).
+        self.push_to_app_webhook(&env);
+
         self.batch
             .record_message(env.msg_type, env.sender, self.current_slot);
 
@@ -1223,6 +1341,9 @@ impl Zx01Node {
 
         // Push to agent inbox.
         self.api.push_inbound(&env, self.current_slot);
+
+        // Forward to community app webhook (if configured).
+        self.push_to_app_webhook(&env);
 
         match env.msg_type {
             MsgType::Propose => {
@@ -1443,7 +1564,6 @@ impl Zx01Node {
                         outcome: fb.outcome,
                         role: fb.role,
                         slot: self.current_slot,
-                        sati_attestation_hash: [0u8; 32],
                     });
 
                     // Record bounty in portfolio if positive score
@@ -1973,7 +2093,7 @@ impl Zx01Node {
         self.batch = BatchAccumulator::new(new_epoch, self.current_slot);
         self.reputation.advance_epoch(new_epoch);
 
-        // Purge stale 8004 HTTP failure cache entries (TTL = 1 hour).
+        // Purge stale identity-check failure cache entries (TTL = 1 hour).
         let ttl = std::time::Duration::from_secs(3_600);
         self.reg8004_failures
             .retain(|_, ts| ts.elapsed() < ttl);
@@ -2066,6 +2186,57 @@ impl Zx01Node {
                 false
             }
         }
+    }
+
+    /// Forward a validated inbound envelope to the configured app webhook.
+    ///
+    /// Fires-and-forgets an HTTP POST with full envelope metadata. The app can
+    /// react however it likes and call POST /envelopes/send on the node API to
+    /// send back. 503/network errors are logged as warnings and ignored.
+    fn push_to_app_webhook(&self, env: &Envelope) {
+        let url = match &self.app_webhook_url {
+            Some(u) => u.clone(),
+            None => return,
+        };
+
+        // Apply type filter if configured.
+        if !self.app_webhook_types.is_empty() {
+            let type_str = format!("{:?}", env.msg_type).to_uppercase();
+            if !self.app_webhook_types.contains(&type_str) {
+                return;
+            }
+        }
+
+        let payload = serde_json::json!({
+            "msg_type":        format!("{:?}", env.msg_type),
+            "sender":          hex::encode(env.sender),
+            "recipient":       hex::encode(env.recipient),
+            "conversation_id": hex::encode(env.conversation_id),
+            "payload_b64":     base64::engine::general_purpose::STANDARD.encode(&env.payload),
+            "timestamp":       env.timestamp,
+            "slot":            env.block_ref,
+            "nonce":           env.nonce,
+        });
+
+        let client = self.http_client.clone();
+        let secret = self.app_webhook_secret.clone();
+        tokio::spawn(async move {
+            let mut req = client.post(&url).json(&payload);
+            if let Some(s) = secret {
+                req = req.header("Authorization", format!("Bearer {s}"));
+            }
+            match req.send().await {
+                Ok(resp) if !resp.status().is_success() => {
+                    tracing::warn!(
+                        "App webhook returned HTTP {} for {} envelope",
+                        resp.status(),
+                        payload["msg_type"].as_str().unwrap_or("?"),
+                    );
+                }
+                Err(e) => tracing::warn!("App webhook POST failed: {e}"),
+                _ => {}
+            }
+        });
     }
 
     fn push_to_aggregator(&self, payload: serde_json::Value) {

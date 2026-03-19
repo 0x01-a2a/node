@@ -224,12 +224,18 @@ pub async fn broadcast_transaction(
 /// `agents(where: { owner: $base58 })` against the public indexer API.
 ///
 /// No Solana RPC connection needed — just HTTP to the indexer.
+///
+/// NOTE: Identity verification has been moved to the aggregator
+/// (`GET /identity/verify/:hex`). This struct is retained for the
+/// `/registry/8004/register-*` API endpoints in node's api.rs.
+#[allow(dead_code)]
 pub struct Registry8004Client {
     pub url: String,
     client: reqwest::Client,
     min_tier: u8,
 }
 
+#[allow(dead_code)]
 impl Registry8004Client {
     pub fn new(url: &str, client: reqwest::Client, min_tier: u8) -> Self {
         Self {

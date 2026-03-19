@@ -272,6 +272,36 @@ pub struct Config {
     #[arg(long, env = "ZX01_LAUNCHLAB_SHARE_FEE_WALLET")]
     pub launchlab_share_fee_wallet: Option<String>,
 
+    // ── App Webhook ───────────────────────────────────────────────────────
+
+    /// HTTP(S) URL that receives a POST for every validated inbound envelope.
+    ///
+    /// Community apps use this to react to mesh events without modifying or
+    /// forking the node binary. The node POSTs a JSON body for every inbound
+    /// envelope (after signature verification). The app can then call
+    /// POST /envelopes/send on the node API to respond.
+    ///
+    /// Body shape:
+    ///   { "msg_type": "PROPOSE", "sender": "<hex>", "recipient": "<hex>",
+    ///     "conversation_id": "<hex>", "payload_b64": "<base64>",
+    ///     "timestamp": <u64>, "slot": <u64>, "nonce": <u64> }
+    ///
+    /// Example: "http://localhost:3001/hook"
+    #[arg(long, env = "ZX01_APP_WEBHOOK_URL")]
+    pub app_webhook_url: Option<String>,
+
+    /// Bearer token sent in the Authorization header on webhook POSTs.
+    /// Use this to verify the request came from the node.
+    #[arg(long, env = "ZX01_APP_WEBHOOK_SECRET")]
+    pub app_webhook_secret: Option<String>,
+
+    /// Comma-separated msg_type filter for the app webhook.
+    /// When set, only envelopes of the listed types trigger a POST.
+    /// When absent, all validated inbound envelopes trigger a POST.
+    /// Example: "PROPOSE,DELIVER,FEEDBACK"
+    #[arg(long, env = "ZX01_APP_WEBHOOK_TYPES", value_delimiter = ',')]
+    pub app_webhook_types: Vec<String>,
+
     /// Zeroclaw workspace directory. When set, enables POST /skill/write,
     /// POST /skill/install-url, POST /skill/remove, GET /skill/list — the
     /// skill management REST API used by the skill-manager built-in skill.

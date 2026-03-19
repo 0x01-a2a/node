@@ -41,5 +41,5 @@ reqwest    = { workspace = true }
 ed25519-dalek = "2.1"
 rand = "0.8"
 bs58 = "0.5"
-zerox1-settlement-celo = { path = "../../../settlement/celo/client", optional = true }
-zerox1-settlement-base = { path = "../../../settlement/base/client", optional = true }
+zerox1-settlement-celo = { version = "0.1.0", optional = true }
+zerox1-settlement-base = { version = "0.1.0", optional = true }

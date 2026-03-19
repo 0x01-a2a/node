@@ -400,6 +400,33 @@ pub struct Config {
     pub base_auto_register: bool,
 }
 
+impl Config {
+    /// Return the full bootstrap peer list: user-supplied + default fleet
+    /// (unless --no-default-bootstrap is set).
+    pub fn all_bootstrap_peers(&self) -> Vec<Multiaddr> {
+        let mut peers = self.bootstrap.clone();
+        if !self.no_default_bootstrap {
+            for addr_str in DEFAULT_BOOTSTRAP_PEERS {
+                match addr_str.parse::<Multiaddr>() {
+                    Ok(addr) => peers.push(addr),
+                    Err(e) => tracing::warn!("Invalid default bootstrap addr '{addr_str}': {e}"),
+                }
+            }
+        }
+        peers
+    }
+
+    /// Parse USDC mint as Pubkey, if provided.
+    pub fn usdc_mint_pubkey(&self) -> anyhow::Result<Option<Pubkey>> {
+        match &self.usdc_mint {
+            None => Ok(None),
+            Some(s) => Ok(Some(
+                Pubkey::from_str(s).map_err(|e| anyhow::anyhow!("invalid usdc_mint: {e}"))?,
+            )),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,30 +501,3 @@ mod tests {
     }
 }
 
-impl Config {
-    /// Return the full bootstrap peer list: user-supplied + default fleet
-    /// (unless --no-default-bootstrap is set).
-    pub fn all_bootstrap_peers(&self) -> Vec<Multiaddr> {
-        let mut peers = self.bootstrap.clone();
-        if !self.no_default_bootstrap {
-            for addr_str in DEFAULT_BOOTSTRAP_PEERS {
-                match addr_str.parse::<Multiaddr>() {
-                    Ok(addr) => peers.push(addr),
-                    Err(e) => tracing::warn!("Invalid default bootstrap addr '{addr_str}': {e}"),
-                }
-            }
-        }
-        peers
-    }
-
-    /// Parse USDC mint as Pubkey, if provided.
-    pub fn usdc_mint_pubkey(&self) -> anyhow::Result<Option<Pubkey>> {
-        match &self.usdc_mint {
-            None => Ok(None),
-            Some(s) => Ok(Some(
-                Pubkey::from_str(s).map_err(|e| anyhow::anyhow!("invalid usdc_mint: {e}"))?,
-            )),
-        }
-    }
-
-}

@@ -2359,6 +2359,16 @@ impl ReputationStore {
             .collect()
     }
 
+    /// Return the distinct set of claimed owner wallets.
+    pub fn list_owner_wallets(&self) -> Vec<String> {
+        let claimed = self.ownership_claimed.lock().unwrap();
+        let mut wallets: Vec<String> = claimed.values().map(|r| r.owner.clone()).collect();
+        drop(claimed);
+        wallets.sort();
+        wallets.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        wallets
+    }
+
     /// Return ownership status for an agent.
     pub fn get_owner(&self, agent_id: &str) -> OwnerStatus {
         if let Some(rec) = self.ownership_claimed.lock().unwrap().get(agent_id) {

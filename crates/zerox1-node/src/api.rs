@@ -321,6 +321,34 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+#[cfg(feature = "bags")]
+async fn report_bags_claim_to_aggregator(
+    state: &ApiState,
+    agent_id: String,
+    amount_sol: f64,
+    claimed_txs: u32,
+) {
+    let Some(base) = state.0.aggregator_url.clone() else {
+        return;
+    };
+    if amount_sol <= 0.0 {
+        return;
+    }
+    let url = format!("{}/league/bags-claim", base.trim_end_matches('/'));
+    let mut req = state.0.http_client.post(url).json(&serde_json::json!({
+        "agent_id": agent_id,
+        "amount_sol": amount_sol,
+        "claimed_txs": claimed_txs,
+        "timestamp": now_secs(),
+    }));
+    if let Some(secret) = state.0.aggregator_secret.clone() {
+        req = req.header("Authorization", format!("Bearer {secret}"));
+    }
+    if let Err(e) = req.send().await {
+        tracing::warn!("Bags claim report failed: {e}");
+    }
+}
+
 /// Active hosted-agent session — one per registered hosted agent.
 ///
 /// On registration the host generates a fresh ed25519 sub-keypair.
@@ -403,6 +431,12 @@ pub struct ApiInner {
     pub node_signing_key: Arc<SigningKey>,
     /// Shared HTTP client for registry RPC calls.
     pub(crate) http_client: reqwest::Client,
+    /// Optional aggregator URL for reporting Bags claim events.
+    #[cfg(feature = "bags")]
+    pub(crate) aggregator_url: Option<String>,
+    /// Shared secret for aggregator Bags claim pushes.
+    #[cfg(feature = "bags")]
+    pub(crate) aggregator_secret: Option<String>,
     /// Whether this node is pointed at mainnet-beta (affects 8004 program IDs).
     pub(crate) is_mainnet: bool,
     /// Whether trade_rpc_url points at mainnet-beta (affects USDC mint selection).
@@ -494,6 +528,8 @@ impl ApiState {
         #[cfg(feature = "trade")] jupiter_fee_account: Option<String>,
         #[cfg(feature = "trade")] launchlab_share_fee_wallet: Option<String>,
         http_client: reqwest::Client,
+        #[cfg(feature = "bags")] aggregator_url: Option<String>,
+        #[cfg(feature = "bags")] aggregator_secret: Option<String>,
         registry_8004_collection: Option<String>,
         node_signing_key: Arc<SigningKey>,
         kora: Option<KoraClient>,
@@ -563,6 +599,10 @@ impl ApiState {
             launchlab_share_fee_wallet,
             node_signing_key,
             http_client,
+            #[cfg(feature = "bags")]
+            aggregator_url,
+            #[cfg(feature = "bags")]
+            aggregator_secret,
             is_mainnet,
             is_trading_mainnet,
             kora,
@@ -3408,7 +3448,7 @@ async fn mpp_verify(
     Json(req): Json<MppVerifyRequest>,
 ) -> impl IntoResponse {
     // MPP must be enabled.
-    if state.0.mpp.as_ref().map_or(true, |m| !m.enabled) {
+    if state.0.mpp.as_ref().is_none_or(|m| !m.enabled) {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "mpp not enabled" })),
@@ -4535,6 +4575,22 @@ async fn bags_claim_handler(
     }
 
     if !txids.is_empty() {
+        // Give the claim transactions a short window to land, then estimate
+        // actual claimed fee from the wallet SOL delta.
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let post_sol_balance = crate::bags::get_sol_balance(
+            &state.0.trade_rpc_url,
+            &state.0.http_client,
+            &agent_pubkey,
+        )
+        .await
+        .unwrap_or(pre_sol_balance);
+        let claimed_amount_sol = if post_sol_balance > pre_sol_balance {
+            (post_sol_balance - pre_sol_balance) as f64 / 1_000_000_000.0
+        } else {
+            0.0
+        };
+
         state
             .record_portfolio_event(PortfolioEvent::BagsClaim {
                 token_mint: req.token_mint.clone(),
@@ -4542,6 +4598,14 @@ async fn bags_claim_handler(
                 timestamp: now_secs(),
             })
             .await;
+
+        report_bags_claim_to_aggregator(
+            &state,
+            hex::encode(state.0.node_signing_key.verifying_key().to_bytes()),
+            claimed_amount_sol,
+            txids.len() as u32,
+        )
+        .await;
 
         // In partner mode, Bags handles revenue attribution directly, so we
         // skip the legacy post-claim SOL skim.

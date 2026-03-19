@@ -335,6 +335,8 @@ async fn main() -> anyhow::Result<()> {
         identity_cache: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        skr_league_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        bags_claims: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // Capital Flow indexer (GAP-02) moved to settlement/solana.
@@ -367,6 +369,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/agents/by-owner/{wallet}", get(api::get_agents_by_owner))
         // High-level public stats for the landing page
         .route("/stats/network", get(api::get_network_stats))
+        .route("/league/current", get(api::get_skr_league))
+        .route("/league/bags-claim", post(api::post_bags_claim))
         .route("/agents", get(api::get_agents))
         // Mobile app read endpoints — must be public (mobile has no API key)
         .route("/agents/{agent_id}/profile", get(api::get_agent_profile))

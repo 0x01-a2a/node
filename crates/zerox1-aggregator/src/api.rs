@@ -3262,7 +3262,7 @@ const IDENTITY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3
 /// GET /identity/verify/:agent_id_hex
 ///
 /// Centralised identity gate for 0x01 nodes.  The node calls this instead of
-/// querying 8004 + SATI directly so all the registry logic lives in one place.
+/// querying 8004 directly so all the registry logic lives in one place.
 ///
 /// Verification order:
 ///   1. dev_mode (--registry-8004-disabled on the aggregator) → verified, source="dev"

@@ -27,9 +27,12 @@ pub fn treasury_pubkey() -> Pubkey {
 // ============================================================================
 
 pub const BEHAVIOR_LOG_PROGRAM_ID_STR: &str = "35DAMPQVu6wsmMEGv67URFAGgyauEYD73egd74uiX1sM";
+#[cfg(feature = "settlement")]
 pub const LEASE_PROGRAM_ID_STR: &str = "5P8uXqavnQFGXbHKE3tQDezh41D7ZutHsT2jY6gZ3C3x";
 pub const CHALLENGE_PROGRAM_ID_STR: &str = "7FoisCiS1gyUx7osQkCLk4A1zNKGq37yHpVhL2BFgk1Y";
+#[cfg(feature = "settlement")]
 pub const STAKE_LOCK_PROGRAM_ID_STR: &str = "Dvf1qPzzvW1BkSUogRMaAvxZpXrmeTqYutTCBKpzHB1A";
+#[cfg(feature = "settlement")]
 pub const ESCROW_PROGRAM_ID_STR: &str = "Es69yGQ7XnwhHjoj3TRv5oigUsQzCvbRYGXJTFcJrT9F";
 pub const AGENT_OWNERSHIP_PROGRAM_ID_STR: &str = "9GYVDTgc345bBa2k7j9a15aJSeKjzC75eyxdL3XCYVS9";
 
@@ -40,15 +43,18 @@ pub const ASSOCIATED_TOKEN_PROGRAM_ID_STR: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xW
 pub fn behavior_log_program_id() -> Pubkey {
     Pubkey::from_str(BEHAVIOR_LOG_PROGRAM_ID_STR).unwrap()
 }
+#[cfg(feature = "settlement")]
 pub fn lease_program_id() -> Pubkey {
     Pubkey::from_str(LEASE_PROGRAM_ID_STR).unwrap()
 }
 pub fn challenge_program_id() -> Pubkey {
     Pubkey::from_str(CHALLENGE_PROGRAM_ID_STR).unwrap()
 }
+#[cfg(feature = "settlement")]
 pub fn stake_lock_program_id() -> Pubkey {
     Pubkey::from_str(STAKE_LOCK_PROGRAM_ID_STR).unwrap()
 }
+#[cfg(feature = "settlement")]
 pub fn escrow_program_id() -> Pubkey {
     Pubkey::from_str(ESCROW_PROGRAM_ID_STR).unwrap()
 }

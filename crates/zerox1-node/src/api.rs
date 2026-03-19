@@ -73,6 +73,7 @@ use zerox1_protocol::{
 pub struct PeerSnapshot {
     pub agent_id: String,
     pub peer_id: Option<String>,
+    #[cfg(feature = "settlement")]
     pub lease_ok: Option<bool>,
     pub last_active_epoch: u64,
 }

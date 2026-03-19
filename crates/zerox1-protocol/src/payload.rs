@@ -63,17 +63,16 @@ impl NotarizeBidPayload {
 /// Protocol-defined payload for FEEDBACK (0x0B) messages.
 ///
 /// This payload is parsed by all nodes to update reputation state.
-/// It must also be submitted as a SATI FeedbackV1 attestation (blind model).
+/// This payload is recorded by the aggregator for reputation scoring.
 #[derive(Debug, Clone)]
 pub struct FeedbackPayload {
-    /// Which task (= SATI task_ref, same as conversation_id used throughout).
+    /// Which task (= conversation_id used throughout).
     pub conversation_id: [u8; 16],
-    /// Agent being rated (= SATI agent mint address, 32 bytes).
+    /// Agent being rated (32-byte Ed25519 agent_id).
     pub target_agent: [u8; 32],
     /// Score: -100 to +100.
     pub score: i8,
-    /// Outcome compatible with SATI FeedbackV1:
-    /// 0 = Negative, 1 = Neutral, 2 = Positive.
+    /// Outcome: 0 = Negative, 1 = Neutral, 2 = Positive.
     pub outcome: u8,
     /// True if this feedback flags a contested outcome.
     pub is_dispute: bool,

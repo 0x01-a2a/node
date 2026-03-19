@@ -28,6 +28,7 @@ pub struct PeerEntry {
     ///   None        = not yet checked
     ///   Some(true)  = active lease (paid_through_epoch >= current_epoch or in grace)
     ///   Some(false) = deactivated (lease expired beyond grace period)
+    #[cfg(feature = "settlement")]
     pub lease_status: Option<bool>,
     /// Last active epoch (for decay tracking).
     pub last_active_epoch: u64,
@@ -165,6 +166,7 @@ impl PeerStateMap {
     // ========================================================================
 
     /// Record the result of a lease status check.
+    #[cfg(feature = "settlement")]
     #[allow(dead_code)]
     pub fn set_lease_status(&mut self, agent_id: [u8; 32], active: bool) {
         self.entry(agent_id).lease_status = Some(active);
@@ -174,6 +176,7 @@ impl PeerStateMap {
     ///   `None`        — never checked
     ///   `Some(true)`  — active lease
     ///   `Some(false)` — deactivated
+    #[cfg(feature = "settlement")]
     pub fn lease_status(&self, agent_id: &[u8; 32]) -> Option<bool> {
         self.by_agent_id.get(agent_id)?.lease_status
     }

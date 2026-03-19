@@ -188,7 +188,7 @@ struct Config {
 
     // ── Identity verification ─────────────────────────────────────────────
 
-    /// Disable the 8004 + SATI identity gate.
+    /// Disable the 8004 identity gate.
     /// When set, GET /identity/verify/:id always returns verified=true.
     /// Use only in development / closed-network deployments.
     #[arg(long, env = "ZX01_REGISTRY_8004_DISABLED", default_value_t = false)]

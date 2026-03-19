@@ -185,7 +185,7 @@ impl Envelope {
     /// Validate all envelope invariants (doc 5, §5.5).
     ///
     /// `last_nonce`     — last seen nonce from this sender (0 if unknown)
-    /// `verifying_key`  — Ed25519 key for the sender (from SATI or local cache)
+    /// `verifying_key`  — Ed25519 key for the sender (from 8004 registry or local cache)
     /// `now_micros`     — current wall-clock time in microseconds
     pub fn validate(
         &self,
@@ -200,7 +200,7 @@ impl Envelope {
 
         // Rule 2: msg_type already validated on decode (MsgType::from_u16)
 
-        // Rule 3: sender registration is checked externally (SATI client)
+        // Rule 3: sender registration is checked externally (8004 registry)
         // before calling validate().
 
         // Rule 4: signature

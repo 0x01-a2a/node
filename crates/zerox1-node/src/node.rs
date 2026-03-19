@@ -513,10 +513,12 @@ impl Zx01Node {
         }
 
         // ── Auto-onboard: stake + lease ───────────────────────────────────────
+        #[cfg(feature = "settlement")]
         self.ensure_stake_and_lease().await;
 
         // ── Startup lease check ───────────────────────────────────────────────
         // Verify our own agent's lease before joining the mesh.
+        #[cfg(feature = "settlement")]
         self.check_own_lease().await?;
 
         // ── Geo self-registration ─────────────────────────────────────────────
@@ -676,17 +678,13 @@ impl Zx01Node {
 
     /// Ensure this agent has both a stake lock and an initialized lease.
     /// Called once at startup before check_own_lease().
-    ///
-    /// NOTE: On-chain stake/lease settlement has been moved to settlement/solana.
-    /// This is now a no-op; billing is handled by the aggregator account system.
+    #[cfg(feature = "settlement")]
     async fn ensure_stake_and_lease(&mut self) {
         tracing::debug!("On-chain stake/lease check skipped (settlement decoupled).");
     }
 
     /// Check this agent's own lease on startup.
-    ///
-    /// NOTE: On-chain lease verification has been moved to settlement/solana.
-    /// This is now a no-op; billing is handled by the aggregator account system.
+    #[cfg(feature = "settlement")]
     async fn check_own_lease(&mut self) -> anyhow::Result<()> {
         tracing::debug!("On-chain lease check skipped (settlement decoupled).");
         Ok(())
@@ -694,10 +692,10 @@ impl Zx01Node {
 
     /// Check if own lease needs renewal and pay if so.
     /// Called at each epoch boundary.
-    ///
-    /// NOTE: On-chain lease has been moved to settlement/solana. No-op.
+    #[cfg(feature = "settlement")]
     async fn maybe_renew_own_lease(&mut self) {}
 
+    #[cfg(feature = "settlement")]
     #[allow(dead_code)]
     async fn renew_own_lease(&mut self) {}
 
@@ -706,15 +704,21 @@ impl Zx01Node {
     // ========================================================================
 
     /// Query lease status for `agent_id` and cache in peer_states.
-    ///
-    /// NOTE: On-chain lease verification has been moved to settlement/solana.
-    /// All peers are treated as active; billing is handled by the aggregator.
+    #[cfg(feature = "settlement")]
     #[allow(dead_code)]
     async fn verify_peer_lease(&mut self, _agent_id: [u8; 32]) {
         // On-chain lease verification moved to settlement/solana. No-op.
     }
 
     /// Returns true if this agent's messages should pass the lease gate.
+    /// Without the settlement feature, all peers are always allowed.
+    #[cfg(not(feature = "settlement"))]
+    #[allow(dead_code)]
+    fn lease_gate_allows(&self, _agent_id: &[u8; 32]) -> bool {
+        true
+    }
+
+    #[cfg(feature = "settlement")]
     #[allow(dead_code)]
     fn lease_gate_allows(&self, _agent_id: &[u8; 32]) -> bool {
         true
@@ -1636,6 +1640,7 @@ impl Zx01Node {
             let snap = PeerSnapshot {
                 agent_id: hex::encode(env.sender),
                 peer_id: Some(source_peer.to_string()),
+                #[cfg(feature = "settlement")]
                 lease_ok: self.peer_states.lease_status(&env.sender),
                 last_active_epoch: self.peer_states.last_active_epoch(&env.sender),
             };
@@ -2115,6 +2120,7 @@ impl Zx01Node {
         }
 
         // Check own lease renewal at each epoch boundary.
+        #[cfg(feature = "settlement")]
         self.maybe_renew_own_lease().await;
     }
 

@@ -16,10 +16,10 @@ use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 
 use zerox1_protocol::{
     batch::{FeedbackEvent, TaskSelection, TypedBid, VerifierAssignment},
-    constants::{TOPIC_BROADCAST, TOPIC_NOTARY, TOPIC_REPUTATION},
+    constants::{TOPIC_BROADCAST, TOPIC_NAMED_PREFIX, TOPIC_NOTARY, TOPIC_REPUTATION},
     envelope::{Envelope, BROADCAST_RECIPIENT},
     message::MsgType,
-    payload::FeedbackPayload,
+    payload::{BroadcastPayload, FeedbackPayload},
 };
 
 use solana_sdk::pubkey::Pubkey;
@@ -101,6 +101,8 @@ pub struct Zx01Node {
     outbound_rx: tokio::sync::mpsc::Receiver<OutboundRequest>,
     /// Receives pre-signed envelopes from the hosted-agent API (POST /hosted/send).
     hosted_outbound_rx: tokio::sync::mpsc::Receiver<zerox1_protocol::envelope::Envelope>,
+    /// Receives gossipsub topic subscription requests from the API (/ws/topics).
+    sub_topic_rx: tokio::sync::mpsc::Receiver<String>,
 
     /// USDC mint pubkey — used for inactivity slash bounty payout.
     usdc_mint: Option<Pubkey>,
@@ -323,7 +325,7 @@ impl Zx01Node {
             None
         };
 
-        let (api, outbound_rx, hosted_outbound_rx) = ApiState::new(
+        let (api, outbound_rx, hosted_outbound_rx, sub_topic_rx) = ApiState::new(
             identity.agent_id,
             config.agent_name.clone(),
             config.api_secret.clone(),
@@ -409,6 +411,7 @@ impl Zx01Node {
             conversation_lru: VecDeque::new(),
             outbound_rx,
             hosted_outbound_rx,
+            sub_topic_rx,
             usdc_mint,
             aggregator_url,
             aggregator_secret,
@@ -641,6 +644,16 @@ impl Zx01Node {
                         }
                     } else if let Err(e) = self.publish_envelope(swarm, &env) {
                         tracing::warn!("Hosted outbound publish failed: {e}");
+                    }
+                }
+                Some(topic) = self.sub_topic_rx.recv() => {
+                    // Subscribe to a named gossipsub topic requested by a /ws/topics client.
+                    let full_topic = format!("{}{}", TOPIC_NAMED_PREFIX, topic);
+                    let ident_topic = libp2p::gossipsub::IdentTopic::new(&full_topic);
+                    match swarm.behaviour_mut().gossipsub.subscribe(&ident_topic) {
+                        Ok(true) => tracing::info!("Subscribed to named topic: {full_topic}"),
+                        Ok(false) => {} // already subscribed
+                        Err(e) => tracing::warn!("Failed to subscribe to {full_topic}: {e:?}"),
                     }
                 }
                 _ = beacon_timer.tick() => {
@@ -1223,6 +1236,15 @@ impl Zx01Node {
                 "conversation_id": hex::encode(env.conversation_id),
                 "slot":            self.current_slot,
             }));
+        } else if topic_str.starts_with(TOPIC_NAMED_PREFIX) {
+            // Named-topic BROADCAST (0x0E) — already pushed to /ws/topics via push_inbound.
+            if env.msg_type == MsgType::Broadcast {
+                tracing::debug!(
+                    "BROADCAST on topic {} from {}",
+                    topic_str,
+                    hex::encode(env.sender),
+                );
+            }
         } else if topic_str == TOPIC_BROADCAST {
             match env.msg_type {
                 MsgType::Advertise => {
@@ -1704,6 +1726,24 @@ impl Zx01Node {
         swarm: &mut Swarm<Zx01Behaviour>,
         env: &Envelope,
     ) -> anyhow::Result<()> {
+        let cbor = env.to_cbor()?;
+
+        if env.msg_type.is_named_broadcast() {
+            // Decode the BroadcastPayload to extract the user-defined topic.
+            let p = BroadcastPayload::decode(&env.payload)
+                .map_err(|e| anyhow::anyhow!("BROADCAST payload decode: {e:?}"))?;
+            let full_topic = format!("{}{}", TOPIC_NAMED_PREFIX, p.topic);
+            // Auto-subscribe to the topic so we receive our own and peers' publishes.
+            let ident = gossipsub::IdentTopic::new(&full_topic);
+            let _ = swarm.behaviour_mut().gossipsub.subscribe(&ident);
+            swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(ident, cbor)
+                .map_err(|e| anyhow::anyhow!("gossipsub publish: {e:?}"))?;
+            return Ok(());
+        }
+
         let topic_str = if env.msg_type.is_broadcast() {
             TOPIC_BROADCAST
         } else if env.msg_type.is_notary_pubsub() {
@@ -1714,7 +1754,6 @@ impl Zx01Node {
             anyhow::bail!("msg_type {:?} is not a pubsub type", env.msg_type);
         };
 
-        let cbor = env.to_cbor()?;
         swarm
             .behaviour_mut()
             .gossipsub
@@ -1778,6 +1817,7 @@ impl Zx01Node {
         let result = if req.msg_type.is_broadcast()
             || req.msg_type.is_notary_pubsub()
             || req.msg_type.is_reputation_pubsub()
+            || req.msg_type.is_named_broadcast()
         {
             match self.publish_envelope(swarm, &env) {
                 Ok(()) => Ok(()),

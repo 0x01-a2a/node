@@ -17,7 +17,8 @@ import type {
   InboundEnvelope,
   MsgType,
 } from './types.js'
-import { bytesToBase64, newConversationId } from './codec.js'
+import { bytesToBase64, newConversationId, encodeBroadcastPayload } from './codec.js'
+import type { BroadcastPayload } from './types.js'
 
 export interface NodeClientOptions {
   /** Node API base URL, e.g. "http://127.0.0.1:9090" or "https://my-node.com" */
@@ -57,6 +58,13 @@ export interface AcceptParams {
   conversationId: string
   amountMicro: bigint
   message?: string
+}
+
+export interface BroadcastParams {
+  /** Pre-encoded payload bytes. Use `encodeBroadcastPayload()` to build this. */
+  payload: BroadcastPayload
+  /** Optional conversation ID for grouping a series of chunks into one episode. */
+  conversationId?: string
 }
 
 export class NodeClient {
@@ -114,6 +122,34 @@ export class NodeClient {
       recipient: params.recipient ?? null,
       conversation_id: params.conversationId ?? newConversationId(),
       payload_b64: bytesToBase64(params.payload),
+    })
+  }
+
+  /**
+   * Publish a BROADCAST envelope on gossipsub — no recipient, delivered to all
+   * subscribers of the named topic.
+   *
+   * ```ts
+   * await client.broadcast({
+   *   payload: {
+   *     topic: 'radio:defi-daily',
+   *     title: 'Solana DeFi Digest — Ep 42',
+   *     tags: ['defi', 'solana', 'en'],
+   *     format: 'audio',
+   *     content_b64: '<base64 mp3 chunk>',
+   *     content_type: 'audio/mpeg',
+   *     chunk_index: 0,
+   *     duration_ms: 5000,
+   *     price_per_epoch_micro: 10_000, // 0.01 USDC
+   *   },
+   * })
+   * ```
+   */
+  async broadcast(params: BroadcastParams): Promise<SendResult> {
+    return this.send({
+      msgType: 'BROADCAST',
+      conversationId: params.conversationId,
+      payload: encodeBroadcastPayload(params.payload),
     })
   }
 

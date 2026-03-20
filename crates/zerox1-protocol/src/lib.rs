@@ -11,3 +11,4 @@ pub use constants::*;
 pub use envelope::Envelope;
 pub use error::ProtocolError;
 pub use message::MsgType;
+pub use payload::BroadcastPayload;

@@ -41,7 +41,7 @@
  * ```
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.PUBLIC_AGGREGATOR_URL = exports.base64ToHex = exports.hexToBase64 = exports.base64ToBytes = exports.bytesToBase64 = exports.newConversationId = exports.decodeJsonPayload = exports.encodeJsonPayload = exports.decodeDeliverPayload = exports.encodeFeedbackPayload = exports.decodeAcceptPayload = exports.encodeAcceptPayload = exports.decodeCounterPayload = exports.encodeCounterPayload = exports.decodeProposePayload = exports.encodeProposePayload = exports.AggregatorClient = exports.MultiFleet = exports.Conversation = exports.HostedAgent = exports.HostedFleet = exports.NodeClient = void 0;
+exports.PUBLIC_AGGREGATOR_URL = exports.decodeBroadcastPayload = exports.encodeBroadcastPayload = exports.base64ToHex = exports.hexToBase64 = exports.base64ToBytes = exports.bytesToBase64 = exports.newConversationId = exports.decodeJsonPayload = exports.encodeJsonPayload = exports.decodeDeliverPayload = exports.encodeFeedbackPayload = exports.decodeAcceptPayload = exports.encodeAcceptPayload = exports.decodeCounterPayload = exports.encodeCounterPayload = exports.decodeProposePayload = exports.encodeProposePayload = exports.AggregatorClient = exports.MultiFleet = exports.Conversation = exports.HostedAgent = exports.HostedFleet = exports.NodeClient = void 0;
 var NodeClient_js_1 = require("./NodeClient.js");
 Object.defineProperty(exports, "NodeClient", { enumerable: true, get: function () { return NodeClient_js_1.NodeClient; } });
 var HostedFleet_js_1 = require("./HostedFleet.js");
@@ -67,6 +67,8 @@ Object.defineProperty(exports, "bytesToBase64", { enumerable: true, get: functio
 Object.defineProperty(exports, "base64ToBytes", { enumerable: true, get: function () { return codec_js_1.base64ToBytes; } });
 Object.defineProperty(exports, "hexToBase64", { enumerable: true, get: function () { return codec_js_1.hexToBase64; } });
 Object.defineProperty(exports, "base64ToHex", { enumerable: true, get: function () { return codec_js_1.base64ToHex; } });
+Object.defineProperty(exports, "encodeBroadcastPayload", { enumerable: true, get: function () { return codec_js_1.encodeBroadcastPayload; } });
+Object.defineProperty(exports, "decodeBroadcastPayload", { enumerable: true, get: function () { return codec_js_1.decodeBroadcastPayload; } });
 /** Public aggregator URL. Override with your own or enterprise aggregator. */
 exports.PUBLIC_AGGREGATOR_URL = 'https://agg.0x01.world';
 //# sourceMappingURL=index.js.map

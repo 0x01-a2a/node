@@ -76,3 +76,6 @@ pub const CHALLENGE_REWARD_DENOMINATOR: u64 = 2; // 50%
 pub const TOPIC_BROADCAST: &str = "/0x01/v1/broadcast";
 pub const TOPIC_NOTARY: &str = "/0x01/v1/notary";
 pub const TOPIC_REPUTATION: &str = "/0x01/v1/reputation";
+/// Prefix for named gossipsub topics used by BROADCAST (0x0E) messages.
+/// Full topic = TOPIC_NAMED_PREFIX + user_topic (e.g. "/0x01/v1/t/radio:defi-daily")
+pub const TOPIC_NAMED_PREFIX: &str = "/0x01/v1/t/";

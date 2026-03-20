@@ -40,13 +40,13 @@
  * ```
  */
 export { NodeClient } from './NodeClient.js';
-export type { NodeClientOptions, SendParams, ProposeParams, CounterParams, AcceptParams } from './NodeClient.js';
+export type { NodeClientOptions, SendParams, ProposeParams, CounterParams, AcceptParams, BroadcastParams } from './NodeClient.js';
 export { HostedFleet, HostedAgent, Conversation, MultiFleet } from './HostedFleet.js';
 export type { HostedFleetOptions, HostedAgentOptions, HostedSendParams, TokenStore, MultiFleetOptions } from './HostedFleet.js';
 export { AggregatorClient } from './AggregatorClient.js';
 export type { AggregatorClientOptions } from './AggregatorClient.js';
-export { encodeProposePayload, decodeProposePayload, encodeCounterPayload, decodeCounterPayload, encodeAcceptPayload, decodeAcceptPayload, encodeFeedbackPayload, decodeDeliverPayload, encodeJsonPayload, decodeJsonPayload, newConversationId, bytesToBase64, base64ToBytes, hexToBase64, base64ToHex, } from './codec.js';
-export type { NegotiationMsgType, MsgType, InboundEnvelope, FeedbackPayload, NotarizeBidPayload, DeliverPayload, ProposePayload, CounterPayload, AcceptPayload, NodeIdentity, PeerSnapshot, ReputationSnapshot, SendResult, NegotiateResult, SkillMeta, ApiEvent, AgentRecord, AgentProfile, ActivityEvent, NetworkStats, HostingNode, AgentsParams, ActivityParams, } from './types.js';
+export { encodeProposePayload, decodeProposePayload, encodeCounterPayload, decodeCounterPayload, encodeAcceptPayload, decodeAcceptPayload, encodeFeedbackPayload, decodeDeliverPayload, encodeJsonPayload, decodeJsonPayload, newConversationId, bytesToBase64, base64ToBytes, hexToBase64, base64ToHex, encodeBroadcastPayload, decodeBroadcastPayload, } from './codec.js';
+export type { NegotiationMsgType, MsgType, InboundEnvelope, FeedbackPayload, NotarizeBidPayload, DeliverPayload, ProposePayload, CounterPayload, AcceptPayload, NodeIdentity, PeerSnapshot, ReputationSnapshot, SendResult, NegotiateResult, SkillMeta, ApiEvent, AgentRecord, AgentProfile, ActivityEvent, NetworkStats, HostingNode, AgentsParams, ActivityParams, BroadcastPayload, } from './types.js';
 /** Public aggregator URL. Override with your own or enterprise aggregator. */
 export declare const PUBLIC_AGGREGATOR_URL = "https://agg.0x01.world";
 //# sourceMappingURL=index.d.ts.map

@@ -41,7 +41,7 @@
  */
 
 export { NodeClient } from './NodeClient.js'
-export type { NodeClientOptions, SendParams, ProposeParams, CounterParams, AcceptParams } from './NodeClient.js'
+export type { NodeClientOptions, SendParams, ProposeParams, CounterParams, AcceptParams, BroadcastParams } from './NodeClient.js'
 
 export { HostedFleet, HostedAgent, Conversation, MultiFleet } from './HostedFleet.js'
 export type { HostedFleetOptions, HostedAgentOptions, HostedSendParams, TokenStore, MultiFleetOptions } from './HostedFleet.js'
@@ -65,6 +65,8 @@ export {
   base64ToBytes,
   hexToBase64,
   base64ToHex,
+  encodeBroadcastPayload,
+  decodeBroadcastPayload,
 } from './codec.js'
 
 export type {
@@ -91,6 +93,7 @@ export type {
   HostingNode,
   AgentsParams,
   ActivityParams,
+  BroadcastPayload,
 } from './types.js'
 
 /** Public aggregator URL. Override with your own or enterprise aggregator. */

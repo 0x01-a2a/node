@@ -30,6 +30,8 @@ pub enum MsgType {
     Dispute = 0x0C,
     /// Broadcast: "I'm alive" (heartbeat)
     Beacon = 0x0D,
+    /// Named-topic pubsub: publish content to a named gossipsub topic.
+    Broadcast = 0x0E,
 }
 
 impl MsgType {
@@ -48,6 +50,7 @@ impl MsgType {
             0x0B => Ok(Self::Feedback),
             0x0C => Ok(Self::Dispute),
             0x0D => Ok(Self::Beacon),
+            0x0E => Ok(Self::Broadcast),
             other => Err(ProtocolError::UnknownMsgType(other)),
         }
     }
@@ -71,14 +74,19 @@ impl MsgType {
         matches!(self, Self::Feedback)
     }
 
+    /// Returns true if this message type is a named-topic BROADCAST.
+    pub fn is_named_broadcast(self) -> bool {
+        matches!(self, Self::Broadcast)
+    }
+
     /// Returns true if this message type uses direct bilateral streams.
     pub fn is_bilateral(self) -> bool {
-        !self.is_broadcast() && !self.is_notary_pubsub() && !self.is_reputation_pubsub()
+        !self.is_broadcast() && !self.is_notary_pubsub() && !self.is_reputation_pubsub() && !self.is_named_broadcast()
     }
 
     /// Returns true if this message type has a protocol-defined (parseable) payload.
     pub fn has_protocol_payload(self) -> bool {
-        matches!(self, Self::Feedback | Self::NotarizeBid)
+        matches!(self, Self::Feedback | Self::NotarizeBid | Self::Broadcast)
     }
 }
 
@@ -98,6 +106,7 @@ impl std::fmt::Display for MsgType {
             Self::Feedback => "FEEDBACK",
             Self::Dispute => "DISPUTE",
             Self::Beacon => "BEACON",
+            Self::Broadcast => "BROADCAST",
         };
         write!(f, "{}", name)
     }

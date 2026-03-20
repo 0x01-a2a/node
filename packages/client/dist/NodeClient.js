@@ -59,6 +59,33 @@ class NodeClient {
             payload_b64: (0, codec_js_1.bytesToBase64)(params.payload),
         });
     }
+    /**
+     * Publish a BROADCAST envelope on gossipsub — no recipient, delivered to all
+     * subscribers of the named topic.
+     *
+     * ```ts
+     * await client.broadcast({
+     *   payload: {
+     *     topic: 'radio:defi-daily',
+     *     title: 'Solana DeFi Digest — Ep 42',
+     *     tags: ['defi', 'solana', 'en'],
+     *     format: 'audio',
+     *     content_b64: '<base64 mp3 chunk>',
+     *     content_type: 'audio/mpeg',
+     *     chunk_index: 0,
+     *     duration_ms: 5000,
+     *     price_per_epoch_micro: 10_000, // 0.01 USDC
+     *   },
+     * })
+     * ```
+     */
+    async broadcast(params) {
+        return this.send({
+            msgType: 'BROADCAST',
+            conversationId: params.conversationId,
+            payload: (0, codec_js_1.encodeBroadcastPayload)(params.payload),
+        });
+    }
     // ── Negotiate shortcuts ───────────────────────────────────────────────────
     async propose(params) {
         return this.post('/negotiate/propose', {

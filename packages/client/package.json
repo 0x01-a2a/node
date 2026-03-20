@@ -1,6 +1,6 @@
 {
   "name": "@zerox1/client",
-  "version": "0.1.0",
+  "version": "0.4.5",
   "description": "0x01 app-layer client SDK — talk to nodes and the aggregator without running an agent",
   "license": "MIT",
   "repository": {

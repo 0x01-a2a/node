@@ -62,7 +62,7 @@ use crate::{
 use zerox1_protocol::{
     envelope::{Envelope, BROADCAST_RECIPIENT},
     message::MsgType,
-    payload::{FeedbackPayload, NotarizeBidPayload},
+    payload::{BroadcastPayload, FeedbackPayload, NotarizeBidPayload},
 };
 
 // ============================================================================
@@ -382,6 +382,15 @@ pub struct HostedInboxQuery {
     pub token: Option<String>,
 }
 
+/// Query parameters for GET /ws/topics.
+#[derive(Deserialize)]
+pub struct BroadcastTopicQuery {
+    /// Named topic to subscribe to (e.g. "radio:defi-daily").
+    pub topic: String,
+    /// Optional token for token-based auth fallback.
+    pub token: Option<String>,
+}
+
 // ============================================================================
 // Shared API state
 // ============================================================================
@@ -405,6 +414,12 @@ pub struct ApiInner {
     /// Read-only bearer tokens — grants access to GET/WS visualization endpoints
     /// but NOT to mutating endpoints like /envelopes/send.
     api_read_keys: Vec<String>,
+
+    // Named-topic BROADCAST channels
+    /// Fan-out channel for inbound BROADCAST (0x0E) envelopes.
+    named_broadcast_tx: broadcast::Sender<InboundEnvelope>,
+    /// Sends gossipsub topic subscription requests to the node loop.
+    sub_topic_tx: mpsc::Sender<String>,
 
     // Hosted-agent state
     /// token (hex-32) → HostedSession
@@ -513,8 +528,8 @@ impl ApiState {
     }
     /// Create a new ApiState.
     ///
-    /// Returns `(state, outbound_rx, hosted_outbound_rx)`. The caller (node)
-    /// must hold onto both receivers and drive them in the main event loop.
+    /// Returns `(state, outbound_rx, hosted_outbound_rx, sub_topic_rx)`. The caller (node)
+    /// must hold onto all receivers and drive them in the main event loop.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         self_agent: [u8; 32],
@@ -544,6 +559,7 @@ impl ApiState {
         Self,
         mpsc::Receiver<OutboundRequest>,
         mpsc::Receiver<Envelope>,
+        mpsc::Receiver<String>,
     ) {
         let is_mainnet = !rpc_url.contains("devnet")
             && !rpc_url.contains("testnet")
@@ -555,8 +571,10 @@ impl ApiState {
             && !trade_rpc_url.contains("127.0.0.1");
         let (event_tx, _) = broadcast::channel(512);
         let (inbox_tx, _) = broadcast::channel(256);
+        let (named_broadcast_tx, _) = broadcast::channel(256);
         let (outbound_tx, outbound_rx) = mpsc::channel(64);
         let (hosted_outbound_tx, hosted_outbound_rx) = mpsc::channel(64);
+        let (sub_topic_tx, sub_topic_rx) = mpsc::channel(64);
 
         let state = Self(Arc::new(ApiInner {
             peers: RwLock::new(HashMap::new()),
@@ -569,6 +587,8 @@ impl ApiState {
             inbox_tx,
             api_secret,
             api_read_keys,
+            named_broadcast_tx,
+            sub_topic_tx,
             hosted_sessions: Arc::new(RwLock::new(HashMap::new())),
             hosting_fee_bps,
             hosted_outbound_tx,
@@ -652,7 +672,7 @@ impl ApiState {
             });
         }
 
-        (state, outbound_rx, hosted_outbound_rx)
+        (state, outbound_rx, hosted_outbound_rx, sub_topic_rx)
     }
 
     pub async fn load_portfolio_history(&self, path: PathBuf) -> anyhow::Result<()> {
@@ -765,7 +785,10 @@ impl ApiState {
             notarize_bid,
         };
 
-        let _ = self.0.inbox_tx.send(inbound);
+        let _ = self.0.inbox_tx.send(inbound.clone());
+        if env.msg_type == zerox1_protocol::message::MsgType::Broadcast {
+            let _ = self.0.named_broadcast_tx.send(inbound);
+        }
     }
 
     /// Queue an outbound envelope request to the node loop.
@@ -816,6 +839,8 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
         .route("/hosted/negotiate/counter", post(hosted_negotiate_counter))
         .route("/hosted/negotiate/accept", post(hosted_negotiate_accept))
         .route("/ws/hosted/inbox", get(ws_hosted_inbox_handler))
+        // Named-topic BROADCAST subscriptions
+        .route("/ws/topics", get(ws_topics_handler))
         // 8004 Solana Agent Registry helpers
         .route("/registry/8004/info", get(registry_8004_info))
         .route(
@@ -1075,6 +1100,7 @@ async fn send_envelope(
     let recipient: [u8; 32] = if msg_type.is_broadcast()
         || msg_type.is_notary_pubsub()
         || msg_type.is_reputation_pubsub()
+        || msg_type.is_named_broadcast()
     {
         BROADCAST_RECIPIENT
     } else {
@@ -1229,6 +1255,83 @@ async fn ws_inbox_task(mut socket: WebSocket, state: ApiState) {
                 }
                 Err(e) => tracing::warn!("WS inbox serialize error: {e}"),
             },
+            Err(broadcast::error::RecvError::Closed) => break,
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+        }
+    }
+}
+
+// ============================================================================
+// Named-topic BROADCAST subscriber — GET /ws/topics?topic=<name>
+// ============================================================================
+
+/// Subscribe to inbound BROADCAST (0x0E) envelopes on a named topic.
+///
+/// The node automatically subscribes to the gossipsub topic on first connection.
+/// Subsequent connections share the same subscription.
+async fn ws_topics_handler(
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    Query(q): Query<BroadcastTopicQuery>,
+    State(state): State<ApiState>,
+) -> impl IntoResponse {
+    // Build params map for auth helper.
+    let mut params = HashMap::new();
+    if let Some(ref t) = q.token {
+        params.insert("token".to_string(), t.clone());
+    }
+    if let Some(resp) = require_read_or_master_ws(&state, &headers, &params) {
+        return resp;
+    }
+
+    // Validate topic: non-empty, no path separators, reasonable length.
+    let topic = q.topic.trim().to_string();
+    if topic.is_empty() || topic.len() > 128 || topic.contains('/') || topic.contains("..") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid topic" })),
+        )
+            .into_response();
+    }
+
+    // Request the node loop to subscribe to this gossipsub topic (best-effort).
+    if let Err(e) = state.0.sub_topic_tx.try_send(topic.clone()) {
+        tracing::warn!("sub_topic_tx full, subscription request for {:?} dropped: {e}", topic);
+    }
+
+    ws.on_upgrade(move |socket| ws_topics_task(socket, state, topic))
+        .into_response()
+}
+
+async fn ws_topics_task(mut socket: WebSocket, state: ApiState, topic: String) {
+    let mut rx = state.0.named_broadcast_tx.subscribe();
+    loop {
+        match rx.recv().await {
+            Ok(env) => {
+                // Filter by topic: decode the BroadcastPayload to extract the topic field.
+                let payload_bytes = match B64.decode(&env.payload_b64) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                let broadcast_topic = match BroadcastPayload::decode(&payload_bytes) {
+                    Ok(p) => p.topic,
+                    Err(e) => {
+                        tracing::debug!("ws_topics: BroadcastPayload decode failed: {e:?}");
+                        continue;
+                    }
+                };
+                if broadcast_topic != topic {
+                    continue;
+                }
+                match serde_json::to_string(&env) {
+                    Ok(json) => {
+                        if socket.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => tracing::warn!("WS topics serialize error: {e}"),
+                }
+            }
             Err(broadcast::error::RecvError::Closed) => break,
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
         }
@@ -1675,6 +1778,7 @@ async fn hosted_send(
     let recipient: [u8; 32] = if msg_type.is_broadcast()
         || msg_type.is_notary_pubsub()
         || msg_type.is_reputation_pubsub()
+        || msg_type.is_named_broadcast()
     {
         BROADCAST_RECIPIENT
     } else {
@@ -2261,6 +2365,7 @@ fn parse_msg_type(s: &str) -> Option<MsgType> {
         "VERDICT" => Some(MsgType::Verdict),
         "FEEDBACK" => Some(MsgType::Feedback),
         "DISPUTE" => Some(MsgType::Dispute),
+        "BROADCAST" => Some(MsgType::Broadcast),
         _ => None,
     }
 }

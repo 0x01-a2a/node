@@ -165,6 +165,153 @@ impl FeedbackPayload {
     }
 }
 
+// ============================================================================
+// BROADCAST payload (doc 5, §5.5 — named-topic pubsub, v0.4.5)
+// ============================================================================
+
+/// Protocol-defined payload for BROADCAST (0x0E) messages.
+///
+/// Published to the named gossipsub topic `/0x01/v1/t/{topic}`.
+/// `content` is optional — senders may omit it for metadata-only frames.
+#[derive(Debug, Clone)]
+pub struct BroadcastPayload {
+    /// User-defined topic name (e.g. "radio:defi-daily", "data:sol-price").
+    pub topic: String,
+    /// Human-readable title for the content.
+    pub title: String,
+    /// Searchable tags.
+    pub tags: Vec<String>,
+    /// Content format: "audio" | "text" | "data".
+    pub format: String,
+    /// Raw content bytes (optional — omit for metadata-only frames).
+    pub content: Option<Vec<u8>>,
+    /// MIME type of `content` (e.g. "audio/mpeg", "application/json").
+    pub content_type: Option<String>,
+    /// Zero-based index of this chunk within the stream.
+    pub chunk_index: Option<u32>,
+    /// Total number of chunks (if known at publish time).
+    pub total_chunks: Option<u32>,
+    /// Duration of audio/video content in milliseconds.
+    pub duration_ms: Option<u32>,
+    /// Subscription price in micro-USDC per epoch (0 = free).
+    pub price_per_epoch_micro: Option<u64>,
+    /// Epoch counter for the stream (increments per publish cycle).
+    pub epoch: Option<u64>,
+}
+
+impl BroadcastPayload {
+    pub fn encode(&self) -> Vec<u8> {
+        let value = Value::Array(vec![
+            Value::Text(self.topic.clone()),
+            Value::Text(self.title.clone()),
+            Value::Array(self.tags.iter().map(|t| Value::Text(t.clone())).collect()),
+            Value::Text(self.format.clone()),
+            match &self.content {
+                Some(b) => Value::Bytes(b.clone()),
+                None => Value::Null,
+            },
+            match &self.content_type {
+                Some(s) => Value::Text(s.clone()),
+                None => Value::Null,
+            },
+            match self.chunk_index {
+                Some(n) => Value::Integer((n as i64).into()),
+                None => Value::Null,
+            },
+            match self.total_chunks {
+                Some(n) => Value::Integer((n as i64).into()),
+                None => Value::Null,
+            },
+            match self.duration_ms {
+                Some(n) => Value::Integer((n as i64).into()),
+                None => Value::Null,
+            },
+            match self.price_per_epoch_micro {
+                Some(n) => Value::Integer(n.into()),
+                None => Value::Null,
+            },
+            match self.epoch {
+                Some(n) => Value::Integer(n.into()),
+                None => Value::Null,
+            },
+        ]);
+        let mut buf = Vec::new();
+        ciborium::into_writer(&value, &mut buf)
+            .unwrap_or_else(|_| unreachable!("CBOR encode to Vec<u8> is infallible"));
+        buf
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        let value: Value =
+            ciborium::from_reader(bytes).map_err(|e| ProtocolError::PayloadParseError {
+                msg_type: 0x0E,
+                reason: e.to_string(),
+            })?;
+
+        let arr = match value {
+            Value::Array(a) if a.len() == 11 => a,
+            Value::Array(a) => {
+                return Err(ProtocolError::PayloadParseError {
+                    msg_type: 0x0E,
+                    reason: format!("expected 11 fields, got {}", a.len()),
+                })
+            }
+            _ => {
+                return Err(ProtocolError::PayloadParseError {
+                    msg_type: 0x0E,
+                    reason: "expected CBOR array".into(),
+                })
+            }
+        };
+
+        let topic = text_from_value(&arr[0], 0x0E)?;
+        let title = text_from_value(&arr[1], 0x0E)?;
+        let tags = text_array_from_value(&arr[2], 0x0E)?;
+        let format = text_from_value(&arr[3], 0x0E)?;
+
+        // Enforce field length limits to prevent memory exhaustion.
+        if topic.len() > 128 {
+            return Err(ProtocolError::PayloadParseError {
+                msg_type: 0x0E,
+                reason: format!("topic too long: {} bytes (max 128)", topic.len()),
+            });
+        }
+        if title.len() > 256 {
+            return Err(ProtocolError::PayloadParseError {
+                msg_type: 0x0E,
+                reason: format!("title too long: {} bytes (max 256)", title.len()),
+            });
+        }
+        if tags.len() > 32 {
+            return Err(ProtocolError::PayloadParseError {
+                msg_type: 0x0E,
+                reason: format!("too many tags: {} (max 32)", tags.len()),
+            });
+        }
+        let content = optional_bytes_from_value(&arr[4], 0x0E)?;
+        let content_type = optional_text_from_value(&arr[5], 0x0E)?;
+        let chunk_index = optional_u32_from_value(&arr[6], 0x0E)?;
+        let total_chunks = optional_u32_from_value(&arr[7], 0x0E)?;
+        let duration_ms = optional_u32_from_value(&arr[8], 0x0E)?;
+        let price_per_epoch_micro = optional_u64_from_value(&arr[9], 0x0E)?;
+        let epoch = optional_u64_from_value(&arr[10], 0x0E)?;
+
+        Ok(Self {
+            topic,
+            title,
+            tags,
+            format,
+            content,
+            content_type,
+            chunk_index,
+            total_chunks,
+            duration_ms,
+            price_per_epoch_micro,
+            epoch,
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -235,6 +382,87 @@ fn bytes32_from_value(v: &Value, msg_type: u16) -> Result<[u8; 32], ProtocolErro
         msg_type,
         reason: "expected 32-byte field".into(),
     })
+}
+
+fn text_from_value(v: &Value, msg_type: u16) -> Result<String, ProtocolError> {
+    match v {
+        Value::Text(s) => Ok(s.clone()),
+        _ => Err(ProtocolError::PayloadParseError {
+            msg_type,
+            reason: "expected text".into(),
+        }),
+    }
+}
+
+fn text_array_from_value(v: &Value, msg_type: u16) -> Result<Vec<String>, ProtocolError> {
+    match v {
+        Value::Array(arr) => arr
+            .iter()
+            .map(|item| text_from_value(item, msg_type))
+            .collect(),
+        _ => Err(ProtocolError::PayloadParseError {
+            msg_type,
+            reason: "expected array of text".into(),
+        }),
+    }
+}
+
+fn optional_bytes_from_value(v: &Value, msg_type: u16) -> Result<Option<Vec<u8>>, ProtocolError> {
+    match v {
+        Value::Null => Ok(None),
+        Value::Bytes(b) => Ok(Some(b.clone())),
+        _ => Err(ProtocolError::PayloadParseError {
+            msg_type,
+            reason: "expected bytes or null".into(),
+        }),
+    }
+}
+
+fn optional_text_from_value(v: &Value, msg_type: u16) -> Result<Option<String>, ProtocolError> {
+    match v {
+        Value::Null => Ok(None),
+        Value::Text(s) => Ok(Some(s.clone())),
+        _ => Err(ProtocolError::PayloadParseError {
+            msg_type,
+            reason: "expected text or null".into(),
+        }),
+    }
+}
+
+fn optional_u32_from_value(v: &Value, msg_type: u16) -> Result<Option<u32>, ProtocolError> {
+    match v {
+        Value::Null => Ok(None),
+        Value::Integer(i) => {
+            let n: i128 = (*i).into();
+            let val = n.try_into().map_err(|_| ProtocolError::PayloadParseError {
+                msg_type,
+                reason: "u32 overflow".into(),
+            })?;
+            Ok(Some(val))
+        }
+        _ => Err(ProtocolError::PayloadParseError {
+            msg_type,
+            reason: "expected integer or null".into(),
+        }),
+    }
+}
+
+fn optional_u64_from_value(v: &Value, msg_type: u16) -> Result<Option<u64>, ProtocolError> {
+    match v {
+        Value::Null => Ok(None),
+        Value::Integer(i) => {
+            let n: i128 = (*i).into();
+            let val = n.try_into().map_err(|_| ProtocolError::PayloadParseError {
+                msg_type,
+                reason: "u64 overflow".into(),
+            })?;
+            Ok(Some(val))
+        }
+        _ => Err(ProtocolError::PayloadParseError {
+            msg_type,
+            reason: "expected integer or null".into(),
+        }),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -308,5 +536,95 @@ mod tests {
     #[test]
     fn notarize_bid_too_short() {
         assert!(NotarizeBidPayload::decode(&[0x00u8; 16]).is_err());
+    }
+
+    #[test]
+    fn broadcast_payload_round_trip() {
+        let p = BroadcastPayload {
+            topic: "radio:defi-daily".into(),
+            title: "Solana DeFi Digest — Ep 42".into(),
+            tags: vec!["defi".into(), "solana".into(), "en".into()],
+            format: "audio".into(),
+            content: Some(b"mp3-bytes-here".to_vec()),
+            content_type: Some("audio/mpeg".into()),
+            chunk_index: Some(0),
+            total_chunks: Some(10),
+            duration_ms: Some(5000),
+            price_per_epoch_micro: Some(10_000),
+            epoch: Some(1),
+        };
+        let encoded = p.encode();
+        let decoded = BroadcastPayload::decode(&encoded).unwrap();
+
+        assert_eq!(decoded.topic, p.topic);
+        assert_eq!(decoded.title, p.title);
+        assert_eq!(decoded.tags, p.tags);
+        assert_eq!(decoded.format, p.format);
+        assert_eq!(decoded.content, p.content);
+        assert_eq!(decoded.content_type, p.content_type);
+        assert_eq!(decoded.chunk_index, p.chunk_index);
+        assert_eq!(decoded.total_chunks, p.total_chunks);
+        assert_eq!(decoded.duration_ms, p.duration_ms);
+        assert_eq!(decoded.price_per_epoch_micro, p.price_per_epoch_micro);
+        assert_eq!(decoded.epoch, p.epoch);
+    }
+
+    #[test]
+    fn broadcast_payload_rejects_oversized_fields() {
+        // topic > 128 chars should fail
+        let p = BroadcastPayload {
+            topic: "a".repeat(129),
+            title: "t".into(),
+            tags: vec![],
+            format: "data".into(),
+            content: None,
+            content_type: None,
+            chunk_index: None,
+            total_chunks: None,
+            duration_ms: None,
+            price_per_epoch_micro: None,
+            epoch: None,
+        };
+        let encoded = p.encode();
+        assert!(BroadcastPayload::decode(&encoded).is_err());
+
+        // tags > 32 items should fail
+        let p2 = BroadcastPayload {
+            topic: "ok".into(),
+            title: "t".into(),
+            tags: (0..33).map(|i| format!("tag{i}")).collect(),
+            format: "data".into(),
+            content: None,
+            content_type: None,
+            chunk_index: None,
+            total_chunks: None,
+            duration_ms: None,
+            price_per_epoch_micro: None,
+            epoch: None,
+        };
+        let encoded2 = p2.encode();
+        assert!(BroadcastPayload::decode(&encoded2).is_err());
+    }
+
+    #[test]
+    fn broadcast_payload_nullable_fields() {
+        let p = BroadcastPayload {
+            topic: "data:sol-price".into(),
+            title: "SOL/USD".into(),
+            tags: vec![],
+            format: "data".into(),
+            content: None,
+            content_type: None,
+            chunk_index: None,
+            total_chunks: None,
+            duration_ms: None,
+            price_per_epoch_micro: None,
+            epoch: None,
+        };
+        let encoded = p.encode();
+        let decoded = BroadcastPayload::decode(&encoded).unwrap();
+        assert_eq!(decoded.topic, p.topic);
+        assert!(decoded.content.is_none());
+        assert!(decoded.epoch.is_none());
     }
 }

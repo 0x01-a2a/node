@@ -250,6 +250,58 @@ pub struct AgentProfile {
     pub last_seen: Option<u64>,
 }
 
+/// Inbound BROADCAST envelope forwarded by a zerox1-node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BroadcastIngestEvent {
+    pub sender: String,
+    pub conversation_id: String,
+    pub topic: String,
+    pub topic_slug: String,
+    pub title: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default = "default_format")]
+    pub format: String,
+    #[serde(default)]
+    pub content_url: Option<String>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    pub chunk_index: Option<u32>,
+    pub total_chunks: Option<u32>,
+    pub duration_ms: Option<u32>,
+    pub price_per_epoch_micro: Option<u64>,
+    pub epoch: Option<u64>,
+    pub slot: u64,
+}
+
+fn default_format() -> String {
+    "text".to_string()
+}
+
+/// Full broadcast record returned by GET /broadcasts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BroadcastRecord {
+    pub id: i64,
+    pub ts: i64,
+    pub sender: String,
+    pub conversation_id: String,
+    pub topic: String,
+    pub topic_slug: String,
+    pub title: String,
+    pub tags: Vec<String>,
+    pub format: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    pub chunk_index: Option<i64>,
+    pub total_chunks: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub price_per_epoch_micro: Option<i64>,
+    pub epoch: Option<i64>,
+    pub slot: Option<i64>,
+}
+
 /// Activity event broadcast to WebSocket clients and stored in activity_log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActivityEvent {
@@ -268,6 +320,8 @@ pub struct ActivityEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "msg_type")]
 pub enum IngestEvent {
+    #[serde(rename = "BROADCAST")]
+    Broadcast(BroadcastIngestEvent),
     #[serde(rename = "FEEDBACK")]
     Feedback(FeedbackEvent),
     #[serde(rename = "VERDICT")]
@@ -1010,6 +1064,34 @@ CREATE TABLE IF NOT EXISTS agent_protocol_payments (
     last_paid INTEGER NOT NULL,
     kind      TEXT NOT NULL DEFAULT 'hosted'
 );
+",
+    // v14: Mesh broadcast log — named-topic BROADCAST envelopes forwarded by nodes
+    "
+CREATE TABLE IF NOT EXISTS broadcast_log (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                    INTEGER NOT NULL,
+    sender                TEXT    NOT NULL,
+    conversation_id       TEXT    NOT NULL,
+    topic                 TEXT    NOT NULL,
+    topic_slug            TEXT    NOT NULL,
+    title                 TEXT    NOT NULL,
+    tags                  TEXT    NOT NULL DEFAULT '[]',
+    format                TEXT    NOT NULL DEFAULT 'text',
+    chunk_index           INTEGER,
+    total_chunks          INTEGER,
+    duration_ms           INTEGER,
+    price_per_epoch_micro INTEGER,
+    epoch                 INTEGER,
+    slot                  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_broadcast_log_ts    ON broadcast_log(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_broadcast_log_topic ON broadcast_log(topic_slug);
+CREATE INDEX IF NOT EXISTS idx_broadcast_log_sender ON broadcast_log(sender);
+",
+    // v15: Add content_url and content_type to broadcast_log
+    "
+ALTER TABLE broadcast_log ADD COLUMN content_url  TEXT;
+ALTER TABLE broadcast_log ADD COLUMN content_type TEXT;
 ",
 ];
 
@@ -2867,6 +2949,88 @@ impl ReputationStore {
                 }
                 None
             }
+            IngestEvent::Broadcast(ev) => {
+                if !is_valid_agent_id(&ev.sender) {
+                    tracing::warn!("Ingest: invalid agent_id in BROADCAST — dropped");
+                    return None;
+                }
+                if ev.topic_slug.is_empty() || ev.topic_slug.len() > 128 {
+                    tracing::warn!("Ingest: BROADCAST topic_slug out of range — dropped");
+                    return None;
+                }
+                if ev.title.len() > 256 {
+                    tracing::warn!("Ingest: BROADCAST title too long — dropped");
+                    return None;
+                }
+                if ev.tags.len() > 32 || ev.tags.iter().any(|t| t.len() > 64) {
+                    tracing::warn!("Ingest: BROADCAST tags out of range — dropped");
+                    return None;
+                }
+                if ev.content_url.as_deref().map(|u| u.len()).unwrap_or(0) > 2048 {
+                    tracing::warn!("Ingest: BROADCAST content_url too long — dropped");
+                    return None;
+                }
+                if !matches!(ev.format.as_str(), "text" | "audio" | "data") {
+                    tracing::warn!("Ingest: BROADCAST unknown format {:?} — dropped", ev.format);
+                    return None;
+                }
+                drop(inner);
+                let ts = now_secs();
+                let tags_json = serde_json::to_string(&ev.tags).unwrap_or_else(|_| "[]".to_string());
+                tracing::debug!(
+                    "BROADCAST topic={} from={}",
+                    ev.topic_slug,
+                    &ev.sender[..8.min(ev.sender.len())],
+                );
+                let db = self.db.lock().unwrap();
+                if let Some(ref conn) = *db {
+                    let insert_result = conn.0.execute(
+                        "INSERT INTO broadcast_log \
+                         (ts, sender, conversation_id, topic, topic_slug, title, tags, format, \
+                          content_url, content_type, \
+                          chunk_index, total_chunks, duration_ms, price_per_epoch_micro, epoch, slot) \
+                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                        rusqlite::params![
+                            ts as i64,
+                            ev.sender,
+                            ev.conversation_id,
+                            ev.topic,
+                            ev.topic_slug,
+                            ev.title,
+                            tags_json,
+                            ev.format,
+                            ev.content_url,
+                            ev.content_type,
+                            ev.chunk_index.map(|v| v as i64),
+                            ev.total_chunks.map(|v| v as i64),
+                            ev.duration_ms.map(|v| v as i64),
+                            ev.price_per_epoch_micro.map(|v| v as i64),
+                            ev.epoch.map(|v| v as i64),
+                            ev.slot as i64,
+                        ],
+                    );
+                    if let Err(e) = insert_result {
+                        tracing::warn!("SQLite insert broadcast_log failed: {e}");
+                    }
+                    let act = ActivityEvent {
+                        id: 0,
+                        ts: ts as i64,
+                        event_type: "BROADCAST".to_string(),
+                        agent_id: ev.sender.clone(),
+                        target_id: Some(ev.topic_slug.clone()),
+                        score: None,
+                        name: conn.query_agent_name(&ev.sender).ok().flatten(),
+                        target_name: Some(ev.title.clone()),
+                        slot: Some(ev.slot as i64),
+                        conversation_id: Some(ev.conversation_id.clone()),
+                    };
+                    match conn.insert_activity(&act) {
+                        Ok(saved) => return Some(saved),
+                        Err(e) => tracing::warn!("SQLite insert_activity(BROADCAST) failed: {e}"),
+                    }
+                }
+                None
+            }
             IngestEvent::Latency(lev) => {
                 if !is_valid_agent_id(&lev.agent_id) {
                     tracing::warn!(
@@ -2991,6 +3155,80 @@ impl ReputationStore {
             }
         }
         vec![]
+    }
+
+    /// List broadcast records, newest first, with optional topic and cursor filters.
+    pub fn list_broadcasts(
+        &self,
+        limit: usize,
+        topic_slug: Option<&str>,
+        before_id: Option<i64>,
+    ) -> Vec<BroadcastRecord> {
+        let db = self.db.lock().unwrap();
+        let Some(ref conn) = *db else { return vec![] };
+        let limit = limit.min(100) as i64;
+        let sql = match (topic_slug, before_id) {
+            (Some(_), Some(_)) => {
+                "SELECT id,ts,sender,conversation_id,topic,topic_slug,title,tags,format,\
+                 content_url,content_type,\
+                 chunk_index,total_chunks,duration_ms,price_per_epoch_micro,epoch,slot \
+                 FROM broadcast_log WHERE topic_slug=?1 AND id<?2 ORDER BY id DESC LIMIT ?3"
+            }
+            (Some(_), None) => {
+                "SELECT id,ts,sender,conversation_id,topic,topic_slug,title,tags,format,\
+                 content_url,content_type,\
+                 chunk_index,total_chunks,duration_ms,price_per_epoch_micro,epoch,slot \
+                 FROM broadcast_log WHERE topic_slug=?1 ORDER BY id DESC LIMIT ?3"
+            }
+            (None, Some(_)) => {
+                "SELECT id,ts,sender,conversation_id,topic,topic_slug,title,tags,format,\
+                 content_url,content_type,\
+                 chunk_index,total_chunks,duration_ms,price_per_epoch_micro,epoch,slot \
+                 FROM broadcast_log WHERE id<?2 ORDER BY id DESC LIMIT ?3"
+            }
+            (None, None) => {
+                "SELECT id,ts,sender,conversation_id,topic,topic_slug,title,tags,format,\
+                 content_url,content_type,\
+                 chunk_index,total_chunks,duration_ms,price_per_epoch_micro,epoch,slot \
+                 FROM broadcast_log ORDER BY id DESC LIMIT ?3"
+            }
+        };
+        let slug = topic_slug.unwrap_or("");
+        let cursor = before_id.unwrap_or(i64::MAX);
+        let mut stmt = match conn.0.prepare(sql) {
+            Ok(s) => s,
+            Err(e) => { tracing::warn!("list_broadcasts prepare failed: {e}"); return vec![]; }
+        };
+        let rows = stmt.query_map(
+            rusqlite::params![slug, cursor, limit],
+            |row| {
+                let tags_json: String = row.get(7)?;
+                let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+                Ok(BroadcastRecord {
+                    id: row.get(0)?,
+                    ts: row.get(1)?,
+                    sender: row.get(2)?,
+                    conversation_id: row.get(3)?,
+                    topic: row.get(4)?,
+                    topic_slug: row.get(5)?,
+                    title: row.get(6)?,
+                    tags,
+                    format: row.get(8)?,
+                    content_url: row.get(9)?,
+                    content_type: row.get(10)?,
+                    chunk_index: row.get(11)?,
+                    total_chunks: row.get(12)?,
+                    duration_ms: row.get(13)?,
+                    price_per_epoch_micro: row.get(14)?,
+                    epoch: row.get(15)?,
+                    slot: row.get(16)?,
+                })
+            },
+        );
+        match rows {
+            Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
+            Err(e) => { tracing::warn!("list_broadcasts query failed: {e}"); vec![] }
+        }
     }
 
     /// Network-wide summary stats: agent count, total interactions, uptime.

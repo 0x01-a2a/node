@@ -470,6 +470,10 @@ pub struct ApiInner {
     /// Raydium LaunchLab share fee receiver wallet — earns 0.1% per bonding-curve trade.
     #[cfg(feature = "trade")]
     pub(crate) launchlab_share_fee_wallet: Option<String>,
+    /// Pending swaps awaiting user CA confirmation — swap_id → PendingSwap.
+    /// Entries expire after PENDING_SWAP_TTL_SECS (5 min) and are evicted on next poll.
+    #[cfg(feature = "trade")]
+    pub(crate) pending_swaps: Arc<tokio::sync::Mutex<HashMap<String, crate::trade::PendingSwap>>>,
     /// Kora paymaster client — present when --kora-url is configured.
     pub kora: Option<KoraClient>,
     /// Optional override for the 8004 base collection (required on mainnet).
@@ -618,6 +622,8 @@ impl ApiState {
             jupiter_fee_account,
             #[cfg(feature = "trade")]
             launchlab_share_fee_wallet,
+            #[cfg(feature = "trade")]
+            pending_swaps: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             node_signing_key,
             http_client,
             #[cfg(feature = "bags")]
@@ -840,6 +846,7 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
         .route("/hosted/negotiate/accept", post(hosted_negotiate_accept))
         .route("/ws/hosted/inbox", get(ws_hosted_inbox_handler))
         // Named-topic BROADCAST subscriptions
+        .route("/topics/{slug}/broadcast", post(topic_broadcast))
         .route("/ws/topics", get(ws_topics_handler))
         // 8004 Solana Agent Registry helpers
         .route("/registry/8004/info", get(registry_8004_info))
@@ -881,6 +888,9 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
     #[cfg(feature = "trade")]
     let router = router
         .route("/trade/swap", post(crate::trade::trade_swap_handler))
+        .route("/trade/swap/pending", get(crate::trade::trade_swap_pending_handler))
+        .route("/trade/swap/confirm/{id}", post(crate::trade::trade_swap_confirm_handler))
+        .route("/trade/swap/reject/{id}", post(crate::trade::trade_swap_reject_handler))
         .route("/trade/quote", get(crate::trade::trade_quote_handler))
         .route("/trade/price", get(crate::trade::trade_price_handler))
         .route("/trade/tokens", get(crate::trade::trade_tokens_handler))
@@ -891,6 +901,7 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
         .route("/trade/launchlab/buy", post(crate::launchlab::launchlab_buy_handler))
         .route("/trade/launchlab/sell", post(crate::launchlab::launchlab_sell_handler))
         .route("/trade/cpmm/create-pool", post(crate::cpmm::cpmm_create_pool_handler))
+        .route("/wallet/send", post(wallet_send_handler))
         .route("/portfolio/history", get(portfolio_history))
         .route("/portfolio/balances", get(portfolio_balances));
 
@@ -1227,6 +1238,166 @@ async fn send_envelope(
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "node loop dropped reply" })),
+        ),
+    }
+}
+
+// ── POST /topics/{slug}/broadcast ─────────────────────────────────────────────
+
+/// Request body for POST /topics/{slug}/broadcast.
+#[derive(Deserialize)]
+struct TopicBroadcastRequest {
+    title: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    /// "audio" | "text" | "data" — defaults to "text"
+    #[serde(default = "default_broadcast_format")]
+    format: String,
+    /// URL pointing to content (audio file, data feed, etc.)
+    content_url: Option<String>,
+    /// MIME type of content_url (e.g. "audio/mpeg", "application/json")
+    content_type: Option<String>,
+    /// Duration in milliseconds (for audio/video content)
+    duration_ms: Option<u32>,
+    /// Subscription price in micro-USDC per epoch (0 = free)
+    price_per_epoch_micro: Option<u64>,
+    /// Epoch number for sequenced content
+    epoch: Option<u64>,
+}
+
+fn default_broadcast_format() -> String {
+    "text".to_string()
+}
+
+/// POST /topics/:slug/broadcast — publish a BROADCAST envelope to a named gossipsub topic.
+///
+/// Accepts human-friendly JSON, builds the BroadcastPayload CBOR internally,
+/// signs with the node identity key, and publishes to gossipsub.
+async fn topic_broadcast(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    Json(req): Json<TopicBroadcastRequest>,
+) -> impl IntoResponse {
+    if require_api_secret_or_unauthorized(&state, &headers).is_some() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        );
+    }
+
+    // Validate slug: alphanumeric, hyphens, underscores, colons — max 128 chars.
+    if slug.is_empty()
+        || slug.len() > 128
+        || !slug.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == ':')
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid topic slug" })),
+        );
+    }
+
+    if req.title.is_empty() || req.title.len() > 256 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "title must be 1–256 characters" })),
+        );
+    }
+
+    // Validate format allowlist.
+    if !matches!(req.format.as_str(), "text" | "audio" | "data") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "format must be \"text\", \"audio\", or \"data\"" })),
+        );
+    }
+
+    // Validate tags: max 32 entries, max 64 chars each.
+    if req.tags.len() > 32 || req.tags.iter().any(|t| t.is_empty() || t.len() > 64) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "tags: max 32 entries, max 64 chars each" })),
+        );
+    }
+
+    // Validate content_url: must be http/https URL, max 2048 chars.
+    if let Some(ref url) = req.content_url {
+        if url.len() > 2048 || (!url.starts_with("https://") && !url.starts_with("http://")) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "content_url must be an http/https URL, max 2048 chars" })),
+            );
+        }
+    }
+
+    // Validate content_type: max 128 chars.
+    if req.content_type.as_deref().map(|s| s.len()).unwrap_or(0) > 128 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "content_type max 128 characters" })),
+        );
+    }
+
+    // Rate limit — shared with /envelopes/send and other send endpoints.
+    {
+        let now = now_secs();
+        let mut rl = state.0.send_rate_limit.lock().await;
+        if now.saturating_sub(rl.window_start) >= 60 {
+            rl.window_start = now;
+            rl.count = 0;
+        }
+        if rl.count >= MAX_API_SENDS_PER_MINUTE {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({ "error": "rate limit exceeded" })),
+            );
+        }
+        rl.count += 1;
+    }
+
+    // Build content bytes: store content_url as UTF-8 bytes when provided.
+    let content: Option<Vec<u8>> = req.content_url.as_deref().map(|u| u.as_bytes().to_vec());
+
+    let payload_cbor = zerox1_protocol::payload::BroadcastPayload {
+        topic: slug.clone(),
+        title: req.title,
+        tags: req.tags,
+        format: req.format,
+        content,
+        content_type: req.content_type,
+        chunk_index: None,
+        total_chunks: None,
+        duration_ms: req.duration_ms,
+        price_per_epoch_micro: req.price_per_epoch_micro,
+        epoch: req.epoch,
+    }
+    .encode();
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let outbound = OutboundRequest {
+        msg_type: zerox1_protocol::message::MsgType::Broadcast,
+        recipient: zerox1_protocol::envelope::BROADCAST_RECIPIENT,
+        conversation_id: [0u8; 16],
+        payload: payload_cbor,
+        reply: reply_tx,
+    };
+
+    if state.send_outbound(outbound).await.is_err() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "node loop unavailable" })),
+        );
+    }
+
+    match reply_rx.await {
+        Ok(Ok(conf)) => (StatusCode::OK, Json(serde_json::to_value(conf).unwrap_or_default())),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        ),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "reply channel closed" })),
         ),
     }
 }
@@ -3478,6 +3649,8 @@ async fn check_mpp_gate(agent_id_hex: &str, state: &ApiInner) -> Option<Response
     }
 
     let mut headers = axum::http::HeaderMap::new();
+    // Safety: generate_challenge() produces Solana pubkeys (base58 ASCII) and u64 integers,
+    // both of which are always valid HeaderValues. The parse() cannot fail in practice.
     headers.insert("X-MPP-Recipient", challenge.recipient.parse().unwrap());
     headers.insert("X-MPP-Amount", challenge.amount.to_string().parse().unwrap());
     headers.insert("X-MPP-Mint", challenge.mint.parse().unwrap());
@@ -3921,6 +4094,196 @@ pub async fn sweep_usdc(
             }
         }
     }
+}
+
+// ============================================================================
+// Wallet send — POST /wallet/send
+// ============================================================================
+
+#[cfg(feature = "trade")]
+#[derive(Deserialize)]
+struct WalletSendRequest {
+    /// Destination Solana pubkey (base58).
+    to: String,
+    /// Amount in base units (lamports for SOL, token-native units for SPL).
+    amount: u64,
+    /// SPL token mint (base58). Omit for native SOL transfer.
+    mint: Option<String>,
+}
+
+/// POST /wallet/send — send SOL or any SPL token from the agent hot wallet.
+///
+/// - No `mint`: native SOL transfer via System Program.
+/// - `mint` present: SPL token transfer; destination ATA is created idempotently.
+///
+/// Requires the master api_secret (Authorization: Bearer <secret>).
+/// This moves real funds — never expose this endpoint to untrusted callers.
+#[cfg(feature = "trade")]
+async fn wallet_send_handler(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<WalletSendRequest>,
+) -> Response {
+    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
+        return resp;
+    }
+
+    let to: Pubkey = match body.to.parse() {
+        Ok(pk) => pk,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid destination pubkey" })),
+            )
+                .into_response()
+        }
+    };
+
+    if body.amount == 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "amount must be > 0" })),
+        )
+            .into_response();
+    }
+
+    let signing_key = Arc::clone(&state.0.node_signing_key);
+    let agent_pubkey: Pubkey = Pubkey::new_from_array(signing_key.verifying_key().to_bytes());
+    let solana_kp = to_solana_keypair(&signing_key);
+
+    let rpc_url = state.0.trade_rpc_url.clone();
+
+    let blockhash = match fetch_latest_blockhash(&rpc_url, &state.0.http_client).await {
+        Ok(bh) => bh,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("blockhash fetch failed: {e}") })),
+            )
+                .into_response()
+        }
+    };
+
+    let signature = if let Some(mint_str) = body.mint {
+        // ── SPL token transfer ──────────────────────────────────────────────
+        let mint: Pubkey = match mint_str.parse() {
+            Ok(pk) => pk,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "invalid mint pubkey" })),
+                )
+                    .into_response()
+            }
+        };
+
+        let spl_token_prog: Pubkey = SPL_TOKEN_PROGRAM_ID
+            .parse()
+            .expect("valid SPL_TOKEN_PROGRAM_ID");
+        let ata_prog: Pubkey = SPL_ATA_PROGRAM_ID
+            .parse()
+            .expect("valid SPL_ATA_PROGRAM_ID");
+
+        let source_ata = derive_ata(&agent_pubkey, &mint);
+        let dest_ata = derive_ata(&to, &mint);
+
+        // Create destination ATA idempotently (discriminant 0 = CreateIdempotent).
+        let create_ata_ix = solana_sdk::instruction::Instruction {
+            program_id: ata_prog,
+            accounts: vec![
+                solana_sdk::instruction::AccountMeta::new(agent_pubkey, true),
+                solana_sdk::instruction::AccountMeta::new(dest_ata, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(to, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(mint, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(
+                    solana_sdk::system_program::id(),
+                    false,
+                ),
+                solana_sdk::instruction::AccountMeta::new_readonly(spl_token_prog, false),
+            ],
+            data: vec![0u8], // CreateIdempotent
+        };
+
+        // SPL Token transfer instruction (discriminant 3).
+        let mut transfer_data = vec![3u8];
+        transfer_data.extend_from_slice(&body.amount.to_le_bytes());
+        let transfer_ix = solana_sdk::instruction::Instruction {
+            program_id: spl_token_prog,
+            accounts: vec![
+                solana_sdk::instruction::AccountMeta::new(source_ata, false),
+                solana_sdk::instruction::AccountMeta::new(dest_ata, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(agent_pubkey, true),
+            ],
+            data: transfer_data,
+        };
+
+        let tx = solana_sdk::transaction::Transaction::new_signed_with_payer(
+            &[create_ata_ix, transfer_ix],
+            Some(&agent_pubkey),
+            &[&solana_kp],
+            blockhash,
+        );
+
+        let tx_b64 = match bincode::serialize(&tx) {
+            Ok(b) => B64.encode(&b),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": format!("tx serialize failed: {e}") })),
+                )
+                    .into_response()
+            }
+        };
+
+        match broadcast_transaction(&rpc_url, &state.0.http_client, &tx_b64).await {
+            Ok(s) => s,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({ "error": format!("broadcast failed: {e}") })),
+                )
+                    .into_response()
+            }
+        }
+    } else {
+        // ── Native SOL transfer ─────────────────────────────────────────────
+        let transfer_ix =
+            solana_sdk::system_instruction::transfer(&agent_pubkey, &to, body.amount);
+        let tx = solana_sdk::transaction::Transaction::new_signed_with_payer(
+            &[transfer_ix],
+            Some(&agent_pubkey),
+            &[&solana_kp],
+            blockhash,
+        );
+        let tx_b64 = match bincode::serialize(&tx) {
+            Ok(b) => B64.encode(&b),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": format!("tx serialize failed: {e}") })),
+                )
+                    .into_response()
+            }
+        };
+        match broadcast_transaction(&rpc_url, &state.0.http_client, &tx_b64).await {
+            Ok(s) => s,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({ "error": format!("broadcast failed: {e}") })),
+                )
+                    .into_response()
+            }
+        }
+    };
+
+    tracing::info!("wallet_send: {amount} base units → {to} tx={signature}", amount = body.amount);
+    Json(serde_json::json!({
+        "signature": signature,
+        "amount": body.amount,
+        "to": body.to,
+    }))
+    .into_response()
 }
 
 // ============================================================================

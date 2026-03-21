@@ -1239,11 +1239,44 @@ impl Zx01Node {
         } else if topic_str.starts_with(TOPIC_NAMED_PREFIX) {
             // Named-topic BROADCAST (0x0E) — already pushed to /ws/topics via push_inbound.
             if env.msg_type == MsgType::Broadcast {
+                let topic_name = topic_str
+                    .strip_prefix(TOPIC_NAMED_PREFIX)
+                    .unwrap_or(topic_str);
                 tracing::debug!(
                     "BROADCAST on topic {} from {}",
                     topic_str,
                     hex::encode(env.sender),
                 );
+                if let Ok(payload) = BroadcastPayload::decode(&env.payload) {
+                    // Extract content_url if content is a UTF-8 URL (skip raw binary blobs).
+                    let content_url: Option<String> = payload.content.as_ref().and_then(|b| {
+                        std::str::from_utf8(b).ok().and_then(|s| {
+                            if s.starts_with("http://") || s.starts_with("https://") {
+                                Some(s.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                    });
+                    self.push_to_aggregator(serde_json::json!({
+                        "msg_type":               "BROADCAST",
+                        "sender":                 hex::encode(env.sender),
+                        "conversation_id":        hex::encode(env.conversation_id),
+                        "topic":                  payload.topic,
+                        "topic_slug":             topic_name,
+                        "title":                  payload.title,
+                        "tags":                   payload.tags,
+                        "format":                 payload.format,
+                        "content_url":            content_url,
+                        "content_type":           payload.content_type,
+                        "chunk_index":            payload.chunk_index,
+                        "total_chunks":           payload.total_chunks,
+                        "duration_ms":            payload.duration_ms,
+                        "price_per_epoch_micro":  payload.price_per_epoch_micro,
+                        "epoch":                  payload.epoch,
+                        "slot":                   self.current_slot,
+                    }));
+                }
             }
         } else if topic_str == TOPIC_BROADCAST {
             match env.msg_type {

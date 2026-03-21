@@ -16,7 +16,7 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::{Deserialize, Serialize};
 
-use ed25519_dalek::Signer;
+use ed25519_dalek::{Signer, SigningKey};
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::transaction::VersionedTransaction;
 
@@ -25,7 +25,7 @@ use crate::api::{
     ApiState, PortfolioEvent,
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct SwapRequest {
     pub input_mint: String,
     pub output_mint: String,
@@ -38,6 +38,24 @@ pub struct SwapResponse {
     pub out_amount: u64,
     pub txid: String,
 }
+
+/// Pending swap awaiting user confirmation of an unknown token CA.
+#[derive(Serialize, Clone)]
+pub struct PendingSwap {
+    pub swap_id: String,
+    pub input_mint: String,
+    pub output_mint: String,
+    pub amount: u64,
+    pub slippage_bps: u16,
+    pub created_at: u64,
+    pub expires_at: u64,
+    /// The full request to execute on confirmation.
+    #[serde(skip)]
+    pub req: SwapRequest,
+}
+
+/// Pending swap confirmations expire after 5 minutes.
+const PENDING_SWAP_TTL_SECS: u64 = 300;
 
 #[derive(Deserialize, Debug)]
 #[allow(dead_code)]
@@ -70,16 +88,14 @@ struct JupiterSwapResponse {
     swap_transaction: String,
 }
 
-// ── Swap whitelist ────────────────────────────────────────────────────────
+// ── Known mints ───────────────────────────────────────────────────────────
 
-/// Previously enforced whitelist — kept for reference, no longer checked at runtime.
-#[allow(dead_code)]
-/// Token mints allowed in agent-to-agent swaps.
+/// Well-known token mints that can be swapped immediately without user confirmation.
 ///
-/// Enforced at the node level so the protection applies to every caller
-/// (SDK, ZeroClaw, custom agents) regardless of which client they use.
-/// Both mainnet and devnet mints are included.
-const SWAP_WHITELIST: &[&str] = &[
+/// Swaps where `output_mint` is NOT in this list are parked as a pending
+/// confirmation (HTTP 202).  The mobile app calls `GET /trade/swap/pending`
+/// and `POST /trade/swap/confirm/{id}` after the user reviews the CA.
+const KNOWN_MINTS: &[&str] = &[
     // SOL (wrapped)
     "So11111111111111111111111111111111111111112",
     // USDC — mainnet
@@ -88,6 +104,10 @@ const SWAP_WHITELIST: &[&str] = &[
     "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
     // USDT — mainnet
     "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+    // mSOL
+    "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",
+    // ETH (Wormhole)
+    "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",
     // JUP
     "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
     // BONK
@@ -100,9 +120,8 @@ const SWAP_WHITELIST: &[&str] = &[
     "Bags4uLBdNscWBnHmqBozrjSScnEqPx5qZBzLiqnRVN7",
 ];
 
-#[allow(dead_code)]
-fn is_whitelisted(mint: &str) -> bool {
-    SWAP_WHITELIST.contains(&mint)
+fn is_known_mint(mint: &str) -> bool {
+    KNOWN_MINTS.contains(&mint)
 }
 
 // ── Validation helpers ────────────────────────────────────────────────────
@@ -140,6 +159,13 @@ fn mint_decimals(mint: &str) -> Option<i32> {
 }
 
 /// POST /trade/swap
+///
+/// If `output_mint` is a well-known token (SOL, USDC, USDT, etc.) the swap is
+/// executed immediately and returns `{ out_amount, txid }`.
+///
+/// If `output_mint` is an unrecognised CA the swap is parked and `202 Accepted`
+/// is returned with a `swap_id`.  The mobile app polls `GET /trade/swap/pending`
+/// and calls `POST /trade/swap/confirm/{id}` after the user reviews the CA.
 pub async fn trade_swap_handler(
     headers: HeaderMap,
     State(state): State<ApiState>,
@@ -157,8 +183,6 @@ pub async fn trade_swap_handler(
         return err_resp(StatusCode::UNAUTHORIZED, "unauthorized".into());
     };
 
-    let signer = solana_sdk::pubkey::Pubkey::from(signing_key.verifying_key().to_bytes());
-
     // ── Input validation ──────────────────────────────────────────────────
     if !is_valid_pubkey(&req.input_mint) || !is_valid_pubkey(&req.output_mint) {
         return err_resp(StatusCode::BAD_REQUEST, "invalid mint".into());
@@ -169,7 +193,6 @@ pub async fn trade_swap_handler(
     if req.amount == 0 {
         return err_resp(StatusCode::BAD_REQUEST, "amount must be > 0".into());
     }
-
     let slippage = req.slippage_bps.unwrap_or(50);
     if slippage > 1_000 {
         return err_resp(
@@ -178,6 +201,50 @@ pub async fn trade_swap_handler(
         );
     }
 
+    // ── Unknown CA — park for user confirmation ───────────────────────────
+    if !is_known_mint(&req.output_mint) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let swap_id = format!("{:016x}", now ^ req.amount.wrapping_mul(0x9e37_79b9));
+        let pending = PendingSwap {
+            swap_id: swap_id.clone(),
+            input_mint: req.input_mint.clone(),
+            output_mint: req.output_mint.clone(),
+            amount: req.amount,
+            slippage_bps: slippage,
+            created_at: now,
+            expires_at: now + PENDING_SWAP_TTL_SECS,
+            req,
+        };
+        state.inner().pending_swaps.lock().await.insert(swap_id.clone(), pending);
+        tracing::info!("Pending swap {swap_id}: unknown CA, awaiting user confirmation");
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "pending_confirmation",
+                "swap_id": swap_id,
+                "message": "Unknown token CA — confirm via POST /trade/swap/confirm/{id}",
+            })),
+        )
+            .into_response();
+    }
+
+    execute_swap_core(&state, signing_key, req).await
+}
+
+/// Core Jupiter swap — quote → swap tx → sign → broadcast → bags fee → portfolio.
+///
+/// Called by `trade_swap_handler` (known mint, immediate) and
+/// `trade_swap_confirm_handler` (unknown mint, user confirmed).
+pub(crate) async fn execute_swap_core(
+    state: &ApiState,
+    signing_key: SigningKey,
+    req: SwapRequest,
+) -> Response {
+    let signer = solana_sdk::pubkey::Pubkey::from(signing_key.verifying_key().to_bytes());
+    let slippage = req.slippage_bps.unwrap_or(50);
     let input_decimals = mint_decimals(&req.input_mint).unwrap_or(6);
     let output_decimals = mint_decimals(&req.output_mint).unwrap_or(6);
 
@@ -219,10 +286,7 @@ pub async fn trade_swap_handler(
     };
 
     if !quote_res.status().is_success() {
-        return err_resp(
-            StatusCode::BAD_GATEWAY,
-            "Jupiter Quote returned error".into(),
-        );
+        return err_resp(StatusCode::BAD_GATEWAY, "Jupiter Quote returned error".into());
     }
 
     let quote_json: serde_json::Value = match quote_res.json().await {
@@ -235,21 +299,19 @@ pub async fn trade_swap_handler(
         }
     };
 
-    let out_amount_str = quote_json
+    let out_amount: u64 = quote_json
         .get("outAmount")
         .and_then(|v| v.as_str())
-        .unwrap_or("0");
-    let out_amount: u64 = out_amount_str.parse().unwrap_or(0);
+        .unwrap_or("0")
+        .parse()
+        .unwrap_or(0);
 
-    // Wrapped SOL mint — if the user is selling SOL they already have gas,
-    // so Kora sponsorship is unnecessary. Only sponsor token→anything swaps.
+    // Wrapped SOL mint — if selling SOL, agent already has gas; skip Kora.
     const WRAPPED_SOL: &str = "So11111111111111111111111111111111111111112";
     let selling_sol = req.input_mint == WRAPPED_SOL;
 
-    // Resolve Kora fee payer only when sponsorship is appropriate and the
-    // daily budget has not been exhausted.
     let kora_fee_payer_opt =
-        if !selling_sol && crate::api::try_use_kora_budget(&state).await {
+        if !selling_sol && crate::api::try_use_kora_budget(state).await {
             if let Some(ref kora) = state.inner().kora {
                 match kora.get_fee_payer().await {
                     Ok(fp) => Some(fp),
@@ -275,8 +337,6 @@ pub async fn trade_swap_handler(
                 "priorityLevel": "high"
             }
         }),
-        // When Kora is active it sets the gas fee payer; otherwise use our
-        // Jupiter referral token account to collect platform fees.
         fee_account: if kora_fee_payer_opt.is_some() {
             kora_fee_payer_opt
                 .as_ref()
@@ -287,21 +347,13 @@ pub async fn trade_swap_handler(
     };
 
     let swap_url = format!("{}/swap/v1/swap", jupiter_base);
-    let swap_res = match client
-        .post(&swap_url)
-        .json(&swap_req)
-        .send()
-        .await
-    {
+    let swap_res = match client.post(&swap_url).json(&swap_req).send().await {
         Ok(res) => res,
         Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("Swap req fail: {e}")),
     };
 
     if !swap_res.status().is_success() {
-        return err_resp(
-            StatusCode::BAD_GATEWAY,
-            "Jupiter Swap returned error".into(),
-        );
+        return err_resp(StatusCode::BAD_GATEWAY, "Jupiter Swap returned error".into());
     }
 
     let swap_data: JupiterSwapResponse = match swap_res.json().await {
@@ -340,11 +392,9 @@ pub async fn trade_swap_handler(
     let msg_bytes = versioned_tx.message.serialize();
     let sig = signing_key.sign(&msg_bytes);
 
-    // Use Kora only when a fee payer was successfully resolved above
-    // (i.e. not selling SOL, budget available, Kora online).
     let txid = if let Some(ref kora_fee_payer) = kora_fee_payer_opt {
-        let _ = kora_fee_payer; // fee payer already embedded in the Jupiter tx
-        let kora = state.inner().kora.as_ref().unwrap(); // safe: kora_fee_payer_opt implies kora is Some
+        let _ = kora_fee_payer;
+        let kora = state.inner().kora.as_ref().unwrap();
         let signer_index = versioned_tx
             .message
             .static_account_keys()
@@ -361,14 +411,12 @@ pub async fn trade_swap_handler(
                 );
             }
         }
-
         let tx_b64 = B64.encode(bincode::serialize(&versioned_tx).unwrap());
         match kora.sign_and_send(&tx_b64).await {
             Ok(s) => s,
             Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("Kora send failed: {e}")),
         }
     } else {
-        // Agent is fee payer — normal broadcast (works for SOL swaps and Kora fallback).
         if !versioned_tx.signatures.is_empty() {
             versioned_tx.signatures[0] = solana_sdk::signature::Signature::from(sig.to_bytes());
         }
@@ -379,11 +427,9 @@ pub async fn trade_swap_handler(
         }
     };
 
-    // 5a. Bags fee-sharing: route a cut of the swap output to the Bags distribution wallet.
+    // Bags fee-sharing — only on USDC output.
     #[cfg(feature = "bags")]
     if let Some(bags) = state.inner().bags_config.as_ref() {
-        // out_amount is in the output token's native units. Only apply when
-        // swapping to USDC so the fee is paid in a stable asset.
         let is_usdc_output = req.output_mint == crate::api::USDC_MINT_MAINNET
             || req.output_mint == crate::api::USDC_MINT_DEVNET;
         if is_usdc_output {
@@ -418,7 +464,6 @@ pub async fn trade_swap_handler(
         }
     }
 
-    // 5b. Record swap event in portfolio history
     state
         .record_portfolio_event(PortfolioEvent::Swap {
             input_mint: req.input_mint.clone(),
@@ -434,6 +479,78 @@ pub async fn trade_swap_handler(
         .await;
 
     Json(SwapResponse { out_amount, txid }).into_response()
+}
+
+// ============================================================================
+// Pending swap confirmation
+// ============================================================================
+
+/// GET /trade/swap/pending — list all pending swaps awaiting CA confirmation.
+pub async fn trade_swap_pending_handler(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+) -> Response {
+    if resolve_hosted_token(&headers).is_none()
+        && require_api_secret_or_unauthorized(&state, &headers).is_some()
+    {
+        return err_resp(StatusCode::UNAUTHORIZED, "unauthorized".into());
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut pending = state.inner().pending_swaps.lock().await;
+    pending.retain(|_, p| p.expires_at > now);
+    let list: Vec<&PendingSwap> = pending.values().collect();
+    Json(serde_json::json!({ "pending": list })).into_response()
+}
+
+/// POST /trade/swap/confirm/{id} — user approved the CA; execute the swap.
+pub async fn trade_swap_confirm_handler(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    axum::extract::Path(swap_id): axum::extract::Path<String>,
+) -> Response {
+    if require_api_secret_or_unauthorized(&state, &headers).is_some() {
+        return err_resp(StatusCode::UNAUTHORIZED, "unauthorized".into());
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let pending_swap = {
+        let mut pending = state.inner().pending_swaps.lock().await;
+        match pending.remove(&swap_id) {
+            Some(p) if p.expires_at > now => p,
+            Some(_) => return err_resp(StatusCode::GONE, "pending swap expired".into()),
+            None => return err_resp(StatusCode::NOT_FOUND, "swap not found".into()),
+        }
+    };
+    let signing_key = state.inner().node_signing_key.as_ref().clone();
+    execute_swap_core(&state, signing_key, pending_swap.req).await
+}
+
+/// POST /trade/swap/reject/{id} — user rejected the CA; discard the pending swap.
+pub async fn trade_swap_reject_handler(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    axum::extract::Path(swap_id): axum::extract::Path<String>,
+) -> Response {
+    if require_api_secret_or_unauthorized(&state, &headers).is_some() {
+        return err_resp(StatusCode::UNAUTHORIZED, "unauthorized".into());
+    }
+    let removed = state
+        .inner()
+        .pending_swaps
+        .lock()
+        .await
+        .remove(&swap_id)
+        .is_some();
+    if removed {
+        Json(serde_json::json!({ "status": "rejected", "swap_id": swap_id })).into_response()
+    } else {
+        err_resp(StatusCode::NOT_FOUND, "swap not found".into())
+    }
 }
 
 fn err_resp(code: StatusCode, msg: String) -> Response {

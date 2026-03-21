@@ -110,11 +110,11 @@ pub struct AppState {
     /// Shared secret for POST /hosting/register.
     /// None = unauthenticated (dev/local only); set in production.
     pub hosting_secret: Option<String>,
-    /// Firebase server key for sending FCM push notifications.
-    /// Required for the sleeping node wake-push feature.
-    /// Set via --fcm-server-key / FCM_SERVER_KEY env var.
-    pub fcm_server_key: Option<String>,
-    /// Shared HTTP client for FCM push calls.
+    /// ntfy server base URL for sending wake pushes to sleeping agents.
+    /// Default: `https://ntfy.sh`. Set via --ntfy-server / NTFY_SERVER env var.
+    /// The topic is derived from the agent_id hex — no registration needed.
+    pub ntfy_server: Option<String>,
+    /// Shared HTTP client for ntfy push calls.
     pub http_client: reqwest::Client,
     /// Broadcast channel for real-time activity events (GET /ws/activity).
     pub activity_tx: broadcast::Sender<ActivityEvent>,
@@ -136,6 +136,10 @@ pub struct AppState {
     /// BASE_PRIVATE_KEY all set). Calls `approvePayment` on VERDICT.
     #[cfg(feature = "base-settlement")]
     pub base_client: Option<std::sync::Arc<zerox1_settlement_base::BaseClient>>,
+    /// Sui settlement client. Present when SUI_RPC_URL + SUI_PACKAGE_ID +
+    /// SUI_PRIVATE_KEY are set. Calls `approve_payment` on ZeroxEscrow via PTB.
+    #[cfg(feature = "sui-settlement")]
+    pub sui_client: Option<std::sync::Arc<zerox1_settlement_sui::SuiClient>>,
     /// Secret for POST /campaigns (operator-only). None = disabled.
     #[cfg(feature = "data-bounty")]
     pub operator_secret: Option<String>,
@@ -1637,19 +1641,18 @@ pub async fn post_pending(
 
     state.store.push_pending(&agent_id, msg);
 
-    // Fire FCM push if the agent is sleeping and has a token.
+    // Fire ntfy push if the agent is sleeping.
+    // Topic = agent_id hex; no pre-registration required.
     if state.store.is_sleeping(&agent_id) {
-        if let Some(token) = state.store.get_fcm_token(&agent_id) {
-            if let Some(ref fcm_key) = state.fcm_server_key {
-                let client = state.http_client.clone();
-                let key = fcm_key.clone();
-                let aid = agent_id.clone();
-                let from = body.from.clone();
-                let msgtype = body.msg_type.clone();
-                tokio::spawn(async move {
-                    send_fcm_push(&key, &token, &aid, &from, &msgtype, &client).await;
-                });
-            }
+        if let Some(ref ntfy_server) = state.ntfy_server {
+            let server = ntfy_server.clone();
+            let aid = agent_id.clone();
+            let from = body.from.clone();
+            let msgtype = body.msg_type.clone();
+            let client = state.http_client.clone();
+            tokio::spawn(async move {
+                send_ntfy_push(&server, &aid, &from, &msgtype, &client).await;
+            });
         }
     }
 
@@ -1681,6 +1684,24 @@ pub async fn get_activity(
 ) -> impl IntoResponse {
     let limit = params.limit.min(200);
     Json(state.store.list_activity(limit, params.before))
+}
+
+/// GET /broadcasts[?topic=<slug>&limit=50&before=<id>]
+///
+/// Returns recent mesh BROADCAST records, newest first.
+/// Optionally filter by `topic` slug. Use `before=<id>` for pagination.
+pub async fn get_broadcasts(
+    State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(50)
+        .min(100);
+    let topic = params.get("topic").map(|s| s.as_str());
+    let before = params.get("before").and_then(|v| v.parse::<i64>().ok());
+    Json(state.store.list_broadcasts(limit, topic, before))
 }
 
 /// GET /ws/activity
@@ -1729,47 +1750,44 @@ pub async fn ws_activity(
     }))
 }
 
-/// Fire a Firebase Cloud Messaging push to wake a sleeping node.
+/// Fire an ntfy push to wake a sleeping node.
 ///
-/// Uses the FCM legacy HTTP API (v1 API requires OAuth2 which adds
-/// unnecessary complexity for this use-case).
-async fn send_fcm_push(
-    fcm_key: &str,
-    device_token: &str,
+/// Topic = agent_id hex (same value the aggregator already knows; no
+/// pre-registration needed).  The phone polls `GET {ntfy_server}/{topic}/json`
+/// or uses the ntfy Android SDK/app to subscribe.
+async fn send_ntfy_push(
+    ntfy_server: &str,
     agent_id: &str,
     from: &str,
     msg_type: &str,
     client: &reqwest::Client,
 ) {
-    let payload = serde_json::json!({
-        "to": device_token,
-        "data": {
-            "action":   "wake",
-            "agent_id": agent_id,
-            "from":     from,
-            "msg_type": msg_type,
-        },
-        "notification": {
-            "title": "0x01 — New job offer",
-            "body":  format!("{msg_type} from {}", &from[..8.min(from.len())]),
-        },
-    });
+    let url = format!("{ntfy_server}/{agent_id}");
+    let body = serde_json::json!({
+        "type":     "wake",
+        "agent_id": agent_id,
+        "from":     from,
+        "msg_type": msg_type,
+    })
+    .to_string();
 
     match client
-        .post("https://fcm.googleapis.com/fcm/send")
-        .header("Authorization", format!("key={fcm_key}"))
-        .json(&payload)
+        .post(&url)
+        .header("X-Title", "0x01 wake")
+        .header("X-Tags", msg_type)
+        .header("Content-Type", "application/json")
+        .body(body)
         .send()
         .await
     {
         Ok(resp) if resp.status().is_success() => {
-            tracing::debug!("FCM push sent for agent {agent_id}");
+            tracing::debug!("ntfy push sent for agent {agent_id}");
         }
         Ok(resp) => {
-            tracing::warn!("FCM push HTTP {} for agent {agent_id}", resp.status());
+            tracing::warn!("ntfy push HTTP {} for agent {agent_id}", resp.status());
         }
         Err(e) => {
-            tracing::warn!("FCM push error for agent {agent_id}: {e}");
+            tracing::warn!("ntfy push error for agent {agent_id}: {e}");
         }
     }
 }

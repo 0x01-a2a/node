@@ -268,6 +268,8 @@ const KNOWN_DOMAINS: &[u32] = &[
     5,     // Solana
     6,     // Base
     7,     // Polygon
+    8,     // Sui mainnet
+    9,     // Sui testnet
     11,    // Linea
     12,    // Sei
     16,    // Unichain
@@ -299,6 +301,13 @@ pub fn is_celo_domain(domain: u32) -> bool {
 #[allow(dead_code)] // used by the base-settlement feature in main.rs
 pub fn is_base_domain(domain: u32) -> bool {
     matches!(domain, 8453 | 84532)
+}
+
+/// True when `domain` is a Sui chain (mainnet or testnet).
+/// Sui settlements call `approve_payment` on the ZeroxEscrow Move module via PTB.
+#[allow(dead_code)] // used by the sui-settlement feature in main.rs
+pub fn is_sui_domain(domain: u32) -> bool {
+    matches!(domain, 8 | 9)
 }
 
 pub fn validate_account_id(id: &str) -> Result<(), &'static str> {
@@ -348,6 +357,19 @@ pub fn validate_address(addr: &str, chain_domain: u32) -> Result<(), &'static st
             if addr.contains('0') || addr.contains('O') || addr.contains('I') || addr.contains('l')
             {
                 return Err("invalid base58 characters in Solana address");
+            }
+        }
+        // Sui chains: 0x-prefixed 32-byte object ID (66 chars total: 0x + 64 hex).
+        // dest_address for Sui is the ZeroxEscrow shared object ID.
+        8 | 9 => {
+            if !addr.starts_with("0x") && !addr.starts_with("0X") {
+                return Err("Sui address must start with 0x");
+            }
+            if addr.len() != 66 {
+                return Err("Sui address must be 66 characters (0x + 64 hex)");
+            }
+            if !addr[2..].chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err("Sui address contains invalid hex characters");
             }
         }
         // EVM chains: 0x-prefixed hex, 42 chars (includes Celo 42220/44787, Base 8453/84532)

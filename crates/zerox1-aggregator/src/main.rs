@@ -40,13 +40,12 @@ struct Config {
     #[arg(long, env = "AGGREGATOR_DB_PATH")]
     db_path: Option<std::path::PathBuf>,
 
-    /// Firebase Cloud Messaging server key for sending push notifications to
-    /// sleeping phone nodes. Obtain from the Firebase project console under
-    /// Project Settings → Cloud Messaging → Server key.
-    /// When absent, the FCM push feature is disabled (token registration and
-    /// sleep-state tracking still work, but no pushes are sent).
-    #[arg(long, env = "FCM_SERVER_KEY")]
-    fcm_server_key: Option<String>,
+    /// ntfy server base URL for wake-push notifications to sleeping phone nodes.
+    /// Defaults to `https://ntfy.sh` when set to any non-empty value; pass a
+    /// custom URL for self-hosted ntfy instances.
+    /// When absent, wake-push is disabled (sleep-state tracking still works).
+    #[arg(long, env = "NTFY_SERVER", default_value = "https://ntfy.sh")]
+    ntfy_server: Option<String>,
 
     /// Shared secret for POST /hosting/register.
     /// Host nodes must include `Authorization: Bearer <secret>` in their
@@ -157,6 +156,38 @@ struct Config {
     #[arg(long, env = "BASE_PRIVATE_KEY")]
     base_private_key: Option<String>,
 
+    // ── Sui settlement ────────────────────────────────────────────────────
+
+    /// Sui JSON-RPC fullnode URL.
+    /// Mainnet: https://fullnode.mainnet.sui.io  Testnet: https://fullnode.testnet.sui.io
+    #[cfg(feature = "sui-settlement")]
+    #[arg(long, env = "SUI_RPC_URL")]
+    sui_rpc_url: Option<String>,
+
+    /// Deployed zerox1_escrow Move package ID on Sui (0x<64-hex>).
+    #[cfg(feature = "sui-settlement")]
+    #[arg(long, env = "SUI_PACKAGE_ID")]
+    sui_package_id: Option<String>,
+
+    /// Escrow module name within the Sui package.
+    #[cfg(feature = "sui-settlement")]
+    #[arg(long, env = "SUI_ESCROW_MODULE", default_value = "zerox1_escrow")]
+    sui_escrow_module: String,
+
+    /// USDC coin type string for Sui Move type arguments.
+    /// Mainnet: 0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC
+    /// Testnet: 0xa1ec7fc00a6f40db9693ad1415d0c193ad3906494428cf252621037bd7117e29::usdc::USDC
+    #[cfg(feature = "sui-settlement")]
+    #[arg(long, env = "SUI_COIN_TYPE")]
+    sui_coin_type: Option<String>,
+
+    /// Ed25519 private key for the Sui notary (0x-prefixed 32-byte hex seed).
+    /// The aggregator address derived from this key must be set as `notary`
+    /// in each ZeroxEscrow created by agents.
+    #[cfg(feature = "sui-settlement")]
+    #[arg(long, env = "SUI_PRIVATE_KEY")]
+    sui_private_key: Option<String>,
+
     // ── MPP protocol fee gate ─────────────────────────────────────────────
 
     /// Enable the MPP protocol-fee gate. When set, BEACON messages from agents
@@ -229,10 +260,15 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    if config.fcm_server_key.is_none() {
+    if config.ntfy_server.is_none() {
         tracing::info!(
-            "No --fcm-server-key set. FCM push notifications are disabled. \
-             Token registration and sleep-state tracking still work."
+            "No --ntfy-server set. Wake-push notifications are disabled. \
+             Sleep-state tracking still works."
+        );
+    } else {
+        tracing::info!(
+            "ntfy wake-push enabled: {}",
+            config.ntfy_server.as_deref().unwrap_or("https://ntfy.sh")
         );
     }
 
@@ -267,6 +303,10 @@ async fn main() -> anyhow::Result<()> {
     // ── Base settlement client ────────────────────────────────────────────
     #[cfg(feature = "base-settlement")]
     let base_client = build_base_client(&config);
+
+    // ── Sui settlement client ─────────────────────────────────────────────
+    #[cfg(feature = "sui-settlement")]
+    let sui_client = build_sui_client(&config);
 
     // Derive MPP fields before partial-moving config fields.
     let protocol_fee_recipient_ata = derive_protocol_fee_ata(&config);
@@ -305,7 +345,7 @@ async fn main() -> anyhow::Result<()> {
         ingest_secret: config.ingest_secret,
         hosting_secret: config.hosting_secret,
         blob_dir: config.blob_dir,
-        fcm_server_key: config.fcm_server_key,
+        ntfy_server: config.ntfy_server,
         http_client,
         activity_tx,
         registry,
@@ -314,6 +354,8 @@ async fn main() -> anyhow::Result<()> {
         celo_client,
         #[cfg(feature = "base-settlement")]
         base_client,
+        #[cfg(feature = "sui-settlement")]
+        sui_client,
         #[cfg(feature = "data-bounty")]
         operator_secret: config.operator_secret,
         #[cfg(feature = "data-bounty")]
@@ -376,6 +418,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/agents/{agent_id}/profile", get(api::get_agent_profile))
         .route("/activity", get(api::get_activity))
         .route("/ws/activity", get(api::ws_activity))
+        .route("/broadcasts", get(api::get_broadcasts))
         .route("/hosting/nodes", get(api::get_hosting_nodes))
         .route("/blobs/{cid}", get(api::get_blob))
         // MPP protocol fee endpoints — public (agents call these directly)
@@ -481,6 +524,8 @@ async fn main() -> anyhow::Result<()> {
         let worker_celo = state.celo_client.clone();
         #[cfg(feature = "base-settlement")]
         let worker_base = state.base_client.clone();
+        #[cfg(feature = "sui-settlement")]
+        let worker_sui = state.sui_client.clone();
         tokio::spawn(async move {
             tracing::info!("Settlement worker started (polling every 30s)");
             loop {
@@ -519,6 +564,20 @@ async fn main() -> anyhow::Result<()> {
                             entry.dest_address.as_deref(),
                             &worker_store,
                             worker_base.as_deref(),
+                        )
+                        .await;
+                        continue;
+                    }
+
+                    // ── Sui Move settlement ─────────────────────────────
+                    #[cfg(feature = "sui-settlement")]
+                    if crate::billing::is_sui_domain(entry.dest_chain.unwrap_or(0)) {
+                        process_sui_settlement(
+                            entry.id,
+                            &entry.conversation_id,
+                            entry.dest_address.as_deref(),
+                            &worker_store,
+                            worker_sui.as_deref(),
                         )
                         .await;
                         continue;
@@ -791,6 +850,142 @@ async fn process_base_settlement(
         Err(e) => {
             tracing::error!(
                 "Settlement #{}: ZeroxEscrow.approvePayment failed on Base: {} — marking failed",
+                id, e,
+            );
+            store.update_settlement_status(id, "processing", "failed", None);
+        }
+    }
+}
+
+// ============================================================================
+// Sui settlement helpers
+// ============================================================================
+
+/// Build a `SuiClient` from aggregator config, if all required fields are set.
+#[cfg(feature = "sui-settlement")]
+fn build_sui_client(
+    config: &Config,
+) -> Option<std::sync::Arc<zerox1_settlement_sui::SuiClient>> {
+    use zerox1_settlement_sui::{SuiClient, SUI_MAINNET_USDC_TYPE};
+
+    let rpc_url = match config.sui_rpc_url.as_deref() {
+        Some(u) => u,
+        None => return None, // Sui not configured — silently skip
+    };
+
+    let package_id = match config.sui_package_id.as_deref() {
+        Some(p) => p,
+        None => {
+            tracing::warn!(
+                "Sui settlement: SUI_RPC_URL is set but SUI_PACKAGE_ID is missing — \
+                 set SUI_PACKAGE_ID to enable Sui settlement."
+            );
+            return None;
+        }
+    };
+
+    let coin_type = config
+        .sui_coin_type
+        .as_deref()
+        .unwrap_or(SUI_MAINNET_USDC_TYPE);
+
+    match SuiClient::from_strings(
+        rpc_url,
+        config.sui_private_key.as_deref(),
+        package_id,
+        &config.sui_escrow_module,
+        coin_type,
+    ) {
+        Ok(client) => {
+            if let Some(addr) = client.signer_address() {
+                tracing::info!("Sui settlement enabled — notary: {}", addr);
+            } else {
+                tracing::warn!(
+                    "Sui settlement: no private key configured — approve_payment calls will fail. \
+                     Set SUI_PRIVATE_KEY to enable automatic VERDICT settlement on Sui."
+                );
+            }
+            Some(std::sync::Arc::new(client))
+        }
+        Err(e) => {
+            tracing::error!("Sui settlement: failed to build client: {}", e);
+            None
+        }
+    }
+}
+
+/// Execute a Sui escrow settlement for a queued VERDICT.
+///
+/// The `dest_address` field in the settlement queue holds the Sui object ID
+/// of the ZeroxEscrow shared object (0x-prefixed 64 hex chars = 66 chars total).
+///
+/// Settlement queue convention for Sui:
+///   dest_chain   = 8 (mainnet) or 9 (testnet)
+///   dest_address = 0x<64-hex-chars>  (the ZeroxEscrow shared object ID)
+#[cfg(feature = "sui-settlement")]
+async fn process_sui_settlement(
+    id: i64,
+    conversation_id: &str,
+    dest_address: Option<&str>,
+    store: &store::ReputationStore,
+    client: Option<&zerox1_settlement_sui::SuiClient>,
+) {
+    let Some(client) = client else {
+        tracing::warn!(
+            "Settlement #{}: Sui client not configured — marking failed. \
+             Set SUI_RPC_URL, SUI_PACKAGE_ID, SUI_PRIVATE_KEY on the aggregator.",
+            id,
+        );
+        store.update_settlement_status(id, "processing", "failed", None);
+        return;
+    };
+
+    let Some(escrow_id_hex) = dest_address else {
+        tracing::warn!(
+            "Settlement #{} (conversation {}): no escrow object ID in dest_address — marking failed",
+            id, conversation_id,
+        );
+        store.update_settlement_status(id, "processing", "failed", None);
+        return;
+    };
+
+    // Parse 0x<64 hex> → [u8; 32]
+    let hex_str = escrow_id_hex.strip_prefix("0x").unwrap_or(escrow_id_hex);
+    let escrow_bytes = match hex::decode(hex_str) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(
+                "Settlement #{}: invalid escrow object ID '{}': {} — marking failed",
+                id, escrow_id_hex, e,
+            );
+            store.update_settlement_status(id, "processing", "failed", None);
+            return;
+        }
+    };
+    let escrow_id: [u8; 32] = match escrow_bytes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            tracing::error!(
+                "Settlement #{}: escrow object ID '{}' is not 32 bytes — marking failed",
+                id, escrow_id_hex,
+            );
+            store.update_settlement_status(id, "processing", "failed", None);
+            return;
+        }
+    };
+
+    match client.approve_payment(escrow_id).await {
+        Ok(digest) => {
+            let digest_str = digest.to_string();
+            tracing::info!(
+                "Settlement #{} approved on Sui: tx={} escrow={}",
+                id, digest_str, escrow_id_hex,
+            );
+            store.update_settlement_status(id, "processing", "completed", Some(&digest_str));
+        }
+        Err(e) => {
+            tracing::error!(
+                "Settlement #{}: ZeroxEscrow.approve_payment failed on Sui: {} — marking failed",
                 id, e,
             );
             store.update_settlement_status(id, "processing", "failed", None);

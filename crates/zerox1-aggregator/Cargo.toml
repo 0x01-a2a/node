@@ -16,6 +16,10 @@ celo-settlement = []  # re-add dep:zerox1-settlement-celo after publishing
 # VERDICT is queued with dest_chain = 8453 (mainnet) or 84532 (testnet).
 # Requires BASE_RPC_URL / BASE_ESCROW / BASE_PRIVATE_KEY to be set at runtime.
 base-settlement = []  # re-add dep:zerox1-settlement-base after publishing
+# Sui Move settlement: executes approve_payment on ZeroxEscrow when a
+# VERDICT is queued with dest_chain = 8 (mainnet) or 9 (testnet).
+# Requires SUI_RPC_URL / SUI_PACKAGE_ID / SUI_PRIVATE_KEY to be set at runtime.
+sui-settlement = []  # re-add dep:zerox1-settlement-sui after publishing
 
 [[bin]]
 name = "zerox1-aggregator"
@@ -43,3 +47,4 @@ rand = "0.8"
 bs58 = "0.5"
 # zerox1-settlement-celo = { version = "0.1.0", optional = true }  # uncomment after publishing
 # zerox1-settlement-base = { version = "0.1.0", optional = true }  # uncomment after publishing
+# zerox1-settlement-sui  = { version = "0.1.0", optional = true }  # uncomment after publishing

@@ -31,6 +31,11 @@ pub struct SwapRequest {
     pub output_mint: String,
     pub amount: u64,
     pub slippage_bps: Option<u16>,
+    /// When `true`, bypass the KNOWN_MINTS confirmation gate and execute
+    /// immediately for any valid pubkey.  Intended for autonomous agent callers
+    /// (e.g. ZeroClaw) that have their own decision logic.  Defaults to `false`.
+    #[serde(default)]
+    pub force: bool,
 }
 
 #[derive(Serialize)]
@@ -202,7 +207,8 @@ pub async fn trade_swap_handler(
     }
 
     // ── Unknown CA — park for user confirmation ───────────────────────────
-    if !is_known_mint(&req.output_mint) {
+    // Bypass when force=true (autonomous callers that handle their own logic).
+    if !req.force && !is_known_mint(&req.output_mint) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()

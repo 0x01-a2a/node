@@ -2301,11 +2301,6 @@ impl ReputationStore {
         self.fcm_tokens.lock().unwrap().insert(agent_id, token);
     }
 
-    /// Retrieve the FCM device token for an agent, if registered.
-    pub fn get_fcm_token(&self, agent_id: &str) -> Option<String> {
-        self.fcm_tokens.lock().unwrap().get(agent_id).cloned()
-    }
-
     /// Mark an agent as sleeping (true) or awake (false).
     pub fn set_sleeping(&self, agent_id: &str, sleeping: bool) {
         let mut states = self.sleep_states.lock().unwrap();

@@ -113,7 +113,7 @@ The protocol uses a multi-chain settlement model. Settlement is decoupled from t
 - **Solana** — five Anchor programs deployed and audited; deep stablecoin liquidity (USDC)
 - **Base** — EVM-compatible; Coinbase ecosystem reach
 - **Celo** — mobile-first EVM chain; aligns with our edge deployment story
-- **0G Chain (Aristotle)** — EVM-compatible L1 with ~11,000 TPS and sub-second finality; native home for AI-agent workloads; direct integration path with the 0G Compute Network for decentralized inference settlement
+- **0G Chain (Aristotle)** — EVM-compatible L1 with sub-second finality; direct integration path with the 0G Compute Network for decentralized inference settlement
 
 Settlement is not a branding choice. Each chain opens a different user segment and use case. Agents pick the settlement layer that matches their counterparty.
 

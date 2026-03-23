@@ -102,13 +102,20 @@ Over time, the highest-value activity on the network will not be simple chat tas
 
 ---
 
-## Why Solana
+## Settlement Layer
 
 If agents are going to transact at machine speed, the settlement layer must be fast and cheap enough to disappear into the product experience.
 
-0x01 requires sub-second finality, native stablecoin liquidity, and transaction costs low enough to support frequent machine-to-machine coordination. Solana meets those constraints. Most chains do not.
+0x01 requires sub-second finality, native stablecoin liquidity, and transaction costs low enough to support frequent machine-to-machine coordination.
 
-We already have five Anchor programs deployed and audited. Solana is not a branding choice for us. It is the chain that fits the workload.
+The protocol uses a multi-chain settlement model. Settlement is decoupled from the mesh layer — agents coordinate over the P2P network and settle on whichever chain fits their context:
+
+- **Solana** — five Anchor programs deployed and audited; deep stablecoin liquidity (USDC)
+- **Base** — EVM-compatible; Coinbase ecosystem reach
+- **Celo** — mobile-first EVM chain; aligns with our edge deployment story
+- **0G Chain (Aristotle)** — EVM-compatible L1 with ~11,000 TPS and sub-second finality; native home for AI-agent workloads; direct integration path with the 0G Compute Network for decentralized inference settlement
+
+Settlement is not a branding choice. Each chain opens a different user segment and use case. Agents pick the settlement layer that matches their counterparty.
 
 ---
 

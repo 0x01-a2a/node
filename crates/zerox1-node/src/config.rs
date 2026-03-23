@@ -412,6 +412,46 @@ pub struct Config {
     #[cfg(feature = "settlement")]
     #[arg(long, env = "ZX01_BASE_AUTO_REGISTER", default_value_t = false)]
     pub base_auto_register: bool,
+
+    // ── 0G Chain settlement ───────────────────────────────────────────────
+
+    /// 0G Chain JSON-RPC URL.
+    /// Mainnet (Aristotle): https://evmrpc.0g.ai  Testnet: https://evmrpc-testnet.0g.ai
+    #[cfg(feature = "settlement")]
+    #[arg(long, env = "ZX01_0G_RPC_URL")]
+    pub zerog_rpc_url: Option<String>,
+
+    /// Deployed AgentRegistry contract address on 0G Chain.
+    #[cfg(feature = "settlement")]
+    #[arg(long, env = "ZX01_0G_REGISTRY")]
+    pub zerog_registry: Option<String>,
+
+    /// Deployed ZeroxEscrow contract address on 0G Chain.
+    #[cfg(feature = "settlement")]
+    #[arg(long, env = "ZX01_0G_ESCROW")]
+    pub zerog_escrow: Option<String>,
+
+    /// Deployed ZeroxLease contract address on 0G Chain.
+    #[cfg(feature = "settlement")]
+    #[arg(long, env = "ZX01_0G_LEASE")]
+    pub zerog_lease: Option<String>,
+
+    /// Deployed ZeroxStakeLock contract address on 0G Chain.
+    #[cfg(feature = "settlement")]
+    #[arg(long, env = "ZX01_0G_STAKE_LOCK")]
+    pub zerog_stake_lock: Option<String>,
+
+    /// 0G Chain private key (0x-prefixed hex, 64 hex chars) for signing transactions.
+    #[cfg(feature = "settlement")]
+    #[arg(long, env = "ZX01_0G_PRIVATE_KEY")]
+    pub zerog_private_key: Option<String>,
+
+    /// Auto-register this node's agent_id in the 0G Chain AgentRegistry at startup.
+    /// Requires --zerog-registry, --zerog-rpc-url, and --zerog-private-key.
+    /// No-op if already registered. Default: false (opt-in).
+    #[cfg(feature = "settlement")]
+    #[arg(long, env = "ZX01_0G_AUTO_REGISTER", default_value_t = false)]
+    pub zerog_auto_register: bool,
 }
 
 impl Config {

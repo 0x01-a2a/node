@@ -7,6 +7,14 @@ edition.workspace = true
 name = "zerox1-node"
 path = "src/main.rs"
 
+[lib]
+name = "zerox1_node"
+path = "src/lib.rs"
+# When building for iOS, Cargo is invoked with --features ios-ffi and the
+# crate-type is overridden to staticlib via the Xcode build script.  For all
+# other targets (Android, server) rlib is correct and the binary still builds.
+crate-type = ["staticlib", "rlib"]
+
 [dependencies]
 zerox1-protocol = { path = "../zerox1-protocol" }
 
@@ -42,8 +50,12 @@ axum = { workspace = true }
 serde_json = { workspace = true }
 tower-http = { workspace = true }
 
+zerox1-filedelivery-core = { workspace = true }
+zerox1-filedelivery-0g   = { workspace = true }
+
 [features]
 default = []
+ios-ffi = []
 trade = []
 bags  = ["trade"]
 settlement = []

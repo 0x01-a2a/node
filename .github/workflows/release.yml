@@ -117,6 +117,41 @@ jobs:
           path: target/aarch64-linux-android/release/zerox1-node
           if-no-files-found: error
 
+  # ── Build zerox1-node as a static library for iOS (arm64) ───────────────
+  build-ios:
+    name: Build iOS ARM64 static library
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-${{ runner.os }}-
+
+      - name: Build zerox1-node static library (iOS ARM64)
+        run: cargo build --release -p zerox1-node --target aarch64-apple-ios --features zerox1-node/ios-ffi
+        env:
+          CARGO_TERM_COLOR: always
+
+      - name: Upload static library artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libzerox1_node-ios-arm64
+          path: target/aarch64-apple-ios/release/libzerox1_node.a
+          if-no-files-found: error
+
   # ── Build zerox1-aggregator (Linux only — server-side service) ───────────
   build-server-services:
     name: Build server services

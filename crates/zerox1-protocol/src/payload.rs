@@ -465,6 +465,103 @@ fn optional_u64_from_value(v: &Value, msg_type: u16) -> Result<Option<u64>, Prot
     }
 }
 
+// ============================================================================
+// DELIVER payload (0x07)
+// ============================================================================
+
+/// Protocol-defined payload for DELIVER (0x07) messages.
+///
+/// Small payloads embed content inline. Large payloads reference an external
+/// storage URI (e.g. `zerog://0x<merkle_root>`) so the envelope stays within
+/// the 64 KB transport limit. A node with a configured file-delivery adapter
+/// will upload automatically on send and can resolve the URI on receive.
+#[derive(Debug, Clone)]
+pub struct DeliverPayload {
+    /// Task this delivery belongs to.
+    pub conversation_id: [u8; 16],
+    /// MIME type of the content (e.g. `text/plain`, `application/json`).
+    pub content_type: Option<String>,
+    /// Inline bytes — present when the payload fits within the envelope limit.
+    pub inline: Option<Vec<u8>>,
+    /// External storage URI — present when content was offloaded to a storage backend.
+    pub payload_uri: Option<String>,
+    /// Byte length of the external content (informational; aids pre-allocation).
+    pub payload_size: Option<u64>,
+}
+
+impl DeliverPayload {
+    pub fn encode(&self) -> Vec<u8> {
+        let value = Value::Array(vec![
+            Value::Bytes(self.conversation_id.to_vec()),
+            match &self.content_type {
+                Some(s) => Value::Text(s.clone()),
+                None => Value::Null,
+            },
+            match &self.inline {
+                Some(b) => Value::Bytes(b.clone()),
+                None => Value::Null,
+            },
+            match &self.payload_uri {
+                Some(s) => Value::Text(s.clone()),
+                None => Value::Null,
+            },
+            match self.payload_size {
+                Some(n) => Value::Integer(n.into()),
+                None => Value::Null,
+            },
+        ]);
+        let mut buf = Vec::new();
+        ciborium::into_writer(&value, &mut buf)
+            .unwrap_or_else(|_| unreachable!("CBOR encode to Vec<u8> is infallible"));
+        buf
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        let value: Value =
+            ciborium::from_reader(bytes).map_err(|e| ProtocolError::PayloadParseError {
+                msg_type: 0x07,
+                reason: e.to_string(),
+            })?;
+
+        let arr = match value {
+            Value::Array(a) if a.len() == 5 => a,
+            Value::Array(a) => {
+                return Err(ProtocolError::PayloadParseError {
+                    msg_type: 0x07,
+                    reason: format!("expected 5 fields, got {}", a.len()),
+                })
+            }
+            _ => {
+                return Err(ProtocolError::PayloadParseError {
+                    msg_type: 0x07,
+                    reason: "expected CBOR array".into(),
+                })
+            }
+        };
+
+        let conversation_id = bytes16_from_value(&arr[0], 0x07)?;
+        let content_type = optional_text_from_value(&arr[1], 0x07)?;
+        let inline = optional_bytes_from_value(&arr[2], 0x07)?;
+        let payload_uri = optional_text_from_value(&arr[3], 0x07)?;
+        let payload_size = optional_u64_from_value(&arr[4], 0x07)?;
+
+        if inline.is_none() && payload_uri.is_none() {
+            return Err(ProtocolError::PayloadParseError {
+                msg_type: 0x07,
+                reason: "DeliverPayload must have either inline or payload_uri".into(),
+            });
+        }
+
+        Ok(Self {
+            conversation_id,
+            content_type,
+            inline,
+            payload_uri,
+            payload_size,
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

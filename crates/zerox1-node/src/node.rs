@@ -357,6 +357,12 @@ impl Zx01Node {
             bags_launch,
             config.skill_workspace.clone(),
             mpp_config,
+            // Build file delivery adapter if a gateway URL is configured.
+            config.filedelivery_0g_gateway.as_deref().map(|gateway| {
+                let indexer = config.filedelivery_0g_indexer.as_deref()
+                    .unwrap_or("https://indexer-storage-turbo.0g.ai");
+                std::sync::Arc::new(zerox1_filedelivery_0g::ZeroGStorage::new(gateway, indexer))
+            }),
         );
 
         // Load portfolio history from disk

@@ -452,6 +452,24 @@ pub struct Config {
     #[cfg(feature = "settlement")]
     #[arg(long, env = "ZX01_0G_AUTO_REGISTER", default_value_t = false)]
     pub zerog_auto_register: bool,
+
+    // ── File delivery ─────────────────────────────────────────────────────
+
+    /// Base URL of a 0G Storage gateway server for large DELIVER payload uploads.
+    /// Expects a server compatible with the 0G go-starter-kit API:
+    ///   POST <url>/api/v1/upload  (multipart, field "file")
+    /// When set, DELIVER payloads exceeding 1 MiB are automatically uploaded
+    /// and the envelope carries a zerog:// URI instead of the raw bytes.
+    /// Example: http://localhost:8080
+    #[arg(long, env = "ZX01_FILEDELIVERY_0G_GATEWAY")]
+    pub filedelivery_0g_gateway: Option<String>,
+
+    /// Base URL of the 0G Storage indexer for large DELIVER payload downloads.
+    /// Expects the standard indexer API:  GET <url>/file?root=0x<hash>
+    /// Defaults to the public mainnet indexer when not set.
+    /// Example: https://indexer-storage-turbo.0g.ai
+    #[arg(long, env = "ZX01_FILEDELIVERY_0G_INDEXER")]
+    pub filedelivery_0g_indexer: Option<String>,
 }
 
 impl Config {

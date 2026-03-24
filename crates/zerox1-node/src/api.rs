@@ -273,6 +273,9 @@ pub struct InboundEnvelope {
     pub feedback: Option<serde_json::Value>,
     /// Decoded NOTARIZE_BID payload fields (only present for NOTARIZE_BID messages).
     pub notarize_bid: Option<serde_json::Value>,
+    /// Decoded DELIVER payload fields (only present for DELIVER messages).
+    /// `inline_b64` carries content directly; `payload_uri` carries a storage ref.
+    pub deliver: Option<serde_json::Value>,
 }
 
 // ============================================================================
@@ -519,6 +522,13 @@ pub struct ApiInner {
     pub hosted_mpp_paid: Arc<RwLock<HashMap<String, u64>>>,
     /// reference (base58) → (challenge, created_at unix)
     pub mpp_challenges: Arc<Mutex<HashMap<String, (crate::mpp::MppChallenge, u64)>>>,
+
+    // File delivery
+    /// Optional 0G Storage adapter for large DELIVER payload offload.
+    /// Present when --filedelivery-0g-gateway is configured.
+    /// On send: payloads > INLINE_PAYLOAD_LIMIT are uploaded; envelope carries URI.
+    /// On receive: DeliverPayload with payload_uri is decoded and exposed in inbox event.
+    pub file_delivery: Option<Arc<zerox1_filedelivery_0g::ZeroGStorage>>,
 }
 
 /// Cheaply cloneable shared state passed to all axum handlers.
@@ -559,6 +569,7 @@ impl ApiState {
         #[cfg(feature = "bags")] bags_launch: Option<Arc<crate::bags::BagsLaunchClient>>,
         skill_workspace: Option<std::path::PathBuf>,
         mpp: Option<crate::mpp::MppConfig>,
+        file_delivery: Option<Arc<zerox1_filedelivery_0g::ZeroGStorage>>,
     ) -> (
         Self,
         mpsc::Receiver<OutboundRequest>,
@@ -656,6 +667,7 @@ impl ApiState {
             mpp,
             hosted_mpp_paid: Arc::new(RwLock::new(HashMap::new())),
             mpp_challenges: Arc::new(Mutex::new(HashMap::new())),
+            file_delivery,
         }));
 
         // Background task: evict expired hosted sessions every hour so the
@@ -779,6 +791,20 @@ impl ApiState {
             None
         };
 
+        let deliver = if env.msg_type == zerox1_protocol::message::MsgType::Deliver {
+            zerox1_protocol::payload::DeliverPayload::decode(&env.payload).ok().map(|p| {
+                serde_json::json!({
+                    "conversation_id": hex::encode(p.conversation_id),
+                    "content_type":    p.content_type,
+                    "inline_b64":      p.inline.as_deref().map(|b| B64.encode(b)),
+                    "payload_uri":     p.payload_uri,
+                    "payload_size":    p.payload_size,
+                })
+            })
+        } else {
+            None
+        };
+
         let inbound = InboundEnvelope {
             msg_type: format!("{}", env.msg_type),
             sender: hex::encode(env.sender),
@@ -789,6 +815,7 @@ impl ApiState {
             payload_b64: B64.encode(&env.payload),
             feedback,
             notarize_bid,
+            deliver,
         };
 
         let _ = self.0.inbox_tx.send(inbound.clone());
@@ -1204,6 +1231,54 @@ async fn send_envelope(
             }.encode()
         } else {
             raw_payload
+        }
+    } else if msg_type == zerox1_protocol::message::MsgType::Deliver {
+        // Wrap DELIVER payloads in the protocol-defined DeliverPayload CBOR format.
+        // If a file delivery adapter is configured and the payload exceeds the inline
+        // limit, upload the content and replace with a zerog:// URI reference so the
+        // envelope stays within the 64 KB transport limit.
+        use zerox1_filedelivery_core::FileDelivery;
+        let limit = zerox1_filedelivery_core::INLINE_PAYLOAD_LIMIT;
+        if raw_payload.len() > limit {
+            if let Some(fd) = &state.0.file_delivery {
+                match fd.upload(raw_payload.clone(), None).await {
+                    Ok(ref_) => {
+                        tracing::info!(
+                            uri = %ref_.uri,
+                            bytes = ref_.size_bytes,
+                            "DELIVER payload offloaded to 0G Storage"
+                        );
+                        zerox1_protocol::payload::DeliverPayload {
+                            conversation_id,
+                            content_type: ref_.content_type,
+                            inline: None,
+                            payload_uri: Some(ref_.uri),
+                            payload_size: Some(ref_.size_bytes),
+                        }.encode()
+                    }
+                    Err(e) => {
+                        tracing::warn!(err = %e, "0G Storage upload failed; sending inline (may exceed size limit)");
+                        zerox1_protocol::payload::DeliverPayload {
+                            conversation_id,
+                            content_type: None,
+                            inline: Some(raw_payload),
+                            payload_uri: None,
+                            payload_size: None,
+                        }.encode()
+                    }
+                }
+            } else {
+                // No file delivery configured — pass through raw (may hit size limit).
+                raw_payload
+            }
+        } else {
+            zerox1_protocol::payload::DeliverPayload {
+                conversation_id,
+                content_type: None,
+                inline: Some(raw_payload),
+                payload_uri: None,
+                payload_size: None,
+            }.encode()
         }
     } else {
         raw_payload

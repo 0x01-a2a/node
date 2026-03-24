@@ -86,7 +86,7 @@ impl MsgType {
 
     /// Returns true if this message type has a protocol-defined (parseable) payload.
     pub fn has_protocol_payload(self) -> bool {
-        matches!(self, Self::Feedback | Self::NotarizeBid | Self::Broadcast)
+        matches!(self, Self::Deliver | Self::Feedback | Self::NotarizeBid | Self::Broadcast)
     }
 }
 

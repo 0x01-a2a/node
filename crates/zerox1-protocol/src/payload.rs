@@ -1,6 +1,48 @@
 use crate::error::ProtocolError;
 use ciborium::value::Value;
 
+/// Proof that an agent can perform a declared capability.
+///
+/// Three proof types are supported:
+///
+/// - `"benchmark"` — agent ran a canonical LLM/tool benchmark and signed the output.
+///   `benchmark_id`, `input_hash`, `output_hash`, and `signature` are all populated.
+///
+/// - `"live"` — agent executed a live integration (web search, RPC call, API) and
+///   signed the result. `benchmark_id` names the integration (e.g. "web-search-v1").
+///   Requesters cannot replay the exact output but can verify structural validity.
+///
+/// - `"human-delegated"` — capability requires owner involvement (photo, form, call).
+///   `benchmark_id` and `input_hash`/`output_hash` are empty. `signature` is the
+///   owner's Ed25519 signature over `(capability_bytes || timestamp_le_u64_bytes)`,
+///   attesting they will fulfil requests. Superseded by on-chain delivery records
+///   after the first completed job.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CapabilityProof {
+    /// Capability tag matching the entry in ADVERTISE capabilities list.
+    pub capability: String,
+    /// Proof generation method: `"benchmark"` | `"live"` | `"human-delegated"`.
+    pub proof_type: String,
+    /// Canonical benchmark / integration identifier. Empty for human-delegated.
+    pub benchmark_id: String,
+    /// keccak256 of the canonical input bytes, hex-encoded. Empty for human-delegated.
+    pub input_hash: String,
+    /// keccak256 of the agent's output bytes, hex-encoded. Empty for human-delegated.
+    pub output_hash: String,
+    /// Ed25519 signature, hex-encoded 64 bytes.
+    /// benchmark/live: agent signs (input_hash_bytes || output_hash_bytes).
+    /// human-delegated: owner signs (capability_bytes || timestamp_le_u64_bytes).
+    pub signature: String,
+    /// Unix microseconds when the proof was generated.
+    pub timestamp: u64,
+    /// Public post URL used as attestation for `"human-delegated"` proofs.
+    /// E.g. a tweet URL. The aggregator fetches this and checks that the agent's
+    /// token address or agent_id appears in the post content before marking the
+    /// proof verified. Empty for benchmark and live proofs.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub attestation_url: String,
+}
+
 // ============================================================================
 // NOTARIZE_BID payload (doc 5, §5.4)
 // ============================================================================

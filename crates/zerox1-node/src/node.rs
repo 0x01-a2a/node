@@ -1306,8 +1306,40 @@ impl Zx01Node {
                                 })
                                 .unwrap_or_default();
                             let has_geo = val.get("geo").is_some();
-                            // Forward whenever there are caps OR geo — they are independent.
-                            if !caps.is_empty() || has_geo {
+                            // Validate token_address: 32–44 chars, base58 charset only.
+                            let validated_token_address: Option<String> = val
+                                .get("token_address")
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| {
+                                    let len = s.len();
+                                    if (32..=44).contains(&len)
+                                        && s.chars().all(|c| {
+                                            matches!(c,
+                                                '1'..='9'
+                                                | 'A'..='H'
+                                                | 'J'..='N'
+                                                | 'P'..='Z'
+                                                | 'a'..='k'
+                                                | 'm'..='z'
+                                            )
+                                        })
+                                    {
+                                        Some(s.to_string())
+                                    } else {
+                                        None
+                                    }
+                                });
+                            // Pass capability_proofs through as-is (validated by aggregator).
+                            let proofs: Vec<serde_json::Value> = val
+                                .get("capability_proofs")
+                                .and_then(|v| v.as_array())
+                                .cloned()
+                                .unwrap_or_default();
+                            let min_token_hold: Option<u64> = val
+                                .get("min_token_hold")
+                                .and_then(|v| v.as_u64());
+                            // Forward whenever there are caps OR geo OR token_address.
+                            if !caps.is_empty() || has_geo || validated_token_address.is_some() {
                                 let mut push = serde_json::json!({
                                     "msg_type":     "ADVERTISE",
                                     "sender":       hex::encode(env.sender),
@@ -1316,6 +1348,15 @@ impl Zx01Node {
                                 });
                                 if let Some(geo) = val.get("geo") {
                                     push["geo"] = geo.clone();
+                                }
+                                if let Some(token_addr) = validated_token_address {
+                                    push["token_address"] = serde_json::Value::String(token_addr);
+                                }
+                                if !proofs.is_empty() {
+                                    push["capability_proofs"] = serde_json::Value::Array(proofs);
+                                }
+                                if let Some(hold) = min_token_hold {
+                                    push["min_token_hold"] = serde_json::Value::Number(hold.into());
                                 }
                                 self.push_to_aggregator(push);
                             }

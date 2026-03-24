@@ -152,6 +152,13 @@ pub struct AdvertiseEvent {
     pub slot: u64,
     #[serde(default)]
     pub geo: Option<GeoInfo>,
+    // NEW:
+    #[serde(default)]
+    pub token_address: Option<String>,
+    #[serde(default)]
+    pub capability_proofs: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub min_token_hold: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -383,6 +390,17 @@ pub struct AgentReputation {
     /// geo country. None = not enough data; true/false = verdict.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub geo_consistent: Option<bool>,
+    /// Solana token address launched by this agent via Bags API.
+    /// Set on first ADVERTISE that includes a valid token_address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_address: Option<String>,
+    /// Capability proofs: one per declared capability, signed by the agent's identity key.
+    /// Passed through from ADVERTISE as raw JSON for client-side verification.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability_proofs: Vec<serde_json::Value>,
+    /// Agent-set minimum token hold for requesters. Optional — agent's own rule, not enforced by platform.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_token_hold: Option<u64>,
 }
 
 fn default_trend() -> String {
@@ -484,6 +502,9 @@ impl AgentReputation {
             city: None,
             latency: std::collections::HashMap::new(),
             geo_consistent: None,
+            token_address: None,
+            capability_proofs: Vec::new(),
+            min_token_hold: None,
         }
     }
 
@@ -1093,6 +1114,34 @@ CREATE INDEX IF NOT EXISTS idx_broadcast_log_sender ON broadcast_log(sender);
 ALTER TABLE broadcast_log ADD COLUMN content_url  TEXT;
 ALTER TABLE broadcast_log ADD COLUMN content_type TEXT;
 ",
+    // v16: Agent token address and capability proofs for tokenisation layer
+    "
+ALTER TABLE agent_registry ADD COLUMN token_address TEXT;
+CREATE TABLE IF NOT EXISTS capability_proofs (
+    agent_id         TEXT    NOT NULL,
+    capability        TEXT    NOT NULL,
+    proof_type        TEXT    NOT NULL DEFAULT 'benchmark',
+    benchmark_id      TEXT    NOT NULL,
+    input_hash        TEXT    NOT NULL,
+    output_hash       TEXT    NOT NULL,
+    signature         TEXT    NOT NULL,
+    timestamp         INTEGER NOT NULL,
+    last_seen         INTEGER NOT NULL,
+    attestation_url   TEXT    NOT NULL DEFAULT '',
+    verified          INTEGER NOT NULL DEFAULT 0,
+    verified_at       INTEGER,
+    PRIMARY KEY (agent_id, capability)
+);
+CREATE INDEX IF NOT EXISTS idx_cp_agent ON capability_proofs(agent_id);
+",
+    // v17: Social attestation verification columns (already in v16 CREATE TABLE;
+    // this migration is a no-op for fresh installs — only needed for existing v16 DBs)
+    "
+ALTER TABLE capability_proofs ADD COLUMN IF NOT EXISTS proof_type      TEXT    NOT NULL DEFAULT 'benchmark';
+ALTER TABLE capability_proofs ADD COLUMN IF NOT EXISTS attestation_url TEXT    NOT NULL DEFAULT '';
+ALTER TABLE capability_proofs ADD COLUMN IF NOT EXISTS verified        INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE capability_proofs ADD COLUMN IF NOT EXISTS verified_at     INTEGER;
+",
 ];
 
 struct Db(rusqlite::Connection);
@@ -1174,6 +1223,9 @@ impl Db {
                 city: None,
                 latency: std::collections::HashMap::new(),
                 geo_consistent: None,
+                token_address: None,
+                capability_proofs: Vec::new(),
+                min_token_hold: None,
             })
         })?;
 
@@ -1268,6 +1320,25 @@ impl Db {
         for row in rows {
             let (agent_id, region, rtt_ms) = row?;
             map.entry(agent_id).or_default().insert(region, rtt_ms);
+        }
+        Ok(map)
+    }
+
+    /// Load token_address from agent_registry: agent_id → token_address.
+    fn load_token_addresses(&self) -> rusqlite::Result<HashMap<String, String>> {
+        let mut stmt = self
+            .0
+            .prepare("SELECT agent_id, token_address FROM agent_registry WHERE token_address IS NOT NULL")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+            ))
+        })?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let (agent_id, token_address) = row?;
+            map.insert(agent_id, token_address);
         }
         Ok(map)
     }
@@ -2244,6 +2315,15 @@ impl ReputationStore {
             }
         }
 
+        // Populate token_address from agent_registry.
+        if let Ok(token_map) = db.load_token_addresses() {
+            for (agent_id, token_address) in token_map {
+                if let Some(rep) = agents.get_mut(&agent_id) {
+                    rep.token_address = Some(token_address);
+                }
+            }
+        }
+
         tracing::info!(
             "Loaded {} reputation records from {}",
             agents.len(),
@@ -2421,6 +2501,63 @@ impl ReputationStore {
     }
 
     /// Return all agents whose ownership has been claimed by the given wallet.
+    /// Returns unverified human-delegated capability proofs for the attestation verifier.
+    /// Each tuple: (agent_id, capability, attestation_url, token_address).
+    pub fn pending_attestations(&self) -> Vec<(String, String, String, String)> {
+        let db = self.db.lock().unwrap();
+        let Some(ref conn) = *db else { return vec![] };
+        let mut stmt = match conn.0.prepare(
+            "SELECT cp.agent_id, cp.capability, cp.attestation_url,
+                    COALESCE(ar.token_address, '') as token_address
+             FROM capability_proofs cp
+             LEFT JOIN agent_registry ar ON ar.agent_id = cp.agent_id
+             WHERE cp.proof_type = 'human-delegated'
+               AND cp.verified = 0
+               AND cp.attestation_url != ''
+             LIMIT 100",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("pending_attestations query failed: {e}");
+                return vec![];
+            }
+        };
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+        .unwrap_or_default()
+    }
+
+    /// Mark a human-delegated capability proof as verified after social post confirmation.
+    pub fn mark_attestation_verified(&self, agent_id: &str, capability: &str) {
+        let db = self.db.lock().unwrap();
+        let Some(ref conn) = *db else { return };
+        let now = now_secs() as i64;
+        let _ = conn.0.execute(
+            "UPDATE capability_proofs SET verified = 1, verified_at = ?1
+             WHERE agent_id = ?2 AND capability = ?3",
+            rusqlite::params![now, agent_id, capability],
+        );
+        // Reflect in memory so GET /agents returns updated state immediately.
+        drop(db);
+        let mut inner = self.inner.write().unwrap();
+        if let Some(rep) = inner.agents.get_mut(agent_id) {
+            for proof in rep.capability_proofs.iter_mut() {
+                if proof.get("capability").and_then(|v| v.as_str()) == Some(capability) {
+                    if let Some(obj) = proof.as_object_mut() {
+                        obj.insert("verified".to_string(), serde_json::Value::Bool(true));
+                    }
+                }
+            }
+        }
+    }
+
     pub fn get_agents_by_owner(&self, wallet: &str) -> Vec<AgentReputation> {
         let claimed = self.ownership_claimed.lock().unwrap();
         let agent_ids: Vec<String> = claimed
@@ -2733,6 +2870,91 @@ impl ReputationStore {
                         rep.city = city;
                     }
                 }
+
+                // Persist token_address if present and valid.
+                if let Some(ref token_addr) = ad.token_address {
+                    // Validate: base58 chars only, 32–44 chars.
+                    let valid = token_addr.len() >= 32
+                        && token_addr.len() <= 44
+                        && token_addr.chars().all(|c| {
+                            matches!(c,
+                                '1'..='9' | 'A'..='H' | 'J'..='N' | 'P'..='Z' |
+                                'a'..='k' | 'm'..='z'
+                            )
+                        });
+                    if valid {
+                        let db = self.db.lock().unwrap();
+                        if let Some(ref conn) = *db {
+                            let _ = conn.0.execute(
+                                "INSERT INTO agent_registry (agent_id, name, first_seen, last_seen, token_address) VALUES (?1, '', strftime('%s','now'), strftime('%s','now'), ?2)
+                                 ON CONFLICT(agent_id) DO UPDATE SET token_address = excluded.token_address",
+                                rusqlite::params![&ad.sender, token_addr],
+                            );
+                        }
+                        drop(db);
+                        let mut inner = self.inner.write().unwrap();
+                        if let Some(rep) = inner.agents.get_mut(&ad.sender) {
+                            rep.token_address = Some(token_addr.clone());
+                        }
+                    }
+                }
+
+                // Persist capability proofs (store per-capability, overwrite on re-advertise).
+                // Human-delegated proofs with a new attestation_url reset verified=0 so the
+                // background verifier re-checks the post.
+                if !ad.capability_proofs.is_empty() {
+                    let ts = now_secs();
+                    let db = self.db.lock().unwrap();
+                    if let Some(ref conn) = *db {
+                        for proof in &ad.capability_proofs {
+                            let cap  = proof.get("capability").and_then(|v| v.as_str()).unwrap_or("");
+                            let pt   = proof.get("proof_type").and_then(|v| v.as_str()).unwrap_or("benchmark");
+                            let bid  = proof.get("benchmark_id").and_then(|v| v.as_str()).unwrap_or("");
+                            let ih   = proof.get("input_hash").and_then(|v| v.as_str()).unwrap_or("");
+                            let oh   = proof.get("output_hash").and_then(|v| v.as_str()).unwrap_or("");
+                            let sig  = proof.get("signature").and_then(|v| v.as_str()).unwrap_or("");
+                            let pts  = proof.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let aurl = proof.get("attestation_url").and_then(|v| v.as_str()).unwrap_or("");
+                            // human-delegated proofs require attestation_url; others require benchmark_id.
+                            let valid = !cap.is_empty() && !sig.is_empty()
+                                && if pt == "human-delegated" { !aurl.is_empty() } else { !bid.is_empty() };
+                            if !valid { continue; }
+                            let _ = conn.0.execute(
+                                "INSERT INTO capability_proofs
+                                 (agent_id, capability, proof_type, benchmark_id, input_hash, output_hash,
+                                  signature, timestamp, last_seen, attestation_url, verified, verified_at)
+                                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,0,NULL)
+                                 ON CONFLICT(agent_id, capability) DO UPDATE SET
+                                   proof_type=excluded.proof_type,
+                                   benchmark_id=excluded.benchmark_id,
+                                   input_hash=excluded.input_hash,
+                                   output_hash=excluded.output_hash,
+                                   signature=excluded.signature,
+                                   timestamp=excluded.timestamp,
+                                   last_seen=excluded.last_seen,
+                                   attestation_url=excluded.attestation_url,
+                                   verified=CASE WHEN excluded.attestation_url != capability_proofs.attestation_url THEN 0 ELSE capability_proofs.verified END,
+                                   verified_at=CASE WHEN excluded.attestation_url != capability_proofs.attestation_url THEN NULL ELSE capability_proofs.verified_at END",
+                                rusqlite::params![&ad.sender, cap, pt, bid, ih, oh, sig, pts as i64, ts as i64, aurl],
+                            );
+                        }
+                    }
+                    drop(db);
+                    // Update in-memory proofs.
+                    let mut inner = self.inner.write().unwrap();
+                    if let Some(rep) = inner.agents.get_mut(&ad.sender) {
+                        rep.capability_proofs = ad.capability_proofs.clone();
+                    }
+                }
+
+                // Update min_token_hold in memory (no separate persistence needed — refreshed on ADVERTISE).
+                if let Some(hold) = ad.min_token_hold {
+                    let mut inner = self.inner.write().unwrap();
+                    if let Some(rep) = inner.agents.get_mut(&ad.sender) {
+                        rep.min_token_hold = Some(hold);
+                    }
+                }
+
                 None
             }
             IngestEvent::Dispute(d) => {

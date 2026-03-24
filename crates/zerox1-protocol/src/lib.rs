@@ -12,3 +12,4 @@ pub use envelope::Envelope;
 pub use error::ProtocolError;
 pub use message::MsgType;
 pub use payload::BroadcastPayload;
+pub use payload::CapabilityProof;

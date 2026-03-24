@@ -608,6 +608,57 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // ── Social attestation verifier ─────────────────────────────────────────
+    // Polls every 5 minutes for unverified human-delegated capability proofs.
+    // Fetches the attestation_url and checks the agent's token_address or agent_id
+    // appears in the page content. Marks verified=1 if found.
+    {
+        let verifier_store = state.store.clone();
+        let verifier_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .user_agent("zerox1-aggregator/attestation-verifier")
+            .build()
+            .expect("failed to build attestation verifier HTTP client");
+        tokio::spawn(async move {
+            tracing::info!("Attestation verifier started (polling every 5m)");
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                let rows = verifier_store.pending_attestations();
+                for (agent_id, capability, attestation_url, token_address) in rows {
+                    match verifier_client.get(&attestation_url).send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            match resp.text().await {
+                                Ok(body) => {
+                                    // Check that the page content references either the
+                                    // agent's token address or the agent_id (hex).
+                                    let found = (!token_address.is_empty() && body.contains(&token_address))
+                                        || body.contains(&agent_id);
+                                    if found {
+                                        verifier_store.mark_attestation_verified(&agent_id, &capability);
+                                        tracing::info!(
+                                            "Attestation verified: agent={} capability={}",
+                                            &agent_id[..8], capability
+                                        );
+                                    } else {
+                                        tracing::debug!(
+                                            "Attestation not yet confirmed: agent={} capability={} url={}",
+                                            &agent_id[..8], capability, attestation_url
+                                        );
+                                    }
+                                }
+                                Err(e) => tracing::warn!("Attestation body read failed: {e}"),
+                            }
+                        }
+                        Ok(resp) => tracing::warn!(
+                            "Attestation URL returned {}: {}", resp.status(), attestation_url
+                        ),
+                        Err(e) => tracing::warn!("Attestation fetch failed for {attestation_url}: {e}"),
+                    }
+                }
+            }
+        });
+    }
+
     let app = public_routes
         .merge(gated_routes)
         .layer(

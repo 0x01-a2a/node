@@ -617,6 +617,7 @@ async fn main() -> anyhow::Result<()> {
         let verifier_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .user_agent("zerox1-aggregator/attestation-verifier")
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("failed to build attestation verifier HTTP client");
         tokio::spawn(async move {
@@ -625,6 +626,14 @@ async fn main() -> anyhow::Result<()> {
                 tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                 let rows = verifier_store.pending_attestations();
                 for (agent_id, capability, attestation_url, token_address) in rows {
+                    if !is_safe_attestation_url(&attestation_url) {
+                        tracing::warn!(
+                            "Attestation URL rejected (SSRF guard): agent={} url={}",
+                            &agent_id[..agent_id.len().min(8)],
+                            &attestation_url[..attestation_url.len().min(64)],
+                        );
+                        continue;
+                    }
                     match verifier_client.get(&attestation_url).send().await {
                         Ok(resp) if resp.status().is_success() => {
                             match resp.text().await {
@@ -637,12 +646,12 @@ async fn main() -> anyhow::Result<()> {
                                         verifier_store.mark_attestation_verified(&agent_id, &capability);
                                         tracing::info!(
                                             "Attestation verified: agent={} capability={}",
-                                            &agent_id[..8], capability
+                                            &agent_id[..agent_id.len().min(8)], capability
                                         );
                                     } else {
                                         tracing::debug!(
-                                            "Attestation not yet confirmed: agent={} capability={} url={}",
-                                            &agent_id[..8], capability, attestation_url
+                                            "Attestation not yet confirmed: agent={} capability={}",
+                                            &agent_id[..agent_id.len().min(8)], capability
                                         );
                                     }
                                 }
@@ -650,9 +659,14 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
                         Ok(resp) => tracing::warn!(
-                            "Attestation URL returned {}: {}", resp.status(), attestation_url
+                            "Attestation URL returned {}: {}",
+                            resp.status(),
+                            &attestation_url[..attestation_url.len().min(64)],
                         ),
-                        Err(e) => tracing::warn!("Attestation fetch failed for {attestation_url}: {e}"),
+                        Err(e) => tracing::warn!(
+                            "Attestation fetch failed for {}: {e}",
+                            &attestation_url[..attestation_url.len().min(64)],
+                        ),
                     }
                 }
             }
@@ -681,6 +695,83 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+// ============================================================================
+// SSRF guard for social attestation verifier
+// ============================================================================
+
+/// Returns `true` only if the URL is safe to fetch for social attestation.
+///
+/// Rules (H-2 fix):
+/// - Scheme must be `https` (rejects `http`, `file`, `ftp`, etc.)
+/// - Host must not be a raw IP in loopback (127.x.x.x, ::1), link-local
+///   (169.254.x.x), or RFC1918 ranges (10.x, 172.16-31.x, 192.168.x).
+/// - We do not perform DNS resolution; we only reject hosts that are already
+///   expressed as blocked IP literals in the URL.
+fn is_safe_attestation_url(url: &str) -> bool {
+    let parsed = match reqwest::Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => return false,
+    };
+
+    // Scheme must be https.
+    if parsed.scheme() != "https" {
+        return false;
+    }
+
+    // Extract raw host string — reject if absent.
+    let host_str = match parsed.host_str() {
+        Some(h) => h,
+        None => return false,
+    };
+
+    // If the host is a numeric IPv4 address, check blocked ranges.
+    if let Ok(addr) = host_str.parse::<std::net::Ipv4Addr>() {
+        let octets = addr.octets();
+        // Loopback: 127.0.0.0/8
+        if octets[0] == 127 {
+            return false;
+        }
+        // Link-local: 169.254.0.0/16
+        if octets[0] == 169 && octets[1] == 254 {
+            return false;
+        }
+        // RFC1918: 10.0.0.0/8
+        if octets[0] == 10 {
+            return false;
+        }
+        // RFC1918: 172.16.0.0/12
+        if octets[0] == 172 && (16..=31).contains(&octets[1]) {
+            return false;
+        }
+        // RFC1918: 192.168.0.0/16
+        if octets[0] == 192 && octets[1] == 168 {
+            return false;
+        }
+        return true;
+    }
+
+    // Strip surrounding brackets for IPv6 literals (e.g. "[::1]").
+    let ipv6_candidate = host_str
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host_str);
+
+    if let Ok(addr) = ipv6_candidate.parse::<std::net::Ipv6Addr>() {
+        // Block loopback (::1) and link-local (fe80::/10).
+        if addr.is_loopback() {
+            return false;
+        }
+        let segments = addr.segments();
+        if (segments[0] & 0xffc0) == 0xfe80 {
+            return false;
+        }
+        return true;
+    }
+
+    // Domain names are allowed — DNS resolution is not performed here.
+    true
 }
 
 // ============================================================================

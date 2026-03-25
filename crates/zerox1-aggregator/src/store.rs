@@ -9,8 +9,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use ed25519_dalek::{Signature, VerifyingKey, Verifier};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 // ============================================================================
 // Input validation
@@ -159,6 +161,10 @@ pub struct AdvertiseEvent {
     pub capability_proofs: Vec<serde_json::Value>,
     #[serde(default)]
     pub min_token_hold: Option<u64>,
+    #[serde(default)]
+    pub downpayment_bps: Option<u32>,
+    #[serde(default)]
+    pub price_range_usd: Option<[f64; 2]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -401,11 +407,20 @@ pub struct AgentReputation {
     /// Agent-set minimum token hold for requesters. Optional — agent's own rule, not enforced by platform.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_token_hold: Option<u64>,
+    /// Downpayment required from requesters in basis points (1000 = 10%, 2000 = 20%).
+    /// 0 = no downpayment. Set by the agent in ADVERTISE.
+    #[serde(default, skip_serializing_if = "crate::store::is_zero_u32")]
+    pub downpayment_bps: u32,
+    /// Optional [min, max] job price range in USD. Helps requesters size the downpayment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_range_usd: Option<[f64; 2]>,
 }
 
 fn default_trend() -> String {
     "stable".to_string()
 }
+
+pub fn is_zero_u32(v: &u32) -> bool { *v == 0 }
 
 /// Check whether a measured latency profile is plausible for a claimed country.
 ///
@@ -505,6 +520,8 @@ impl AgentReputation {
             token_address: None,
             capability_proofs: Vec::new(),
             min_token_hold: None,
+            downpayment_bps: 0,
+            price_range_usd: None,
         }
     }
 
@@ -1142,6 +1159,13 @@ ALTER TABLE capability_proofs ADD COLUMN IF NOT EXISTS attestation_url TEXT    N
 ALTER TABLE capability_proofs ADD COLUMN IF NOT EXISTS verified        INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE capability_proofs ADD COLUMN IF NOT EXISTS verified_at     INTEGER;
 ",
+    // v18: Downpayment model — agent declares required downpayment % and price range in ADVERTISE.
+    // downpayment_bps: basis points (1000 = 10%); price_range_usd_min/max in USD.
+    "
+ALTER TABLE agent_registry ADD COLUMN IF NOT EXISTS downpayment_bps    INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE agent_registry ADD COLUMN IF NOT EXISTS price_range_usd_min REAL;
+ALTER TABLE agent_registry ADD COLUMN IF NOT EXISTS price_range_usd_max REAL;
+",
 ];
 
 struct Db(rusqlite::Connection);
@@ -1226,6 +1250,8 @@ impl Db {
                 token_address: None,
                 capability_proofs: Vec::new(),
                 min_token_hold: None,
+                downpayment_bps: 0,
+                price_range_usd: None,
             })
         })?;
 
@@ -2872,6 +2898,8 @@ impl ReputationStore {
                 }
 
                 // Persist token_address if present and valid.
+                // M-4 fix: token_address is immutable after first write — the ON CONFLICT
+                // clause only sets it when the existing value is NULL (first-set wins).
                 if let Some(ref token_addr) = ad.token_address {
                     // Validate: base58 chars only, 32–44 chars.
                     let valid = token_addr.len() >= 32
@@ -2887,22 +2915,65 @@ impl ReputationStore {
                         if let Some(ref conn) = *db {
                             let _ = conn.0.execute(
                                 "INSERT INTO agent_registry (agent_id, name, first_seen, last_seen, token_address) VALUES (?1, '', strftime('%s','now'), strftime('%s','now'), ?2)
-                                 ON CONFLICT(agent_id) DO UPDATE SET token_address = excluded.token_address",
+                                 ON CONFLICT(agent_id) DO UPDATE SET token_address = COALESCE(agent_registry.token_address, excluded.token_address)",
                                 rusqlite::params![&ad.sender, token_addr],
                             );
                         }
                         drop(db);
+                        // Only update the in-memory value if not already set.
                         let mut inner = self.inner.write().unwrap();
                         if let Some(rep) = inner.agents.get_mut(&ad.sender) {
-                            rep.token_address = Some(token_addr.clone());
+                            if rep.token_address.is_none() {
+                                rep.token_address = Some(token_addr.clone());
+                            }
                         }
+                    }
+                }
+
+                // Persist downpayment_bps and price_range_usd — mutable, updated on every ADVERTISE.
+                {
+                    let bps = ad.downpayment_bps.unwrap_or(0).min(5000);
+                    let price_min = ad.price_range_usd.map(|r| r[0]);
+                    let price_max = ad.price_range_usd.map(|r| r[1]);
+                    let db = self.db.lock().unwrap();
+                    if let Some(ref conn) = *db {
+                        let _ = conn.0.execute(
+                            "INSERT INTO agent_registry (agent_id, name, first_seen, last_seen, downpayment_bps, price_range_usd_min, price_range_usd_max)
+                             VALUES (?1, '', strftime('%s','now'), strftime('%s','now'), ?2, ?3, ?4)
+                             ON CONFLICT(agent_id) DO UPDATE SET
+                               downpayment_bps = excluded.downpayment_bps,
+                               price_range_usd_min = excluded.price_range_usd_min,
+                               price_range_usd_max = excluded.price_range_usd_max",
+                            rusqlite::params![&ad.sender, bps, price_min, price_max],
+                        );
+                    }
+                    drop(db);
+                    let mut inner = self.inner.write().unwrap();
+                    if let Some(rep) = inner.agents.get_mut(&ad.sender) {
+                        rep.downpayment_bps = bps;
+                        rep.price_range_usd = match (price_min, price_max) {
+                            (Some(min), Some(max)) => Some([min, max]),
+                            _ => None,
+                        };
                     }
                 }
 
                 // Persist capability proofs (store per-capability, overwrite on re-advertise).
                 // Human-delegated proofs with a new attestation_url reset verified=0 so the
                 // background verifier re-checks the post.
+                // M-1 fix: verify Ed25519 signature before storing any proof.
                 if !ad.capability_proofs.is_empty() {
+                    // Parse the agent's Ed25519 verifying key once for all proofs.
+                    // Only hex-encoded 32-byte agent IDs carry an Ed25519 key; base58
+                    // 8004 IDs are Solana pubkeys on the same curve but we only verify
+                    // proofs from hex-format senders where we can decode the raw bytes.
+                    let verifying_key_opt: Option<VerifyingKey> = (|| {
+                        if ad.sender.len() != 64 { return None; }
+                        let key_bytes = hex::decode(&ad.sender).ok()?;
+                        let arr: [u8; 32] = key_bytes.try_into().ok()?;
+                        VerifyingKey::from_bytes(&arr).ok()
+                    })();
+
                     let ts = now_secs();
                     let db = self.db.lock().unwrap();
                     if let Some(ref conn) = *db {
@@ -2919,6 +2990,40 @@ impl ReputationStore {
                             let valid = !cap.is_empty() && !sig.is_empty()
                                 && if pt == "human-delegated" { !aurl.is_empty() } else { !bid.is_empty() };
                             if !valid { continue; }
+
+                            // Verify Ed25519 signature (M-1 fix).
+                            // Only enforce when we have a verifying key (hex-format sender).
+                            if let Some(ref vk) = verifying_key_opt {
+                                let sig_ok: bool = (|| -> Option<bool> {
+                                    let sig_bytes = hex::decode(sig).ok()?;
+                                    let sig_arr: [u8; 64] = sig_bytes.try_into().ok()?;
+                                    let signature = Signature::from_bytes(&sig_arr);
+                                    let msg: Vec<u8> = if pt == "human-delegated" {
+                                        // msg = capability_bytes || timestamp_le_u64_bytes
+                                        let mut m = cap.as_bytes().to_vec();
+                                        m.extend_from_slice(&pts.to_le_bytes());
+                                        m
+                                    } else {
+                                        // msg = SHA-256(input) || SHA-256(output)
+                                        let ih_bytes = hex::decode(ih).ok()?;
+                                        let oh_bytes = hex::decode(oh).ok()?;
+                                        let mut m = Vec::with_capacity(64);
+                                        m.extend_from_slice(&Sha256::digest(&ih_bytes));
+                                        m.extend_from_slice(&Sha256::digest(&oh_bytes));
+                                        m
+                                    };
+                                    Some(vk.verify(&msg, &signature).is_ok())
+                                })().unwrap_or(false);
+
+                                if !sig_ok {
+                                    tracing::debug!(
+                                        "Capability proof signature invalid: agent={} capability={} proof_type={}",
+                                        &ad.sender[..ad.sender.len().min(8)], cap, pt
+                                    );
+                                    continue;
+                                }
+                            }
+
                             let _ = conn.0.execute(
                                 "INSERT INTO capability_proofs
                                  (agent_id, capability, proof_type, benchmark_id, input_hash, output_hash,
@@ -2940,10 +3045,52 @@ impl ReputationStore {
                         }
                     }
                     drop(db);
-                    // Update in-memory proofs.
+                    // Update in-memory proofs — only include proofs that passed
+                    // signature verification (mirrors what was written to the DB).
+                    let verified_proofs: Vec<serde_json::Value> = ad.capability_proofs
+                        .iter()
+                        .filter(|proof| {
+                            let cap = proof.get("capability").and_then(|v| v.as_str()).unwrap_or("");
+                            let pt  = proof.get("proof_type").and_then(|v| v.as_str()).unwrap_or("benchmark");
+                            let bid = proof.get("benchmark_id").and_then(|v| v.as_str()).unwrap_or("");
+                            let ih  = proof.get("input_hash").and_then(|v| v.as_str()).unwrap_or("");
+                            let oh  = proof.get("output_hash").and_then(|v| v.as_str()).unwrap_or("");
+                            let sig = proof.get("signature").and_then(|v| v.as_str()).unwrap_or("");
+                            let pts = proof.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let aurl = proof.get("attestation_url").and_then(|v| v.as_str()).unwrap_or("");
+                            // Basic field validity check.
+                            let field_valid = !cap.is_empty() && !sig.is_empty()
+                                && if pt == "human-delegated" { !aurl.is_empty() } else { !bid.is_empty() };
+                            if !field_valid { return false; }
+                            // Signature check (same logic as the DB path above).
+                            if let Some(ref vk) = verifying_key_opt {
+                                let ok: bool = (|| -> Option<bool> {
+                                    let sig_bytes = hex::decode(sig).ok()?;
+                                    let sig_arr: [u8; 64] = sig_bytes.try_into().ok()?;
+                                    let signature = Signature::from_bytes(&sig_arr);
+                                    let msg: Vec<u8> = if pt == "human-delegated" {
+                                        let mut m = cap.as_bytes().to_vec();
+                                        m.extend_from_slice(&pts.to_le_bytes());
+                                        m
+                                    } else {
+                                        let ih_bytes = hex::decode(ih).ok()?;
+                                        let oh_bytes = hex::decode(oh).ok()?;
+                                        let mut m = Vec::with_capacity(64);
+                                        m.extend_from_slice(&Sha256::digest(&ih_bytes));
+                                        m.extend_from_slice(&Sha256::digest(&oh_bytes));
+                                        m
+                                    };
+                                    Some(vk.verify(&msg, &signature).is_ok())
+                                })().unwrap_or(false);
+                                if !ok { return false; }
+                            }
+                            true
+                        })
+                        .cloned()
+                        .collect();
                     let mut inner = self.inner.write().unwrap();
                     if let Some(rep) = inner.agents.get_mut(&ad.sender) {
-                        rep.capability_proofs = ad.capability_proofs.clone();
+                        rep.capability_proofs = verified_proofs;
                     }
                 }
 

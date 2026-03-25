@@ -219,11 +219,20 @@ pub struct NegotiateProposeRequest {
     pub recipient: String,
     /// 16-byte hex conversation ID. Auto-generated if omitted.
     pub conversation_id: Option<String>,
-    /// Bid amount in USDC microunits. Default: 0 (unspecified).
+    /// Bid amount in USD microunits. Default: 0 (unspecified).
     pub amount_usdc_micro: Option<u64>,
     /// Max counter rounds (default: 2).
     pub max_rounds: Option<u8>,
     pub message: String,
+    // ── Token payment fields ──────────────────────────────────────────────
+    /// Solana base58 mint of the receiving agent's token (payment currency).
+    pub token_mint: Option<String>,
+    /// Solana tx signature proving downpayment token purchase.
+    pub payment_tx: Option<String>,
+    /// USD value of the downpayment in microunits (1 USD = 1_000_000).
+    pub payment_usd_micro: Option<u64>,
+    /// Total agreed price in USD microunits (full job, not just downpayment).
+    pub total_price_usd_micro: Option<u64>,
 }
 
 /// Request body for POST /negotiate/counter (and /hosted/negotiate/counter).
@@ -235,6 +244,8 @@ pub struct NegotiateCounterRequest {
     pub round: u8,
     pub max_rounds: Option<u8>,
     pub message: Option<String>,
+    /// Solana base58 mint of the agent's token (so counterparty knows what to buy).
+    pub token_mint: Option<String>,
 }
 
 /// Request body for POST /negotiate/accept (and /hosted/negotiate/accept).
@@ -244,6 +255,12 @@ pub struct NegotiateAcceptRequest {
     pub conversation_id: String,
     pub amount_usdc_micro: u64,
     pub message: Option<String>,
+    /// Solana base58 mint of the agent's token (payment currency for remainder).
+    pub token_mint: Option<String>,
+    /// USD value of downpayment already received (microunits).
+    pub downpayment_usd_micro: Option<u64>,
+    /// USD value of remaining balance due after preview (microunits).
+    pub remaining_usd_micro: Option<u64>,
 }
 
 // Escrow endpoint types removed — on-chain settlement moved to settlement/solana.
@@ -290,6 +307,8 @@ const SESSION_TTL_SECS: u64 = 7 * 24 * 3600;
 const MAX_SENDS_PER_MINUTE: u32 = 60;
 /// Maximum API `/envelopes/send` requests per 60-second window.
 const MAX_API_SENDS_PER_MINUTE: u32 = 120;
+/// Maximum `/identity/sign` requests per 60-second window.
+const MAX_SIGN_PER_MINUTE: u32 = 60;
 /// Maximum `/registry/8004/register-prepare` requests per 60-second window.
 /// Each request makes an external Solana RPC call, so cap tightly.
 const MAX_REGISTRY_PREPARE_PER_MINUTE: u32 = 10;
@@ -505,6 +524,8 @@ pub struct ApiInner {
     /// PID of the running zeroclaw agent process. Set by POST /agent/register-pid.
     /// Used by POST /agent/reload to restart the agent so new skills are loaded.
     pub agent_pid: Mutex<Option<u32>>,
+    /// Rate limit for POST /identity/sign — max 60 signs per minute.
+    sign_rate_limit: Mutex<RateLimitWindow>,
     /// Rate limit for POST /agent/reload — max 3 reloads per minute.
     agent_reload_rate_limit: Mutex<RateLimitWindow>,
     /// Daily budget for Kora gas sponsorship — 100 uses per 24-hour window.
@@ -655,6 +676,10 @@ impl ApiState {
             #[cfg(feature = "bags")]
             bags_launch,
             agent_pid: Mutex::new(None),
+            sign_rate_limit: Mutex::new(RateLimitWindow {
+                window_start: now_secs(),
+                count: 0,
+            }),
             agent_reload_rate_limit: Mutex::new(RateLimitWindow {
                 window_start: now_secs(),
                 count: 0,
@@ -854,6 +879,8 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
         // Visualization
         .route("/ws/events", get(ws_events_handler))
         .route("/identity", get(get_identity))
+        .route("/identity/sign", post(identity_sign))
+        .route("/identity/export-key", get(identity_export_key))
         .route("/peers", get(get_peers))
         .route("/reputation/{agent_id}", get(get_reputation))
         .route("/batch/{agent_id}/{epoch}", get(get_batch))
@@ -1029,6 +1056,93 @@ async fn get_identity(headers: HeaderMap, State(state): State<ApiState>) -> Resp
     Json(serde_json::json!({
         "agent_id": hex::encode(state.0.self_agent),
         "name":     state.0.self_name,
+    }))
+    .into_response()
+}
+
+/// Sign arbitrary bytes with the node's Ed25519 identity key.
+///
+/// Used by zeroclaw to sign capability proof hashes before broadcasting ADVERTISE.
+/// Requires read or master access. Max input: 256 bytes (512 hex chars).
+async fn identity_sign(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
+        return resp;
+    }
+    // Per-minute rate limit to prevent key-oracle abuse if credentials leak.
+    {
+        let now = now_secs();
+        let mut rl = state.0.sign_rate_limit.lock().await;
+        if now.saturating_sub(rl.window_start) >= 60 {
+            rl.window_start = now;
+            rl.count = 0;
+        }
+        if rl.count >= MAX_SIGN_PER_MINUTE {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({ "error": "rate limit exceeded" })),
+            )
+                .into_response();
+        }
+        rl.count += 1;
+    }
+    let bytes_hex = match body.get("bytes_hex").and_then(|v| v.as_str()) {
+        Some(h) => h,
+        None => {
+            return Json(serde_json::json!({ "error": "bytes_hex required" })).into_response()
+        }
+    };
+    if bytes_hex.len() > 512 {
+        return Json(serde_json::json!({ "error": "bytes_hex too long (max 256 bytes)" }))
+            .into_response();
+    }
+    let bytes = match hex::decode(bytes_hex) {
+        Ok(b) => b,
+        Err(_) => {
+            return Json(serde_json::json!({ "error": "invalid hex" })).into_response()
+        }
+    };
+    use ed25519_dalek::Signer as _;
+    let sig = state.0.node_signing_key.sign(&bytes);
+    Json(serde_json::json!({
+        "signature_hex": hex::encode(sig.to_bytes()),
+        "agent_id":      hex::encode(state.0.self_agent),
+    }))
+    .into_response()
+}
+
+/// Export the node's Ed25519 identity keypair as a base58 string.
+///
+/// Returns the 64-byte Solana-compatible keypair (seed || pubkey) encoded as
+/// base58 — the same format used by Solana CLI and most wallets. This allows
+/// the user to import their agent's hot wallet into any Solana wallet app.
+///
+/// Requires master (api_secret) access only — never accessible with read-only keys.
+async fn identity_export_key(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+) -> Response {
+    // Always require the master secret — never open even in dev mode.
+    if state.0.api_secret.is_none() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "key export requires api_secret to be configured" })),
+        )
+            .into_response();
+    }
+    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
+        return resp;
+    }
+    let seed = state.0.node_signing_key.to_bytes(); // [u8; 32]
+    let pubkey = state.0.node_signing_key.verifying_key().to_bytes(); // [u8; 32]
+    let mut keypair_bytes = [0u8; 64];
+    keypair_bytes[..32].copy_from_slice(&seed);
+    keypair_bytes[32..].copy_from_slice(&pubkey);
+    Json(serde_json::json!({
+        "secret_key_b58": bs58::encode(&keypair_bytes).into_string(),
     }))
     .into_response()
 }
@@ -1655,13 +1769,23 @@ async fn negotiate_propose(
     }
     let amount = req.amount_usdc_micro.unwrap_or(0);
     let max_rounds = req.max_rounds.unwrap_or(2);
-    let payload = build_negotiate_payload(
-        amount,
-        serde_json::json!({
-            "max_rounds": max_rounds,
-            "message": req.message,
-        }),
-    );
+    let mut propose_extra = serde_json::json!({
+        "max_rounds": max_rounds,
+        "message": req.message,
+    });
+    if let Some(ref mint) = req.token_mint {
+        propose_extra["token_mint"] = serde_json::Value::String(mint.clone());
+    }
+    if let Some(ref tx) = req.payment_tx {
+        propose_extra["payment_tx"] = serde_json::Value::String(tx.clone());
+    }
+    if let Some(usd) = req.payment_usd_micro {
+        propose_extra["payment_usd_micro"] = serde_json::Value::Number(usd.into());
+    }
+    if let Some(total) = req.total_price_usd_micro {
+        propose_extra["total_price_usd_micro"] = serde_json::Value::Number(total.into());
+    }
+    let payload = build_negotiate_payload(amount, propose_extra);
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let outbound = OutboundRequest {
         msg_type: MsgType::Propose,
@@ -1765,14 +1889,15 @@ async fn negotiate_counter(
             Json(serde_json::json!({ "error": "message: exceeds maximum length" })),
         );
     }
-    let payload = build_negotiate_payload(
-        req.amount_usdc_micro,
-        serde_json::json!({
-            "round": req.round,
-            "max_rounds": max_rounds,
-            "message": message,
-        }),
-    );
+    let mut counter_extra = serde_json::json!({
+        "round": req.round,
+        "max_rounds": max_rounds,
+        "message": message,
+    });
+    if let Some(ref mint) = req.token_mint {
+        counter_extra["token_mint"] = serde_json::Value::String(mint.clone());
+    }
+    let payload = build_negotiate_payload(req.amount_usdc_micro, counter_extra);
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let outbound = OutboundRequest {
         msg_type: MsgType::Counter,
@@ -1863,12 +1988,17 @@ async fn negotiate_accept(
             Json(serde_json::json!({ "error": "message: exceeds maximum length" })),
         );
     }
-    let payload = build_negotiate_payload(
-        req.amount_usdc_micro,
-        serde_json::json!({
-            "message": message,
-        }),
-    );
+    let mut accept_extra = serde_json::json!({ "message": message });
+    if let Some(ref mint) = req.token_mint {
+        accept_extra["token_mint"] = serde_json::Value::String(mint.clone());
+    }
+    if let Some(dp) = req.downpayment_usd_micro {
+        accept_extra["downpayment_usd_micro"] = serde_json::Value::Number(dp.into());
+    }
+    if let Some(rem) = req.remaining_usd_micro {
+        accept_extra["remaining_usd_micro"] = serde_json::Value::Number(rem.into());
+    }
+    let payload = build_negotiate_payload(req.amount_usdc_micro, accept_extra);
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let outbound = OutboundRequest {
         msg_type: MsgType::Accept,
@@ -2214,13 +2344,23 @@ async fn hosted_negotiate_propose(
     };
     let amount = req.amount_usdc_micro.unwrap_or(0);
     let max_rounds = req.max_rounds.unwrap_or(2);
-    let payload = build_negotiate_payload(
-        amount,
-        serde_json::json!({
-            "max_rounds": max_rounds,
-            "message": req.message,
-        }),
-    );
+    let mut hosted_propose_extra = serde_json::json!({
+        "max_rounds": max_rounds,
+        "message": req.message,
+    });
+    if let Some(ref mint) = req.token_mint {
+        hosted_propose_extra["token_mint"] = serde_json::Value::String(mint.clone());
+    }
+    if let Some(ref tx) = req.payment_tx {
+        hosted_propose_extra["payment_tx"] = serde_json::Value::String(tx.clone());
+    }
+    if let Some(usd) = req.payment_usd_micro {
+        hosted_propose_extra["payment_usd_micro"] = serde_json::Value::Number(usd.into());
+    }
+    if let Some(total) = req.total_price_usd_micro {
+        hosted_propose_extra["total_price_usd_micro"] = serde_json::Value::Number(total.into());
+    }
+    let payload = build_negotiate_payload(amount, hosted_propose_extra);
     let env = {
         let now = now_secs();
         let mut sessions = state.0.hosted_sessions.write().await;
@@ -2325,14 +2465,15 @@ async fn hosted_negotiate_counter(
             )
         }
     };
-    let payload = build_negotiate_payload(
-        req.amount_usdc_micro,
-        serde_json::json!({
-            "round": req.round,
-            "max_rounds": max_rounds,
-            "message": req.message.unwrap_or_default(),
-        }),
-    );
+    let mut hosted_counter_extra = serde_json::json!({
+        "round": req.round,
+        "max_rounds": max_rounds,
+        "message": req.message.unwrap_or_default(),
+    });
+    if let Some(ref mint) = req.token_mint {
+        hosted_counter_extra["token_mint"] = serde_json::Value::String(mint.clone());
+    }
+    let payload = build_negotiate_payload(req.amount_usdc_micro, hosted_counter_extra);
     let env = {
         let now = now_secs();
         let mut sessions = state.0.hosted_sessions.write().await;
@@ -2425,12 +2566,17 @@ async fn hosted_negotiate_accept(
             )
         }
     };
-    let payload = build_negotiate_payload(
-        req.amount_usdc_micro,
-        serde_json::json!({
-            "message": req.message.unwrap_or_default(),
-        }),
-    );
+    let mut hosted_accept_extra = serde_json::json!({ "message": req.message.unwrap_or_default() });
+    if let Some(ref mint) = req.token_mint {
+        hosted_accept_extra["token_mint"] = serde_json::Value::String(mint.clone());
+    }
+    if let Some(dp) = req.downpayment_usd_micro {
+        hosted_accept_extra["downpayment_usd_micro"] = serde_json::Value::Number(dp.into());
+    }
+    if let Some(rem) = req.remaining_usd_micro {
+        hosted_accept_extra["remaining_usd_micro"] = serde_json::Value::Number(rem.into());
+    }
+    let payload = build_negotiate_payload(req.amount_usdc_micro, hosted_accept_extra);
     let env = {
         let now = now_secs();
         let mut sessions = state.0.hosted_sessions.write().await;

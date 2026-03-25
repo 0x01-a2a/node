@@ -1338,6 +1338,23 @@ impl Zx01Node {
                             let min_token_hold: Option<u64> = val
                                 .get("min_token_hold")
                                 .and_then(|v| v.as_u64());
+                            // Downpayment model fields: cap bps at 5000 (50%).
+                            let downpayment_bps: Option<u32> = val
+                                .get("downpayment_bps")
+                                .and_then(|v| v.as_u64())
+                                .map(|n| (n.min(5000)) as u32);
+                            let price_range_usd: Option<[f64; 2]> = val
+                                .get("price_range_usd")
+                                .and_then(|v| v.as_array())
+                                .and_then(|arr| {
+                                    if arr.len() == 2 {
+                                        let min = arr[0].as_f64()?;
+                                        let max = arr[1].as_f64()?;
+                                        Some([min, max])
+                                    } else {
+                                        None
+                                    }
+                                });
                             // Forward whenever there are caps OR geo OR token_address.
                             if !caps.is_empty() || has_geo || validated_token_address.is_some() {
                                 let mut push = serde_json::json!({
@@ -1357,6 +1374,12 @@ impl Zx01Node {
                                 }
                                 if let Some(hold) = min_token_hold {
                                     push["min_token_hold"] = serde_json::Value::Number(hold.into());
+                                }
+                                if let Some(bps) = downpayment_bps {
+                                    push["downpayment_bps"] = serde_json::Value::Number(bps.into());
+                                }
+                                if let Some([min, max]) = price_range_usd {
+                                    push["price_range_usd"] = serde_json::json!([min, max]);
                                 }
                                 self.push_to_aggregator(push);
                             }

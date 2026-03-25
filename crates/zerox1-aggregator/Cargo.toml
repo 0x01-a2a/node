@@ -43,6 +43,7 @@ solana-sdk = { workspace = true }
 petgraph   = "0.6"
 reqwest    = { workspace = true }
 ed25519-dalek = "2.1"
+sha2        = { workspace = true }
 rand = "0.8"
 bs58 = "0.5"
 # zerox1-settlement-celo = { version = "0.1.0", optional = true }  # uncomment after publishing

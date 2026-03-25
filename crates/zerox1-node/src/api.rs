@@ -3789,7 +3789,7 @@ async fn x402_pay(
 // ============================================================================
 
 #[derive(Deserialize)]
-pub(crate) struct SweepRequest {
+pub struct SweepRequest {
     destination: String,
     amount: Option<u64>,
 }

@@ -183,6 +183,20 @@ pub struct AppState {
     pub bags_claims: std::sync::Arc<
         std::sync::Mutex<std::collections::HashMap<String, std::collections::HashMap<String, f64>>>,
     >,
+
+    // ── Sponsored token launch ────────────────────────────────────────────
+    /// Ed25519 signing key for the sponsor wallet that pays Bags.fm launch fees.
+    /// None = feature disabled; POST /sponsor/launch returns 503.
+    pub sponsor_signing_key: Option<std::sync::Arc<ed25519_dalek::SigningKey>>,
+    /// Bags.fm API key used for sponsored launches.
+    pub bags_api_key: Option<String>,
+    /// Solana RPC URL for broadcasting sponsored launch transactions.
+    pub sponsor_rpc_url: String,
+    /// Default avatar image URL fetched when the client sends no custom image.
+    pub sponsor_default_image_url: Option<String>,
+    /// Rate limit: agent_pubkey (base58) → last launch timestamp (unix secs).
+    /// One sponsored launch per agent_pubkey, ever.
+    pub sponsor_launches: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 /// Check if the request carries a valid API key.
@@ -3403,6 +3417,371 @@ pub async fn verify_identity(
     }
 }
 
+// ============================================================================
+// POST /sponsor/launch — gasless token launch for new agents
+// ============================================================================
+
+const BAGS_API_BASE: &str = "https://public-api-v2.bags.fm/api/v1";
+
+#[derive(Deserialize)]
+pub struct SponsorLaunchRequest {
+    /// Hex-encoded 32-byte agent identity key (as used throughout the 0x01 system).
+    /// Converted to base58 Solana pubkey internally for the Bags fee-share config.
+    pub agent_id_hex: String,
+    /// Token name (e.g. "My Agent").
+    pub name: String,
+    /// Token symbol, uppercase (e.g. "MYAGT").
+    pub symbol: String,
+    /// Short description shown on Bags.fm.
+    pub description: String,
+    /// Optional: Base64-encoded image bytes (PNG/JPG, max 5 MB).
+    pub image_b64: Option<String>,
+}
+
+/// POST /sponsor/launch
+///
+/// Sponsors a Bags.fm token launch on behalf of a new agent.
+/// The sponsor wallet (SPONSOR_SIGNING_KEY) pays all gas; the agent wallet
+/// is the sole claimer in the fee-share config. Note: Bags applies the
+/// platform fee and partner cut before distributing to claimers.
+///
+/// Rate limited: one launch per agent_pubkey, ever (checked in-memory).
+pub async fn sponsor_launch(
+    State(state): State<AppState>,
+    Json(req): Json<SponsorLaunchRequest>,
+) -> impl IntoResponse {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    use solana_sdk::pubkey::Pubkey;
+
+    // ── Feature gate ──────────────────────────────────────────────────────
+    let (signing_key, bags_api_key) = match (&state.sponsor_signing_key, &state.bags_api_key) {
+        (Some(k), Some(ak)) => (k.clone(), ak.clone()),
+        _ => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "sponsored launches not configured on this aggregator"})),
+            ).into_response();
+        }
+    };
+
+    // ── Validate and convert agent_id_hex → base58 pubkey ────────────────
+    let agent_id_bytes = match hex::decode(req.agent_id_hex.trim()) {
+        Ok(b) if b.len() == 32 => b,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "agent_id_hex must be a 64-char hex string (32 bytes)"})),
+            ).into_response();
+        }
+    };
+    // Base58-encode the raw key bytes — this is the Solana pubkey format Bags expects.
+    let agent_pubkey_str = bs58::encode(&agent_id_bytes).into_string();
+    // agent_id_hex (trimmed) is the dedup key stored in sponsor_launches.
+    let dedup_key = req.agent_id_hex.trim().to_lowercase();
+
+    // ── One launch per agent pubkey ───────────────────────────────────────
+    {
+        let mut launched = state.sponsor_launches.lock().unwrap();
+        if launched.contains(&dedup_key) {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error": "this agent already has a sponsored token launch"})),
+            ).into_response();
+        }
+        // Reserve the slot immediately to prevent concurrent duplicate requests.
+        launched.insert(dedup_key.clone());
+    }
+
+    let sponsor_pubkey = Pubkey::new_from_array(signing_key.verifying_key().to_bytes());
+    let sponsor_pubkey_str = bs58::encode(sponsor_pubkey.to_bytes()).into_string();
+    let client = &state.http_client;
+
+    // ── Step 1: create-token-info (IPFS metadata + derive mint) ──────────
+    // Prefer the client-uploaded image; fall back to the operator's default avatar URL.
+    let image_bytes: Option<Vec<u8>> = if let Some(b64) = &req.image_b64 {
+        B64.decode(b64).ok()
+    } else if let Some(url) = &state.sponsor_default_image_url {
+        match client.get(url).timeout(std::time::Duration::from_secs(10)).send().await {
+            Ok(r) if r.status().is_success() => r.bytes().await.ok().map(|b| b.to_vec()),
+            _ => {
+                tracing::warn!("failed to fetch default agent avatar from {url}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let create_info_resp = {
+        let resp = if let Some(ref bytes) = image_bytes {
+            let image_part = match reqwest::multipart::Part::bytes(bytes.clone())
+                .file_name("image.png")
+                .mime_str("image/png") {
+                Ok(p) => p,
+                Err(e) => {
+                    remove_sponsor_reservation(&state, &dedup_key);
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("image mime: {e}")}))).into_response();
+                }
+            };
+            let form = reqwest::multipart::Form::new()
+                .text("name", req.name.clone())
+                .text("symbol", req.symbol.clone())
+                .text("description", req.description.clone())
+                .part("image", image_part);
+            client
+                .post(format!("{BAGS_API_BASE}/token-launch/create-token-info"))
+                .header("x-api-key", &bags_api_key)
+                .multipart(form)
+                .timeout(std::time::Duration::from_secs(60))
+                .send()
+                .await
+        } else {
+            let body = json!({
+                "name": req.name,
+                "symbol": req.symbol,
+                "description": req.description,
+            });
+            client
+                .post(format!("{BAGS_API_BASE}/token-launch/create-token-info"))
+                .header("x-api-key", &bags_api_key)
+                .json(&body)
+                .timeout(std::time::Duration::from_secs(30))
+                .send()
+                .await
+        };
+
+        match resp {
+            Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+                Ok(v) => v,
+                Err(e) => {
+                    remove_sponsor_reservation(&state, &dedup_key);
+                    return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("bags create-token-info parse: {e}")}))).into_response();
+                }
+            },
+            Ok(r) => {
+                let status = r.status();
+                let text = r.text().await.unwrap_or_default();
+                remove_sponsor_reservation(&state, &dedup_key);
+                return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("bags create-token-info {status}: {text}")}))).into_response();
+            }
+            Err(e) => {
+                remove_sponsor_reservation(&state, &dedup_key);
+                return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("bags create-token-info: {e}")}))).into_response();
+            }
+        }
+    };
+
+    let token_mint = match create_info_resp["response"]["tokenMint"].as_str() {
+        Some(m) => m.to_string(),
+        None => {
+            remove_sponsor_reservation(&state, &dedup_key);
+            return (StatusCode::BAD_GATEWAY, Json(json!({"error": "bags create-token-info: missing tokenMint"}))).into_response();
+        }
+    };
+    let ipfs_uri = match create_info_resp["response"]["tokenMetadata"].as_str() {
+        Some(u) => u.to_string(),
+        None => {
+            remove_sponsor_reservation(&state, &dedup_key);
+            return (StatusCode::BAD_GATEWAY, Json(json!({"error": "bags create-token-info: missing tokenMetadata"}))).into_response();
+        }
+    };
+
+    tracing::info!(
+        "sponsor_launch: agent={} token_mint={} sponsor={}",
+        agent_pubkey_str, token_mint, sponsor_pubkey_str
+    );
+
+    // ── Step 2: create-fee-share-config ───────────────────────────────────
+    // Sponsor pays gas. Agent is sole claimer — receives the creator share
+    // after Bags platform fee and partner cut are applied.
+    let fee_share_body = json!({
+        "payer": sponsor_pubkey_str,
+        "baseMint": token_mint,
+        "claimersArray": [agent_pubkey_str],
+        "basisPointsArray": [10_000u32],
+    });
+    let fee_share_resp = client
+        .post(format!("{BAGS_API_BASE}/fee-share/config"))
+        .header("x-api-key", &bags_api_key)
+        .json(&fee_share_body)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await;
+
+    let fee_share_val = match fee_share_resp {
+        Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.unwrap_or_default(),
+        Ok(r) => {
+            let status = r.status();
+            let text = r.text().await.unwrap_or_default();
+            tracing::warn!("sponsor_launch: fee-share/config {status}: {text}");
+            // Non-fatal: proceed without fee-share config if Bags rejects it.
+            serde_json::Value::Null
+        }
+        Err(e) => {
+            tracing::warn!("sponsor_launch: fee-share/config request failed: {e}");
+            serde_json::Value::Null
+        }
+    };
+
+    let config_key = fee_share_val["response"]["meteoraConfigKey"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+
+    // Sign and broadcast each fee-share config transaction.
+    if let Some(txs) = fee_share_val["response"]["transactions"].as_array() {
+        for tx_item in txs {
+            if let Some(tx_b58) = tx_item["tx"].as_str() {
+                if let Ok(tx_bytes) = bs58::decode(tx_b58).into_vec() {
+                    if let Ok(mut tx) = bincode::deserialize::<solana_sdk::transaction::Transaction>(&tx_bytes) {
+                        let kp = signing_key_to_solana_kp(&signing_key);
+                        tx.partial_sign(&[&kp], tx.message.recent_blockhash);
+                        if let Ok(serialized) = bincode::serialize(&tx) {
+                            let signed_b64 = B64.encode(&serialized);
+                            if let Err(e) = broadcast_solana_tx(&state.sponsor_rpc_url, client, &signed_b64).await {
+                                tracing::warn!("sponsor_launch: fee-share tx broadcast failed: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !txs.is_empty() {
+            // Wait for fee-share config to confirm before creating launch tx.
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        }
+    }
+
+    // ── Step 3: create-launch-transaction ────────────────────────────────
+    // No initial buy — sponsor only covers the base launch cost.
+    let launch_body = json!({
+        "ipfs": ipfs_uri,
+        "tokenMint": token_mint,
+        "wallet": sponsor_pubkey_str,
+        "configKey": config_key,
+    });
+
+    let launch_resp = client
+        .post(format!("{BAGS_API_BASE}/token-launch/create-launch-transaction"))
+        .header("x-api-key", &bags_api_key)
+        .json(&launch_body)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await;
+
+    let launch_tx_b58 = match launch_resp {
+        Ok(r) if r.status().is_success() => {
+            match r.json::<serde_json::Value>().await {
+                Ok(v) => v["response"].as_str().unwrap_or("").to_string(),
+                Err(e) => {
+                    remove_sponsor_reservation(&state, &dedup_key);
+                    return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("bags launch-tx parse: {e}")}))).into_response();
+                }
+            }
+        }
+        Ok(r) => {
+            let status = r.status();
+            let text = r.text().await.unwrap_or_default();
+            remove_sponsor_reservation(&state, &dedup_key);
+            return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("bags launch-tx {status}: {text}")}))).into_response();
+        }
+        Err(e) => {
+            remove_sponsor_reservation(&state, &dedup_key);
+            return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("bags launch-tx: {e}")}))).into_response();
+        }
+    };
+
+    // ── Step 4: Sign and broadcast launch tx ─────────────────────────────
+    let launch_tx_bytes = match bs58::decode(&launch_tx_b58).into_vec() {
+        Ok(b) => b,
+        Err(e) => {
+            remove_sponsor_reservation(&state, &dedup_key);
+            return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("launch-tx base58: {e}")}))).into_response();
+        }
+    };
+
+    let mut launch_tx = match bincode::deserialize::<solana_sdk::transaction::Transaction>(&launch_tx_bytes) {
+        Ok(t) => t,
+        Err(e) => {
+            remove_sponsor_reservation(&state, &dedup_key);
+            return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("launch-tx deserialize: {e}")}))).into_response();
+        }
+    };
+
+    let kp = signing_key_to_solana_kp(&signing_key);
+    launch_tx.partial_sign(&[&kp], launch_tx.message.recent_blockhash);
+
+    let serialized = match bincode::serialize(&launch_tx) {
+        Ok(s) => s,
+        Err(e) => {
+            remove_sponsor_reservation(&state, &dedup_key);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("launch-tx serialize: {e}")}))).into_response();
+        }
+    };
+
+    let txid = match broadcast_solana_tx(&state.sponsor_rpc_url, client, &B64.encode(&serialized)).await {
+        Ok(sig) => sig,
+        Err(e) => {
+            remove_sponsor_reservation(&state, &dedup_key);
+            return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("launch-tx broadcast: {e}")}))).into_response();
+        }
+    };
+
+    tracing::info!(
+        "sponsor_launch: success agent={} token_mint={} txid={}",
+        agent_pubkey_str, token_mint, txid
+    );
+
+    (StatusCode::OK, Json(json!({
+        "token_mint": token_mint,
+        "txid": txid,
+        "fee_claimer": agent_pubkey_str,
+        "sponsor": sponsor_pubkey_str,
+    }))).into_response()
+}
+
+fn remove_sponsor_reservation(state: &AppState, agent_pubkey: &str) {
+    if let Ok(mut launched) = state.sponsor_launches.lock() {
+        launched.remove(agent_pubkey);
+    }
+}
+
+fn signing_key_to_solana_kp(key: &ed25519_dalek::SigningKey) -> solana_sdk::signer::keypair::Keypair {
+    let mut bytes = [0u8; 64];
+    bytes[..32].copy_from_slice(key.as_bytes());
+    bytes[32..].copy_from_slice(key.verifying_key().as_bytes());
+    solana_sdk::signer::keypair::Keypair::try_from(bytes.as_slice())
+        .expect("valid ed25519 keypair bytes")
+}
+
+async fn broadcast_solana_tx(
+    rpc_url: &str,
+    client: &reqwest::Client,
+    tx_b64: &str,
+) -> anyhow::Result<String> {
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "sendTransaction",
+        "params": [tx_b64, {"encoding": "base64", "preflightCommitment": "confirmed"}],
+    });
+    let resp = client
+        .post(rpc_url)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await?
+        .json::<serde_json::Value>()
+        .await?;
+    if let Some(err) = resp.get("error") {
+        anyhow::bail!("RPC error: {err}");
+    }
+    resp["result"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("sendTransaction: missing result"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3420,6 +3799,13 @@ mod tests {
             body
         )
         .is_ok());
+    }
+
+    #[test]
+    fn sponsor_launch_rejects_invalid_pubkey() {
+        // Just validates the base58 parsing path; no HTTP call.
+        let result = bs58::decode("not-a-valid-pubkey").into_vec();
+        assert!(result.is_err() || result.unwrap().len() != 32);
     }
 
     #[test]

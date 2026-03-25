@@ -11,6 +11,7 @@ use axum::{
     Router,
 };
 use clap::Parser;
+use ed25519_dalek::SigningKey as EdSigningKey;
 use tokio::sync::broadcast;
 
 use api::AppState;
@@ -229,6 +230,35 @@ struct Config {
     /// Useful for genesis/genesis-relay nodes and internal tooling.
     #[arg(long, env = "AGGREGATOR_EXEMPT_AGENTS", value_delimiter = ',')]
     exempt_agents: Vec<String>,
+
+    // ── Sponsored token launch ────────────────────────────────────────────
+
+    /// Base58-encoded Ed25519 private key (64 bytes: seed || pubkey) for the
+    /// sponsor wallet that pays Bags.fm launch fees on behalf of new agents.
+    /// The same format as Phantom / Solana CLI keypair export.
+    /// When absent, POST /sponsor/launch returns 503.
+    #[arg(long, env = "SPONSOR_SIGNING_KEY")]
+    sponsor_signing_key: Option<String>,
+
+    /// Bags.fm API key used for sponsored token launches.
+    /// Required when SPONSOR_SIGNING_KEY is set.
+    #[arg(long, env = "BAGS_API_KEY")]
+    bags_api_key: Option<String>,
+
+    /// Solana RPC URL used for sponsored launch transactions.
+    #[arg(
+        long,
+        env = "SPONSOR_RPC_URL",
+        default_value = "https://api.mainnet-beta.solana.com"
+    )]
+    sponsor_rpc_url: String,
+
+    /// Public URL of the default agent avatar image (PNG/JPG, ≤1 MB).
+    /// Fetched once per launch when the mobile client sends no custom image.
+    /// Host it anywhere accessible from the aggregator server.
+    /// Example: https://0x01.world/default-agent.png
+    #[arg(long, env = "SPONSOR_DEFAULT_IMAGE_URL")]
+    sponsor_default_image_url: Option<String>,
 }
 
 #[tokio::main]
@@ -340,6 +370,33 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // ── Sponsor signing key ───────────────────────────────────────────────
+    let sponsor_signing_key = config.sponsor_signing_key.as_deref().and_then(|s| {
+        match bs58::decode(s).into_vec() {
+            Ok(bytes) if bytes.len() == 64 => {
+                let seed: [u8; 32] = bytes[..32].try_into().ok()?;
+                let key = EdSigningKey::from_bytes(&seed);
+                let pubkey = bs58::encode(key.verifying_key().to_bytes()).into_string();
+                tracing::info!("Sponsor wallet: {pubkey}");
+                Some(std::sync::Arc::new(key))
+            }
+            Ok(bytes) if bytes.len() == 32 => {
+                let seed: [u8; 32] = bytes.try_into().ok()?;
+                let key = EdSigningKey::from_bytes(&seed);
+                let pubkey = bs58::encode(key.verifying_key().to_bytes()).into_string();
+                tracing::info!("Sponsor wallet: {pubkey}");
+                Some(std::sync::Arc::new(key))
+            }
+            _ => {
+                tracing::warn!("SPONSOR_SIGNING_KEY is set but not a valid base58 keypair — sponsored launches disabled");
+                None
+            }
+        }
+    });
+    if sponsor_signing_key.is_none() && config.bags_api_key.is_some() {
+        tracing::warn!("BAGS_API_KEY is set but SPONSOR_SIGNING_KEY is missing — sponsored launches disabled");
+    }
+
     let state = AppState {
         store,
         ingest_secret: config.ingest_secret,
@@ -379,6 +436,11 @@ async fn main() -> anyhow::Result<()> {
         )),
         skr_league_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
         bags_claims: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        sponsor_signing_key,
+        bags_api_key: config.bags_api_key,
+        sponsor_rpc_url: config.sponsor_rpc_url,
+        sponsor_default_image_url: config.sponsor_default_image_url,
+        sponsor_launches: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
     };
 
     // Capital Flow indexer (GAP-02) moved to settlement/solana.
@@ -414,6 +476,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/league/current", get(api::get_skr_league))
         .route("/league/bags-claim", post(api::post_bags_claim))
         .route("/agents", get(api::get_agents))
+        // Sponsored token launch — no auth, rate-limited per agent pubkey
+        .route("/sponsor/launch", post(api::sponsor_launch))
         // Mobile app read endpoints — must be public (mobile has no API key)
         .route("/agents/{agent_id}/profile", get(api::get_agent_profile))
         .route("/activity", get(api::get_activity))

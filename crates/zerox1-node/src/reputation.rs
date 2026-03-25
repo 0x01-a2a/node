@@ -30,6 +30,12 @@ pub struct ReputationTracker {
     current_epoch: u64,
 }
 
+impl Default for ReputationTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ReputationTracker {
     pub fn new() -> Self {
         Self {

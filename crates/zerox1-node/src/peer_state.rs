@@ -51,6 +51,12 @@ pub struct PeerStateMap {
     pending_keys: HashMap<PeerId, VerifyingKey>,
 }
 
+impl Default for PeerStateMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PeerStateMap {
     pub fn new() -> Self {
         Self {

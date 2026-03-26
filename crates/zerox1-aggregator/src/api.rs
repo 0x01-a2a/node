@@ -3665,7 +3665,8 @@ pub async fn sponsor_launch(
     let fee_share_body = json!({
         "payer": sponsor_pubkey_str,
         "baseMint": token_mint,
-        "feeClaimers": [{ "user": agent_pubkey_str, "userBps": 10_000u32 }],
+        "claimersArray": [agent_pubkey_str],
+        "basisPointsArray": [10_000u32],
     });
     let fee_share_resp = client
         .post(format!("{BAGS_API_BASE}/fee-share/config"))
@@ -3697,13 +3698,14 @@ pub async fn sponsor_launch(
 
     let config_key = fee_share_val["response"]["meteoraConfigKey"]
         .as_str()
+        .or_else(|| fee_share_val["response"]["feeShareAuthority"].as_str())
         .unwrap_or("")
         .to_string();
 
     // Sign and broadcast each fee-share config transaction.
     if let Some(txs) = fee_share_val["response"]["transactions"].as_array() {
         for tx_item in txs {
-            if let Some(tx_b58) = tx_item["tx"].as_str() {
+            if let Some(tx_b58) = tx_item["transaction"].as_str() {
                 if let Ok(tx_bytes) = bs58::decode(tx_b58).into_vec() {
                     if let Ok(mut tx) = bincode::deserialize::<solana_sdk::transaction::Transaction>(&tx_bytes) {
                         let kp = signing_key_to_solana_kp(&signing_key);

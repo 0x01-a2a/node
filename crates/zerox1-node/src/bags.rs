@@ -199,11 +199,15 @@ struct CreateTokenInfoResponse {
     token_metadata: String,
 }
 
-/// Fee-share config response (v2): config key renamed, transactions are objects.
+/// Fee-share config response (v2).
+/// `meteoraConfigKey` is present when needsCreation=true; absent when config already exists.
 #[derive(Deserialize)]
 struct FeeShareConfigInner {
-    #[serde(rename = "meteoraConfigKey")]
-    config_key: String,
+    #[serde(rename = "meteoraConfigKey", default)]
+    config_key: Option<String>,
+    /// Fallback key name when needsCreation=false.
+    #[serde(rename = "feeShareAuthority", default)]
+    fee_share_authority: Option<String>,
     #[serde(default)]
     transactions: Vec<FeeShareTxItem>,
 }
@@ -211,6 +215,7 @@ struct FeeShareConfigInner {
 /// A single fee-share config transaction item (base58-encoded).
 #[derive(Deserialize)]
 struct FeeShareTxItem {
+    #[serde(rename = "transaction")]
     tx: String,
 }
 
@@ -395,15 +400,11 @@ impl BagsLaunchClient {
         claimers: &[&str],
         bps: &[u32],
     ) -> anyhow::Result<(String, Vec<String>)> {
-        let fee_claimers: Vec<serde_json::Value> = claimers
-            .iter()
-            .zip(bps.iter())
-            .map(|(user, user_bps)| serde_json::json!({ "user": user, "userBps": user_bps }))
-            .collect();
         let body = serde_json::json!({
             "payer": payer,
             "baseMint": base_mint,
-            "feeClaimers": fee_claimers,
+            "claimersArray": claimers,
+            "basisPointsArray": bps,
         });
         let r: BagsResponse<FeeShareConfigInner> = self
             .post_json("fee-share/config", &body)
@@ -412,7 +413,10 @@ impl BagsLaunchClient {
             .await
             .map_err(|e| anyhow!("Bags fee-share config parse error: {e}"))?;
         let txs: Vec<String> = r.response.transactions.into_iter().map(|t| t.tx).collect();
-        Ok((r.response.config_key, txs))
+        let config_key = r.response.config_key
+            .or(r.response.fee_share_authority)
+            .unwrap_or_default();
+        Ok((config_key, txs))
     }
 
     /// Step 3 — Build the partially-signed token launch transaction.

@@ -1975,6 +1975,7 @@ impl Db {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_bounty(
         &self,
         sender: &str,

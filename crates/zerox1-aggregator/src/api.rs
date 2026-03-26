@@ -3665,8 +3665,7 @@ pub async fn sponsor_launch(
     let fee_share_body = json!({
         "payer": sponsor_pubkey_str,
         "baseMint": token_mint,
-        "claimersArray": [agent_pubkey_str],
-        "basisPointsArray": [10_000u32],
+        "feeClaimers": [{ "user": agent_pubkey_str, "userBps": 10_000u32 }],
     });
     let fee_share_resp = client
         .post(format!("{BAGS_API_BASE}/fee-share/config"))

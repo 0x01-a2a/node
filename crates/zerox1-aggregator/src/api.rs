@@ -3722,12 +3722,14 @@ pub async fn sponsor_launch(
 
     // ── Step 3: create-launch-transaction ────────────────────────────────
     // No initial buy — sponsor only covers the base launch cost.
-    let launch_body = json!({
+    let mut launch_body = json!({
         "ipfs": ipfs_uri,
         "tokenMint": token_mint,
         "wallet": sponsor_pubkey_str,
-        "configKey": config_key,
     });
+    if !config_key.is_empty() {
+        launch_body["configKey"] = json!(config_key);
+    }
 
     let launch_resp = client
         .post(format!("{BAGS_API_BASE}/token-launch/create-launch-transaction"))

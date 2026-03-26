@@ -3681,13 +3681,18 @@ pub async fn sponsor_launch(
         Ok(r) => {
             let status = r.status();
             let text = r.text().await.unwrap_or_default();
-            tracing::warn!("sponsor_launch: fee-share/config {status}: {text}");
-            // Non-fatal: proceed without fee-share config if Bags rejects it.
-            serde_json::Value::Null
+            tracing::error!("sponsor_launch: fee-share/config {status}: {text}");
+            remove_sponsor_reservation(&state, &dedup_key);
+            return (StatusCode::BAD_GATEWAY, Json(json!({
+                "error": format!("bags fee-share/config failed ({status})"),
+                "bags_response": text,
+                "request_body": fee_share_body,
+            }))).into_response();
         }
         Err(e) => {
-            tracing::warn!("sponsor_launch: fee-share/config request failed: {e}");
-            serde_json::Value::Null
+            tracing::error!("sponsor_launch: fee-share/config request failed: {e}");
+            remove_sponsor_reservation(&state, &dedup_key);
+            return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("bags fee-share/config: {e}")}))).into_response();
         }
     };
 
@@ -3722,14 +3727,12 @@ pub async fn sponsor_launch(
 
     // ── Step 3: create-launch-transaction ────────────────────────────────
     // No initial buy — sponsor only covers the base launch cost.
-    let mut launch_body = json!({
+    let launch_body = json!({
         "ipfs": ipfs_uri,
         "tokenMint": token_mint,
         "wallet": sponsor_pubkey_str,
+        "configKey": config_key,
     });
-    if !config_key.is_empty() {
-        launch_body["configKey"] = json!(config_key);
-    }
 
     let launch_resp = client
         .post(format!("{BAGS_API_BASE}/token-launch/create-launch-transaction"))

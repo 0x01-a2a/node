@@ -2494,6 +2494,29 @@ impl ReputationStore {
     }
 
     /// Mark an agent as sleeping (true) or awake (false).
+    /// Store the agent's own token mint address (first-set wins — immutable after first write).
+    /// Called by nodes after a successful /bags/launch to ensure the aggregator knows the token.
+    pub fn set_token_address(&self, agent_id: &str, token_address: &str) {
+        // Persist to DB (first-set wins via ON CONFLICT).
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            let _ = conn.0.execute(
+                "INSERT INTO agent_registry (agent_id, name, first_seen, last_seen, token_address) \
+                 VALUES (?1, '', strftime('%s','now'), strftime('%s','now'), ?2) \
+                 ON CONFLICT(agent_id) DO UPDATE SET token_address = COALESCE(agent_registry.token_address, excluded.token_address)",
+                rusqlite::params![agent_id, token_address],
+            );
+        }
+        drop(db);
+        // Update in-memory only if not already set.
+        let mut inner = self.inner.write().unwrap();
+        if let Some(rep) = inner.agents.get_mut(agent_id) {
+            if rep.token_address.is_none() {
+                rep.token_address = Some(token_address.to_string());
+            }
+        }
+    }
+
     pub fn set_sleeping(&self, agent_id: &str, sleeping: bool) {
         let mut states = self.sleep_states.lock().unwrap();
         if sleeping {

@@ -1512,6 +1512,53 @@ fn verify_request_signature(pubkey: &str, signature: &str, body: &[u8]) -> Resul
         .map_err(|_| StatusCode::UNAUTHORIZED)
 }
 
+/// POST /agents/{agent_id}/token
+///
+/// Store the agent's launched token address in the aggregator DB.
+/// First-set wins — cannot be overwritten once set.
+/// Authentication: Ed25519 signature of the JSON body in X-Signature header.
+pub async fn post_agent_token(
+    State(state): State<AppState>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+    body_bytes: axum::body::Bytes,
+) -> Result<impl IntoResponse, StatusCode> {
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    struct Body {
+        agent_id: String,
+        token_address: String,
+    }
+
+    let sig = headers.get("X-Signature").and_then(|h| h.to_str().ok());
+    let Some(sig) = sig else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+
+    let body: Body = serde_json::from_slice(&body_bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    // Path param must match body agent_id.
+    if body.agent_id != agent_id {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Validate token_address: base58 charset, 32–44 chars.
+    let addr = body.token_address.trim();
+    let valid = (32..=44).contains(&addr.len())
+        && addr.chars().all(|c| {
+            matches!(c,
+                '1'..='9' | 'A'..='H' | 'J'..='N' | 'P'..='Z' | 'a'..='k' | 'm'..='z')
+        });
+    if !valid {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    verify_request_signature(&body.agent_id, sig, &body_bytes)?;
+
+    state.store.set_token_address(&body.agent_id, addr);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// POST /fcm/register
 ///
 /// Register or update the FCM device token for an agent.

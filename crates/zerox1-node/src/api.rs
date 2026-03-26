@@ -372,6 +372,36 @@ async fn report_bags_claim_to_aggregator(
     }
 }
 
+/// Report the agent's launched token mint to the aggregator.
+/// Fires-and-forgets; failure is non-fatal.
+#[cfg(feature = "bags")]
+async fn report_token_to_aggregator(state: &ApiState, token_mint: &str) {
+    use ed25519_dalek::Signer;
+
+    let Some(base) = state.0.aggregator_url.clone() else {
+        return;
+    };
+    let agent_id = hex::encode(state.0.node_signing_key.verifying_key().to_bytes());
+    let body = serde_json::json!({
+        "agent_id": agent_id,
+        "token_address": token_mint,
+    });
+    let body_bytes = match serde_json::to_vec(&body) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    let sig = state.0.node_signing_key.sign(&body_bytes);
+    let url = format!("{}/agents/{}/token", base.trim_end_matches('/'), agent_id);
+    let req = state.0.http_client
+        .post(url)
+        .header("X-Signature", hex::encode(sig.to_bytes()))
+        .header("Content-Type", "application/json")
+        .body(body_bytes);
+    if let Err(e) = req.send().await {
+        tracing::warn!("token report to aggregator failed: {e}");
+    }
+}
+
 /// Active hosted-agent session — one per registered hosted agent.
 ///
 /// On registration the host generates a fresh ed25519 sub-keypair.
@@ -5167,6 +5197,9 @@ async fn bags_launch_handler(
         })
         .await;
 
+    // ── Step 6: Persist token_mint in aggregator DB ──────────────────────────
+    report_token_to_aggregator(&state, &token_mint).await;
+
     tracing::info!(
         "Bags token launched: {} ({}) mint={} txid={}",
         req.name,
@@ -5327,34 +5360,72 @@ async fn bags_claim_handler(
     .into_response()
 }
 
-/// GET /bags/positions — list tokens launched by this agent with claimable fees.
+/// GET /bags/positions — list tokens launched by this agent with claimable fee info.
+///
+/// Calls `token-launch/claimable-positions?wallet=` for per-token earned/claimable
+/// SOL amounts. Local portfolio history seeds the list so tokens with zero fees
+/// (launched with no initial buy) still appear with claimableSOL = 0.
 #[cfg(feature = "bags")]
 async fn bags_positions_handler(headers: HeaderMap, State(state): State<ApiState>) -> Response {
     if let Some(resp) = require_read_or_master_access(&state, &headers) {
         return resp;
     }
-    let launch = match state.0.bags_launch.as_ref() {
-        Some(l) => l.clone(),
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": "Bags API key not configured"})),
-            )
-                .into_response()
-        }
+
+    let Some(launch) = state.0.bags_launch.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "Bags API key not configured"})),
+        )
+            .into_response();
     };
 
     let agent_pubkey = Pubkey::new_from_array(state.0.node_signing_key.verifying_key().to_bytes());
     let agent_wallet = agent_pubkey.to_string();
 
-    match launch.launched_tokens(&agent_wallet).await {
-        Ok(positions) => Json(serde_json::json!({"positions": positions})).into_response(),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": format!("positions: {e}")})),
-        )
-            .into_response(),
+    // Local portfolio history — tokens we know regardless of fee accumulation.
+    let local_mints: std::collections::HashSet<String> = {
+        let history = state.0.portfolio_history.read().await;
+        history.events.iter()
+            .filter_map(|e| match e {
+                PortfolioEvent::BagsLaunch { token_mint, .. } => Some(token_mint.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // Bags claimable-positions: per-token claimable SOL and tx count.
+    let (mut positions, seen_mints) = match launch.claimable_positions(&agent_wallet).await {
+        Ok(data) => {
+            let mut seen = std::collections::HashSet::new();
+            if let Some(arr) = data.as_array() {
+                for pos in arr {
+                    if let Some(m) = pos.get("tokenMint").and_then(|v| v.as_str()) {
+                        seen.insert(m.to_string());
+                    }
+                }
+                (arr.clone(), seen)
+            } else {
+                (vec![], std::collections::HashSet::new())
+            }
+        }
+        Err(e) => {
+            tracing::warn!("claimable-positions fetch failed: {e}");
+            (vec![], std::collections::HashSet::new())
+        }
+    };
+
+    // Append locally-known tokens that have zero fees yet (not in API response).
+    for mint in &local_mints {
+        if !seen_mints.contains(mint) {
+            positions.push(serde_json::json!({
+                "tokenMint": mint,
+                "claimableSOL": 0.0,
+                "txCount": 0,
+            }));
+        }
     }
+
+    Json(serde_json::json!({"positions": positions})).into_response()
 }
 
 /// Map a Bags client error to an HTTP status + message string.

@@ -468,6 +468,11 @@ async fn main() -> anyhow::Result<()> {
             "/agents/{agent_id}/claim-owner",
             post(api::post_claim_owner),
         )
+        // Agent token registration (node calls after bags/launch)
+        .route(
+            "/agents/{agent_id}/token",
+            post(api::post_agent_token),
+        )
         // Public ownership lookup — mobile app needs this without an API key
         .route("/agents/{agent_id}/owner", get(api::get_agent_owner))
         .route("/agents/by-owner/{wallet}", get(api::get_agents_by_owner))

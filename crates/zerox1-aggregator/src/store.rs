@@ -1169,17 +1169,17 @@ CREATE INDEX IF NOT EXISTS idx_cp_agent ON capability_proofs(agent_id);
     // v17: Social attestation verification columns (already in v16 CREATE TABLE;
     // this migration is a no-op for fresh installs — only needed for existing v16 DBs)
     "
-ALTER TABLE capability_proofs ADD COLUMN IF NOT EXISTS proof_type      TEXT    NOT NULL DEFAULT 'benchmark';
-ALTER TABLE capability_proofs ADD COLUMN IF NOT EXISTS attestation_url TEXT    NOT NULL DEFAULT '';
-ALTER TABLE capability_proofs ADD COLUMN IF NOT EXISTS verified        INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE capability_proofs ADD COLUMN IF NOT EXISTS verified_at     INTEGER;
+ALTER TABLE capability_proofs ADD COLUMN proof_type      TEXT    NOT NULL DEFAULT 'benchmark';
+ALTER TABLE capability_proofs ADD COLUMN attestation_url TEXT    NOT NULL DEFAULT '';
+ALTER TABLE capability_proofs ADD COLUMN verified        INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE capability_proofs ADD COLUMN verified_at     INTEGER;
 ",
     // v18: Downpayment model — agent declares required downpayment % and price range in ADVERTISE.
     // downpayment_bps: basis points (1000 = 10%); price_range_usd_min/max in USD.
     "
-ALTER TABLE agent_registry ADD COLUMN IF NOT EXISTS downpayment_bps    INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE agent_registry ADD COLUMN IF NOT EXISTS price_range_usd_min REAL;
-ALTER TABLE agent_registry ADD COLUMN IF NOT EXISTS price_range_usd_max REAL;
+ALTER TABLE agent_registry ADD COLUMN downpayment_bps    INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE agent_registry ADD COLUMN price_range_usd_min REAL;
+ALTER TABLE agent_registry ADD COLUMN price_range_usd_max REAL;
 ",
     // v19: Mesh bounty board — open task announcements broadcast by agents.
     "

@@ -5037,92 +5037,121 @@ async fn bags_launch_handler(
         }
     };
 
-    // ── Step 2: Create fee-share config (Kora as fee payer when available) ──
-    let fee_payer = if let Some(ref kora) = state.0.kora {
-        match kora.get_fee_payer().await {
-            Ok(pk) => pk.to_string(),
+    // ── Step 2: Create fee-share config via aggregator sponsor wallet ────────
+    // The agent wallet has no SOL, so we delegate on-chain fee-share account
+    // creation to the aggregator which holds a funded sponsor wallet.
+    let config_key = if let Some(ref agg_url) = state.0.aggregator_url {
+        let body = serde_json::json!({
+            "base_mint": token_mint,
+            "agent_pubkey": agent_wallet,
+        });
+        let resp = match state
+            .0
+            .http_client
+            .post(format!("{agg_url}/sponsor/fee-share-config"))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
             Err(e) => {
-                tracing::warn!("Kora fee-payer unavailable, using agent wallet: {e}");
-                agent_wallet.clone()
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({"error": format!("Aggregator fee-share request failed: {e}")})),
+                )
+                    .into_response();
+            }
+        };
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body: serde_json::Value = resp.json().await.unwrap_or_default();
+            let msg = body["error"].as_str().unwrap_or("unknown").to_string();
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": format!("Aggregator fee-share config failed ({status}): {msg}")})),
+            )
+                .into_response();
+        }
+        let data: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({"error": format!("Bad aggregator response: {e}")})),
+                )
+                    .into_response();
+            }
+        };
+        match data["config_key"].as_str() {
+            Some(k) => k.to_string(),
+            None => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({"error": "Aggregator did not return config_key"})),
+                )
+                    .into_response();
             }
         }
     } else {
-        agent_wallet.clone()
-    };
-
-    let (config_key, fee_share_txs) = match launch
-        .create_fee_share_config(
-            &fee_payer,
-            &token_mint, // fee-share config is for the launched token, not USDC
-            &[agent_wallet.as_str()],
-            &[10_000u32], // agent receives 100% of pool trading fees
-        )
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            let (code, msg) = bags_error_response(&e);
-            return (code, Json(serde_json::json!({"error": msg}))).into_response();
-        }
-    };
-
-    // Submit fee-share config txs: via Kora (gasless, within daily budget) or direct.
-    let kora_available_for_launch = state.0.kora.is_some() && fee_payer != agent_wallet;
-    let mut fee_share_errors = 0usize;
-    for tx_b64 in &fee_share_txs {
-        let mut submitted = false;
-        // Check budget per-tx: each Kora sign_and_send costs one daily slot.
-        let use_kora_this_tx =
-            kora_available_for_launch && try_use_kora_budget(&state).await;
-        if use_kora_this_tx {
-            if let Some(ref kora) = state.0.kora {
-                match kora.sign_and_send(tx_b64).await {
-                    Ok(_) => submitted = true,
-                    Err(e) => tracing::warn!("Kora fee-share tx failed: {e}"),
-                }
-            }
-        } else {
-            // Agent pays gas: deserialize, sign, broadcast.
-            if let Ok(tx_bytes) = bs58::decode(tx_b64).into_vec() {
-                if let Ok(mut tx) =
-                    bincode::deserialize::<solana_sdk::transaction::Transaction>(&tx_bytes)
-                {
-                    if tx.message.recent_blockhash == solana_sdk::hash::Hash::default() {
-                        tracing::warn!("Fee-share tx has zero blockhash — skipping");
-                    } else {
-                        let kp = to_solana_keypair(&state.0.node_signing_key);
-                        tx.partial_sign(&[&kp], tx.message.recent_blockhash);
-                        if let Ok(serialized) = bincode::serialize(&tx) {
-                            let signed = B64.encode(&serialized);
-                            match broadcast_transaction(
-                                &state.0.trade_rpc_url,
-                                &state.0.http_client,
-                                &signed,
-                            )
-                            .await
-                            {
-                                Ok(_) => submitted = true,
-                                Err(e) => tracing::warn!("Fee-share tx broadcast failed: {e}"),
+        // No aggregator configured — try direct (requires agent wallet to have SOL).
+        tracing::warn!("No aggregator_url configured; attempting direct fee-share config (agent needs SOL)");
+        match launch
+            .create_fee_share_config(
+                &agent_wallet,
+                &token_mint,
+                &[agent_wallet.as_str()],
+                &[10_000u32],
+            )
+            .await
+        {
+            Ok((k, fee_share_txs)) => {
+                let mut fee_share_errors = 0usize;
+                for tx_b64 in &fee_share_txs {
+                    if let Ok(tx_bytes) = bs58::decode(tx_b64).into_vec() {
+                        if let Ok(mut tx) =
+                            bincode::deserialize::<solana_sdk::transaction::Transaction>(&tx_bytes)
+                        {
+                            if tx.message.recent_blockhash != solana_sdk::hash::Hash::default() {
+                                let kp = to_solana_keypair(&state.0.node_signing_key);
+                                tx.partial_sign(&[&kp], tx.message.recent_blockhash);
+                                if let Ok(serialized) = bincode::serialize(&tx) {
+                                    let signed = B64.encode(&serialized);
+                                    match broadcast_transaction(
+                                        &state.0.trade_rpc_url,
+                                        &state.0.http_client,
+                                        &signed,
+                                    )
+                                    .await
+                                    {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            tracing::warn!("Fee-share tx broadcast failed: {e}");
+                                            fee_share_errors += 1;
+                                        }
+                                    }
+                                }
                             }
                         }
+                    } else {
+                        fee_share_errors += 1;
                     }
                 }
+                if !fee_share_txs.is_empty() && fee_share_errors == fee_share_txs.len() {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({"error": "All fee-share config transactions failed"})),
+                    )
+                        .into_response();
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                k
+            }
+            Err(e) => {
+                let (code, msg) = bags_error_response(&e);
+                return (code, Json(serde_json::json!({"error": msg}))).into_response();
             }
         }
-        if !submitted {
-            fee_share_errors += 1;
-        }
-    }
-    if !fee_share_txs.is_empty() && fee_share_errors == fee_share_txs.len() {
-        return (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": "All fee-share config transactions failed"})),
-        )
-            .into_response();
-    }
-
-    // Allow fee-share config txs to confirm on-chain before creating launch tx.
-    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    };
 
     // ── Step 3: Build launch transaction (Bags pre-signs with mint keypair) ──
     let launch_tx_bytes = match launch

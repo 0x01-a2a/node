@@ -483,6 +483,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/agents", get(api::get_agents))
         // Sponsored token launch — no auth, rate-limited per agent pubkey
         .route("/sponsor/launch", post(api::sponsor_launch))
+        // Sponsored fee-share config — called by local nodes to pay on-chain creation fees
+        .route("/sponsor/fee-share-config", post(api::sponsor_fee_share_config))
         // Mobile app read endpoints — must be public (mobile has no API key)
         .route("/agents/{agent_id}/profile", get(api::get_agent_profile))
         .route("/activity", get(api::get_activity))

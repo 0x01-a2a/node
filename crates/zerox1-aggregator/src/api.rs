@@ -3814,6 +3814,120 @@ pub async fn sponsor_launch(
     }))).into_response()
 }
 
+// ============================================================================
+// POST /sponsor/fee-share-config — sponsor signs fee-share config txs for a node
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct SponsorFeeShareRequest {
+    /// Base58 token mint from Bags create-token-info.
+    pub base_mint: String,
+    /// Base58 agent wallet pubkey (claimer of pool fees).
+    pub agent_pubkey: String,
+}
+
+/// POST /sponsor/fee-share-config
+///
+/// Creates and broadcasts the Bags fee-share config on behalf of a local node.
+/// The sponsor wallet pays the on-chain transaction fees. Returns the config key
+/// needed for the subsequent create-launch-transaction call.
+pub async fn sponsor_fee_share_config(
+    State(state): State<AppState>,
+    Json(req): Json<SponsorFeeShareRequest>,
+) -> impl IntoResponse {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+    let (signing_key, bags_api_key) = match (&state.sponsor_signing_key, &state.bags_api_key) {
+        (Some(k), Some(ak)) => (k.clone(), ak.clone()),
+        _ => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "sponsor not configured on this aggregator"})),
+            )
+                .into_response();
+        }
+    };
+
+    let sponsor_pubkey = solana_sdk::pubkey::Pubkey::new_from_array(
+        signing_key.verifying_key().to_bytes(),
+    );
+    let sponsor_pubkey_str = bs58::encode(sponsor_pubkey.to_bytes()).into_string();
+    let client = &state.http_client;
+
+    let fee_share_body = json!({
+        "payer": sponsor_pubkey_str,
+        "baseMint": req.base_mint,
+        "claimersArray": [req.agent_pubkey],
+        "basisPointsArray": [10_000u32],
+    });
+
+    let fee_share_val = match client
+        .post(format!("{BAGS_API_BASE}/fee-share/config"))
+        .header("x-api-key", &bags_api_key)
+        .json(&fee_share_body)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.unwrap_or_default(),
+        Ok(r) => {
+            let status = r.status();
+            let text = r.text().await.unwrap_or_default();
+            tracing::error!("sponsor_fee_share_config: {status}: {text}");
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": format!("bags fee-share/config failed ({status}): {text}")})),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": format!("bags fee-share/config: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    let config_key = fee_share_val["response"]["meteoraConfigKey"]
+        .as_str()
+        .or_else(|| fee_share_val["response"]["feeShareAuthority"].as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Sign and broadcast each fee-share config transaction with the sponsor key.
+    if let Some(txs) = fee_share_val["response"]["transactions"].as_array() {
+        for tx_item in txs {
+            if let Some(tx_b58) = tx_item["transaction"].as_str() {
+                if let Ok(tx_bytes) = bs58::decode(tx_b58).into_vec() {
+                    if let Ok(mut tx) =
+                        bincode::deserialize::<solana_sdk::transaction::Transaction>(&tx_bytes)
+                    {
+                        let kp = signing_key_to_solana_kp(&signing_key);
+                        tx.partial_sign(&[&kp], tx.message.recent_blockhash);
+                        if let Ok(serialized) = bincode::serialize(&tx) {
+                            if let Err(e) = broadcast_solana_tx(
+                                &state.sponsor_rpc_url,
+                                client,
+                                &B64.encode(&serialized),
+                            )
+                            .await
+                            {
+                                tracing::warn!("sponsor_fee_share_config: tx broadcast failed: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !txs.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        }
+    }
+
+    (StatusCode::OK, Json(json!({"config_key": config_key}))).into_response()
+}
+
 fn remove_sponsor_reservation(state: &AppState, agent_pubkey: &str) {
     if let Ok(mut launched) = state.sponsor_launches.lock() {
         launched.remove(agent_pubkey);

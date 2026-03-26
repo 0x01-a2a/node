@@ -226,9 +226,16 @@ pub struct Config {
     #[arg(long, env = "ZX01_BAGS_API_KEY")]
     pub bags_api_key: Option<String>,
 
-    /// Optional Bags partner key for partner-attributed launches.
-    /// When set, the launch client includes partner metadata on token launch
-    /// requests and the node skips the legacy post-claim SOL protocol fee skim.
+    /// Optional Bags partner wallet for partner-attributed launches.
+    /// Must be paired with --bags-partner-key / ZX01_BAGS_PARTNER_KEY.
+    #[cfg(feature = "bags")]
+    #[arg(long, env = "ZX01_BAGS_PARTNER_WALLET")]
+    pub bags_partner_wallet: Option<String>,
+
+    /// Optional Bags partner config PDA for partner-attributed launches.
+    /// Must be paired with --bags-partner-wallet / ZX01_BAGS_PARTNER_WALLET.
+    /// The node passes both values on /fee-share/config and skips the legacy
+    /// post-claim SOL protocol fee skim when partner mode is fully configured.
     #[cfg(feature = "bags")]
     #[arg(long, env = "ZX01_BAGS_PARTNER_KEY")]
     pub bags_partner_key: Option<String>,
@@ -273,7 +280,6 @@ pub struct Config {
     pub launchlab_share_fee_wallet: Option<String>,
 
     // ── App Webhook ───────────────────────────────────────────────────────
-
     /// HTTP(S) URL that receives a POST for every validated inbound envelope.
     ///
     /// Community apps use this to react to mesh events without modifying or
@@ -317,7 +323,6 @@ pub struct Config {
     pub task_log_path: Option<PathBuf>,
 
     // ── MPP — Machine Payment Protocol daily gate ─────────────────────────
-
     /// Enable the MPP hosting-fee gate (HTTP 402).
     /// When set, hosted agents must pay 1 USDC/day before using /hosted/send
     /// or /ws/hosted/inbox. Disabled by default (beta).
@@ -336,7 +341,6 @@ pub struct Config {
     pub mpp_recipient: Option<String>,
 
     // ── Celo EVM settlement ───────────────────────────────────────────────
-
     /// Celo JSON-RPC endpoint.
     /// Required to enable on-chain Celo settlement (escrow, lease, stake).
     /// Mainnet: https://forno.celo.org  Testnet: https://celo-sepolia.drpc.org
@@ -381,7 +385,6 @@ pub struct Config {
     pub celo_auto_register: bool,
 
     // ── Base settlement ───────────────────────────────────────────────────
-
     /// Base JSON-RPC URL.
     /// Mainnet: https://mainnet.base.org  Testnet: https://sepolia.base.org
     #[cfg(feature = "settlement")]
@@ -421,7 +424,6 @@ pub struct Config {
     pub base_auto_register: bool,
 
     // ── 0G Chain settlement ───────────────────────────────────────────────
-
     /// 0G Chain JSON-RPC URL.
     /// Mainnet (Aristotle): https://evmrpc.0g.ai  Testnet: https://evmrpc-testnet.0g.ai
     #[cfg(feature = "settlement")]
@@ -461,7 +463,6 @@ pub struct Config {
     pub zerog_auto_register: bool,
 
     // ── File delivery ─────────────────────────────────────────────────────
-
     /// Base URL of a 0G Storage gateway server for large DELIVER payload uploads.
     /// Expects a server compatible with the 0G go-starter-kit API:
     ///   POST <url>/api/v1/upload  (multipart, field "file")
@@ -531,12 +532,8 @@ mod tests {
 
     #[test]
     fn bootstrap_merges_user_peer_with_defaults() {
-        let cfg = Config::try_parse_from([
-            "zerox1-node",
-            "--bootstrap",
-            "/ip4/1.2.3.4/tcp/9000",
-        ])
-        .unwrap();
+        let cfg = Config::try_parse_from(["zerox1-node", "--bootstrap", "/ip4/1.2.3.4/tcp/9000"])
+            .unwrap();
         // 1 user peer + 4 defaults
         assert_eq!(cfg.all_bootstrap_peers().len(), 5);
     }
@@ -569,7 +566,10 @@ mod tests {
         ])
         .unwrap();
         let pk = cfg.usdc_mint_pubkey().unwrap().unwrap();
-        assert_eq!(pk.to_string(), "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
+        assert_eq!(
+            pk.to_string(),
+            "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+        );
     }
 
     #[test]
@@ -579,4 +579,3 @@ mod tests {
         assert!(cfg.usdc_mint_pubkey().is_err());
     }
 }
-

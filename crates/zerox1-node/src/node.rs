@@ -257,19 +257,41 @@ impl Zx01Node {
         };
 
         #[cfg(feature = "bags")]
+        if config.bags_api_key.is_none()
+            && (config.bags_partner_wallet.is_some() || config.bags_partner_key.is_some())
+        {
+            tracing::warn!(
+                "Bags partner settings were provided without --bags-api-key; token launch endpoints will stay disabled"
+            );
+        }
+
+        #[cfg(feature = "bags")]
         let bags_launch: Option<std::sync::Arc<crate::bags::BagsLaunchClient>> =
-            config
-                .bags_api_key
-                .as_ref()
-                .or(config.bags_partner_key.as_ref())
-                .map(|key| {
-                if config.bags_partner_key.is_some() {
-                    tracing::info!("Bags launch API enabled in partner-first mode");
+            config.bags_api_key.as_ref().map(|key| {
+                let partner_wallet_set = config
+                    .bags_partner_wallet
+                    .as_ref()
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false);
+                let partner_config_set = config
+                    .bags_partner_key
+                    .as_ref()
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false);
+
+                if partner_wallet_set && partner_config_set {
+                    tracing::info!("Bags launch API enabled with partner fee-sharing");
+                } else if partner_wallet_set || partner_config_set {
+                    tracing::warn!(
+                        "Bags partner mode is partially configured; set both --bags-partner-wallet and --bags-partner-key"
+                    );
                 } else {
                     tracing::info!("Bags launch API enabled (API key configured)");
                 }
+
                 std::sync::Arc::new(crate::bags::BagsLaunchClient::new(
                     key.clone(),
+                    config.bags_partner_wallet.clone(),
                     config.bags_partner_key.clone(),
                     http_client.clone(),
                 ))
@@ -278,42 +300,43 @@ impl Zx01Node {
         // ── MPP config: derive ATA from recipient wallet if enabled ──────────
         let mpp_config: Option<crate::mpp::MppConfig> = if config.mpp_enabled {
             match &config.mpp_recipient {
-                Some(recipient_str) => {
-                    match recipient_str.parse::<Pubkey>() {
-                        Ok(recipient_wallet) => {
-                            let usdc_mint_str = if config.rpc_url.contains("devnet") {
-                                crate::api::USDC_MINT_DEVNET
-                            } else {
-                                crate::api::USDC_MINT_MAINNET
-                            };
-                            match usdc_mint_str.parse::<Pubkey>() {
-                                Ok(mint) => {
-                                    let recipient_ata = crate::api::derive_ata(&recipient_wallet, &mint);
-                                    let daily_fee = (config.mpp_fee_usdc * 1_000_000.0) as u64;
-                                    tracing::info!(
-                                        "MPP gate enabled: recipient_ata={} daily_fee={} micro-USDC",
-                                        recipient_ata,
-                                        daily_fee
-                                    );
-                                    Some(crate::mpp::MppConfig {
-                                        recipient_ata,
-                                        daily_fee,
-                                        usdc_mint: mint,
-                                        enabled: true,
-                                    })
-                                }
-                                Err(e) => {
-                                    tracing::warn!("MPP: invalid USDC mint pubkey: {e}");
-                                    None
-                                }
+                Some(recipient_str) => match recipient_str.parse::<Pubkey>() {
+                    Ok(recipient_wallet) => {
+                        let usdc_mint_str = if config.rpc_url.contains("devnet") {
+                            crate::api::USDC_MINT_DEVNET
+                        } else {
+                            crate::api::USDC_MINT_MAINNET
+                        };
+                        match usdc_mint_str.parse::<Pubkey>() {
+                            Ok(mint) => {
+                                let recipient_ata =
+                                    crate::api::derive_ata(&recipient_wallet, &mint);
+                                let daily_fee = (config.mpp_fee_usdc * 1_000_000.0) as u64;
+                                tracing::info!(
+                                    "MPP gate enabled: recipient_ata={} daily_fee={} micro-USDC",
+                                    recipient_ata,
+                                    daily_fee
+                                );
+                                Some(crate::mpp::MppConfig {
+                                    recipient_ata,
+                                    daily_fee,
+                                    usdc_mint: mint,
+                                    enabled: true,
+                                })
+                            }
+                            Err(e) => {
+                                tracing::warn!("MPP: invalid USDC mint pubkey: {e}");
+                                None
                             }
                         }
-                        Err(e) => {
-                            tracing::warn!("MPP: invalid --mpp-recipient pubkey '{recipient_str}': {e}");
-                            None
-                        }
                     }
-                }
+                    Err(e) => {
+                        tracing::warn!(
+                            "MPP: invalid --mpp-recipient pubkey '{recipient_str}': {e}"
+                        );
+                        None
+                    }
+                },
                 None => {
                     tracing::warn!(
                         "MPP: --mpp-enabled set but --mpp-recipient not provided. Gate disabled."
@@ -365,7 +388,8 @@ impl Zx01Node {
                     url,
                     std::sync::Arc::new(identity.signing_key.clone()),
                 );
-                std::sync::Arc::new(adapter) as std::sync::Arc<dyn zerox1_filedelivery_core::FileDelivery>
+                std::sync::Arc::new(adapter)
+                    as std::sync::Arc<dyn zerox1_filedelivery_core::FileDelivery>
             }),
             // Build task audit log if a path is configured.
             if let Some(ref path) = config.task_log_path {
@@ -396,7 +420,10 @@ impl Zx01Node {
         } else {
             tracing::info!(
                 "Identity verification delegated to aggregator at {}.",
-                config.aggregator_url.as_deref().unwrap_or("(no aggregator URL configured)")
+                config
+                    .aggregator_url
+                    .as_deref()
+                    .unwrap_or("(no aggregator URL configured)")
             );
         }
 
@@ -1351,9 +1378,8 @@ impl Zx01Node {
                                 .and_then(|v| v.as_array())
                                 .cloned()
                                 .unwrap_or_default();
-                            let min_token_hold: Option<u64> = val
-                                .get("min_token_hold")
-                                .and_then(|v| v.as_u64());
+                            let min_token_hold: Option<u64> =
+                                val.get("min_token_hold").and_then(|v| v.as_u64());
                             // Downpayment model fields: cap bps at 5000 (50%).
                             let downpayment_bps: Option<u32> = val
                                 .get("downpayment_bps")
@@ -1406,36 +1432,54 @@ impl Zx01Node {
                     tracing::debug!("DISCOVER from {}", hex::encode(env.sender));
                     if let Some(ref agg_url) = self.aggregator_url {
                         if let Ok(payload_str) = std::str::from_utf8(&env.payload) {
-                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload_str) {
+                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload_str)
+                            {
                                 let query = val["query"].as_str().unwrap_or("").to_string();
                                 if !query.is_empty() {
-                                    let encoded_query: String = query.chars().map(|c| {
-                                        if c.is_alphanumeric() || c == '-' || c == '_' {
-                                            c.to_string()
-                                        } else {
-                                            format!("%{:02X}", c as u32)
-                                        }
-                                    }).collect();
-                                    let url = format!("{}/agents/search?capability={}&limit=20", agg_url, encoded_query);
+                                    let encoded_query: String = query
+                                        .chars()
+                                        .map(|c| {
+                                            if c.is_alphanumeric() || c == '-' || c == '_' {
+                                                c.to_string()
+                                            } else {
+                                                format!("%{:02X}", c as u32)
+                                            }
+                                        })
+                                        .collect();
+                                    let url = format!(
+                                        "{}/agents/search?capability={}&limit=20",
+                                        agg_url, encoded_query
+                                    );
                                     let http = self.http_client.clone();
                                     let api = self.api.clone();
                                     let sender = env.sender;
                                     let conv_id = env.conversation_id;
                                     let self_agent = self.identity.agent_id;
                                     tokio::spawn(async move {
-                                        match http.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
+                                        match http
+                                            .get(&url)
+                                            .timeout(std::time::Duration::from_secs(5))
+                                            .send()
+                                            .await
+                                        {
                                             Ok(r) if r.status().is_success() => {
-                                                if let Ok(results) = r.json::<serde_json::Value>().await {
+                                                if let Ok(results) =
+                                                    r.json::<serde_json::Value>().await
+                                                {
                                                     let payload = serde_json::json!({
                                                         "type": "discover_response",
                                                         "results": results,
-                                                    }).to_string().into_bytes();
-                                                    let payload_hash = zerox1_protocol::hash::keccak256(&payload);
+                                                    })
+                                                    .to_string()
+                                                    .into_bytes();
+                                                    let payload_hash =
+                                                        zerox1_protocol::hash::keccak256(&payload);
                                                     let payload_len = payload.len() as u32;
                                                     let timestamp = std::time::SystemTime::now()
                                                         .duration_since(std::time::UNIX_EPOCH)
                                                         .unwrap_or_default()
-                                                        .as_micros() as u64;
+                                                        .as_micros()
+                                                        as u64;
                                                     let response_env = zerox1_protocol::envelope::Envelope {
                                                         version: 1,
                                                         msg_type: zerox1_protocol::message::MsgType::Advertise,
@@ -1470,11 +1514,14 @@ impl Zx01Node {
                 MsgType::Bounty => {
                     if let Ok(payload_str) = std::str::from_utf8(&env.payload) {
                         if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload_str) {
-                            let required_cap = val["required_capability"].as_str().unwrap_or("").to_string();
-                            let max_budget   = val["max_budget_usd"].as_f64().unwrap_or(0.0);
-                            let deadline     = val["deadline_secs"].as_u64().unwrap_or(0);
-                            let summary      = val["task_summary"].as_str().unwrap_or("").to_string();
-                            let conv_id      = val["conversation_id"].as_str().unwrap_or("").to_string();
+                            let required_cap = val["required_capability"]
+                                .as_str()
+                                .unwrap_or("")
+                                .to_string();
+                            let max_budget = val["max_budget_usd"].as_f64().unwrap_or(0.0);
+                            let deadline = val["deadline_secs"].as_u64().unwrap_or(0);
+                            let summary = val["task_summary"].as_str().unwrap_or("").to_string();
+                            let conv_id = val["conversation_id"].as_str().unwrap_or("").to_string();
                             if !required_cap.is_empty() && max_budget > 0.0 {
                                 tracing::info!(
                                     from = %hex::encode(env.sender),
@@ -1550,9 +1597,7 @@ impl Zx01Node {
                 vk
             }
             Err(e) => {
-                tracing::debug!(
-                    "Invalid sender pubkey in bilateral from {peer_id}: {e}"
-                );
+                tracing::debug!("Invalid sender pubkey in bilateral from {peer_id}: {e}");
                 return;
             }
         };
@@ -2361,8 +2406,7 @@ impl Zx01Node {
 
         // Purge stale identity-check failure cache entries (TTL = 1 hour).
         let ttl = std::time::Duration::from_secs(3_600);
-        self.reg8004_failures
-            .retain(|_, ts| ts.elapsed() < ttl);
+        self.reg8004_failures.retain(|_, ts| ts.elapsed() < ttl);
         if self.reg8004_failures.len() > MAX_REG8004_FAILURE_CACHE {
             let over = self.reg8004_failures.len() - MAX_REG8004_FAILURE_CACHE;
             let mut by_age: Vec<_> = self

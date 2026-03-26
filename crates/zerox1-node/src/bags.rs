@@ -239,16 +239,23 @@ pub struct BagsLaunchClient {
     /// Mutable so the operator can supply their own key at runtime via
     /// POST /bags/set-api-key without restarting the node.
     api_key: std::sync::RwLock<String>,
-    partner_key: Option<String>,
+    partner_wallet: Option<String>,
+    partner_config: Option<String>,
     client: reqwest::Client,
 }
 
 impl BagsLaunchClient {
-    pub fn new(api_key: String, partner_key: Option<String>, client: reqwest::Client) -> Self {
+    pub fn new(
+        api_key: String,
+        partner_wallet: Option<String>,
+        partner_config: Option<String>,
+        client: reqwest::Client,
+    ) -> Self {
         Self {
             api_url: BAGS_API_BASE.to_string(),
             api_key: std::sync::RwLock::new(api_key),
-            partner_key,
+            partner_wallet,
+            partner_config,
             client,
         }
     }
@@ -261,10 +268,15 @@ impl BagsLaunchClient {
     }
 
     pub fn partner_mode_enabled(&self) -> bool {
-        self.partner_key
+        self.partner_wallet
             .as_ref()
             .map(|v| !v.trim().is_empty())
             .unwrap_or(false)
+            && self
+                .partner_config
+                .as_ref()
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false)
     }
 
     async fn post_json(
@@ -272,11 +284,7 @@ impl BagsLaunchClient {
         path: &str,
         body: &serde_json::Value,
     ) -> anyhow::Result<reqwest::Response> {
-        let key = self
-            .api_key
-            .read()
-            .map(|k| k.clone())
-            .unwrap_or_default();
+        let key = self.api_key.read().map(|k| k.clone()).unwrap_or_default();
         let resp = self
             .client
             .post(format!("{}/{}", self.api_url, path))
@@ -370,13 +378,16 @@ impl BagsLaunchClient {
             if let Some(u) = telegram_url {
                 body["telegram"] = u.into();
             }
-            self.post_json("token-launch/create-token-info", &body).await?
+            self.post_json("token-launch/create-token-info", &body)
+                .await?
         };
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Bags API create-token-info returned {status}: {text}"));
+            return Err(anyhow!(
+                "Bags API create-token-info returned {status}: {text}"
+            ));
         }
 
         let r: BagsResponse<CreateTokenInfoResponse> = resp
@@ -406,6 +417,15 @@ impl BagsLaunchClient {
             "claimersArray": claimers,
             "basisPointsArray": bps,
         });
+        let mut body = body;
+        if self.partner_mode_enabled() {
+            if let Some(partner_wallet) = self.partner_wallet.as_ref() {
+                body["partner"] = partner_wallet.clone().into();
+            }
+            if let Some(partner_config) = self.partner_config.as_ref() {
+                body["partnerConfig"] = partner_config.clone().into();
+            }
+        }
         let r: BagsResponse<FeeShareConfigInner> = self
             .post_json("fee-share/config", &body)
             .await?
@@ -413,7 +433,9 @@ impl BagsLaunchClient {
             .await
             .map_err(|e| anyhow!("Bags fee-share config parse error: {e}"))?;
         let txs: Vec<String> = r.response.transactions.into_iter().map(|t| t.tx).collect();
-        let config_key = r.response.config_key
+        let config_key = r
+            .response
+            .config_key
             .or(r.response.fee_share_authority)
             .unwrap_or_default();
         Ok((config_key, txs))
@@ -439,11 +461,6 @@ impl BagsLaunchClient {
             "wallet": wallet,
             "configKey": config_key,
         });
-        if let Some(ref partner_key) = self.partner_key {
-            if !partner_key.trim().is_empty() {
-                body["partner"] = partner_key.clone().into();
-            }
-        }
         if let Some(l) = initial_buy_lamports {
             body["initialBuyLamports"] = l.into();
         }
@@ -514,9 +531,8 @@ impl BagsLaunchClient {
         } else {
             (token_mint, SOL_MINT)
         };
-        let mut url = format!(
-            "trade/quote?inputMint={input_mint}&outputMint={output_mint}&amount={amount}"
-        );
+        let mut url =
+            format!("trade/quote?inputMint={input_mint}&outputMint={output_mint}&amount={amount}");
         if let Some(bps) = slippage_bps {
             url.push_str(&format!("&slippageBps={bps}"));
         }
@@ -563,7 +579,9 @@ impl BagsLaunchClient {
     /// Returns pool keys (dbcConfigKey, dbcPoolKey, dammV2PoolKey) for the token.
     pub async fn pool_info(&self, token_mint: &str) -> anyhow::Result<serde_json::Value> {
         let r: BagsResponse<serde_json::Value> = self
-            .get_json(&format!("solana/bags/pools/token-mint?tokenMint={token_mint}"))
+            .get_json(&format!(
+                "solana/bags/pools/token-mint?tokenMint={token_mint}"
+            ))
             .await?
             .json()
             .await
@@ -584,7 +602,9 @@ impl BagsLaunchClient {
             })
             .collect();
         let r: BagsResponse<serde_json::Value> = self
-            .get_json(&format!("token-launch/claimable-positions?wallet={encoded}"))
+            .get_json(&format!(
+                "token-launch/claimable-positions?wallet={encoded}"
+            ))
             .await?
             .json()
             .await
@@ -754,14 +774,13 @@ pub fn spawn_protocol_fee_collection(
         // Wait for claim txs to confirm (~1-2 slots, 5 s is conservative).
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-        let post_balance =
-            match get_sol_balance(&rpc_url, &http_client, &agent_pubkey).await {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::warn!("Protocol fee: getBalance failed: {e}");
-                    return;
-                }
-            };
+        let post_balance = match get_sol_balance(&rpc_url, &http_client, &agent_pubkey).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("Protocol fee: getBalance failed: {e}");
+                return;
+            }
+        };
 
         let delta = post_balance.saturating_sub(pre_balance);
         if delta == 0 {
@@ -830,21 +849,36 @@ mod tests {
     #[test]
     fn partner_mode_enabled_true_when_key_set() {
         let client = reqwest::Client::new();
-        let lc = BagsLaunchClient::new("key".to_string(), Some("partner123".to_string()), client);
+        let lc = BagsLaunchClient::new(
+            "key".to_string(),
+            Some("partner-wallet".to_string()),
+            Some("partner-config".to_string()),
+            client,
+        );
         assert!(lc.partner_mode_enabled());
     }
 
     #[test]
-    fn partner_mode_enabled_false_when_key_none() {
+    fn partner_mode_enabled_false_when_partner_fields_missing() {
         let client = reqwest::Client::new();
-        let lc = BagsLaunchClient::new("key".to_string(), None, client);
+        let lc = BagsLaunchClient::new(
+            "key".to_string(),
+            Some("partner-wallet".to_string()),
+            None,
+            client,
+        );
         assert!(!lc.partner_mode_enabled());
     }
 
     #[test]
-    fn partner_mode_enabled_false_when_key_blank() {
+    fn partner_mode_enabled_false_when_partner_fields_blank() {
         let client = reqwest::Client::new();
-        let lc = BagsLaunchClient::new("key".to_string(), Some("   ".to_string()), client);
+        let lc = BagsLaunchClient::new(
+            "key".to_string(),
+            Some("   ".to_string()),
+            Some("partner-config".to_string()),
+            client,
+        );
         assert!(!lc.partner_mode_enabled());
     }
 

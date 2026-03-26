@@ -74,5 +74,5 @@ tower-http = { version = "0.6", features = ["cors"] }
 
 # File delivery
 zerox1-filedelivery-core = { path = "../filedelivery/core" }
-zerox1-filedelivery-0g = { path = "../filedelivery/0g" }
+# zerox1-filedelivery-0g = { path = "../filedelivery/0g" }  # TODO: re-enable when 0g is back in scope
 

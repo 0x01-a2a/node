@@ -1,6 +1,7 @@
 pub mod api;
 #[cfg(feature = "bags")]
 pub mod bags;
+pub mod task_log;
 pub mod batch;
 pub mod config;
 pub mod constants;

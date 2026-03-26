@@ -309,6 +309,13 @@ pub struct Config {
     #[arg(long, env = "ZX01_SKILL_WORKSPACE")]
     pub skill_workspace: Option<PathBuf>,
 
+    /// Path for the task audit log SQLite database.
+    /// When set, enables POST /tasks/log, GET /tasks/log, PATCH /tasks/log/{id}/shared,
+    /// and DELETE /tasks/log/{id}. On Android this is set to {filesDir}/task_log.db
+    /// by NodeService.
+    #[arg(long, env = "ZX01_TASK_LOG_PATH")]
+    pub task_log_path: Option<PathBuf>,
+
     // ── MPP — Machine Payment Protocol daily gate ─────────────────────────
 
     /// Enable the MPP hosting-fee gate (HTTP 402).

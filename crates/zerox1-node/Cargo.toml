@@ -46,12 +46,13 @@ url = "2.5"
 libc = "0.2"
 openssl = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
+rusqlite   = { version = "0.32", features = ["bundled"] }
 axum = { workspace = true }
 serde_json = { workspace = true }
 tower-http = { workspace = true }
 
 zerox1-filedelivery-core = { workspace = true }
-zerox1-filedelivery-0g   = { workspace = true }
+# zerox1-filedelivery-0g   = { workspace = true }  # TODO: re-enable when 0g is back in scope
 
 [features]
 default = []

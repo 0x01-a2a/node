@@ -41,7 +41,7 @@ use axum::{
     },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -545,11 +545,16 @@ pub struct ApiInner {
     pub mpp_challenges: Arc<Mutex<HashMap<String, (crate::mpp::MppChallenge, u64)>>>,
 
     // File delivery
-    /// Optional 0G Storage adapter for large DELIVER payload offload.
-    /// Present when --filedelivery-0g-gateway is configured.
+    /// Optional file delivery adapter for large DELIVER payload offload.
     /// On send: payloads > INLINE_PAYLOAD_LIMIT are uploaded; envelope carries URI.
     /// On receive: DeliverPayload with payload_uri is decoded and exposed in inbox event.
-    pub file_delivery: Option<Arc<zerox1_filedelivery_0g::ZeroGStorage>>,
+    /// Currently always None — 0G adapter temporarily disabled pending re-integration.
+    pub file_delivery: Option<Arc<dyn zerox1_filedelivery_core::FileDelivery>>,
+
+    // Task audit log
+    /// SQLite-backed log of completed tasks. Present when --task-log-path is set.
+    /// Zeroclaw writes entries via POST /tasks/log; mobile reads them via GET /tasks/log.
+    pub task_log: Option<Arc<crate::task_log::TaskLog>>,
 }
 
 /// Cheaply cloneable shared state passed to all axum handlers.
@@ -590,7 +595,8 @@ impl ApiState {
         #[cfg(feature = "bags")] bags_launch: Option<Arc<crate::bags::BagsLaunchClient>>,
         skill_workspace: Option<std::path::PathBuf>,
         mpp: Option<crate::mpp::MppConfig>,
-        file_delivery: Option<Arc<zerox1_filedelivery_0g::ZeroGStorage>>,
+        file_delivery: Option<Arc<dyn zerox1_filedelivery_core::FileDelivery>>,
+        task_log: Option<Arc<crate::task_log::TaskLog>>,
     ) -> (
         Self,
         mpsc::Receiver<OutboundRequest>,
@@ -693,6 +699,7 @@ impl ApiState {
             hosted_mpp_paid: Arc::new(RwLock::new(HashMap::new())),
             mpp_challenges: Arc::new(Mutex::new(HashMap::new())),
             file_delivery,
+            task_log,
         }));
 
         // Background task: evict expired hosted sessions every hour so the
@@ -937,7 +944,11 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
         .route("/skill/list", get(skill_list_handler))
         .route("/skill/write", post(skill_write_handler))
         .route("/skill/install-url", post(skill_install_url_handler))
-        .route("/skill/remove", post(skill_remove_handler));
+        .route("/skill/remove", post(skill_remove_handler))
+        // Task audit log
+        .route("/tasks/log", post(task_log_insert).get(task_log_list))
+        .route("/tasks/log/{id}/shared", patch(task_log_mark_shared))
+        .route("/tasks/log/{id}", delete(task_log_delete));
 
     #[cfg(feature = "trade")]
     let router = router
@@ -1351,7 +1362,6 @@ async fn send_envelope(
         // If a file delivery adapter is configured and the payload exceeds the inline
         // limit, upload the content and replace with a zerog:// URI reference so the
         // envelope stays within the 64 KB transport limit.
-        use zerox1_filedelivery_core::FileDelivery;
         let limit = zerox1_filedelivery_core::INLINE_PAYLOAD_LIMIT;
         if raw_payload.len() > limit {
             if let Some(fd) = &state.0.file_delivery {
@@ -6308,6 +6318,134 @@ async fn skill_remove_handler(
     }
     tracing::info!("Skill '{}' removed", req.name);
     Json(serde_json::json!({"ok": true, "name": req.name})).into_response()
+}
+
+// ============================================================================
+// Task audit log handlers — POST /tasks/log, GET /tasks/log,
+//   PATCH /tasks/log/{id}/shared, DELETE /tasks/log/{id}
+// ============================================================================
+
+/// Helper: return 503 if task log is not configured.
+macro_rules! task_log {
+    ($state:expr) => {
+        match &$state.0.task_log {
+            Some(tl) => tl.clone(),
+            None => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({"error": "task log not configured (--task-log-path)"})),
+                )
+                    .into_response()
+            }
+        }
+    };
+}
+
+/// POST /tasks/log — zeroclaw writes a new task entry.
+/// Requires api_secret.
+/// Body: NewTaskLogEntry JSON.
+async fn task_log_insert(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Json(req): Json<crate::task_log::NewTaskLogEntry>,
+) -> Response {
+    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
+        return resp;
+    }
+    let tl = task_log!(state);
+    match tl.insert(&req) {
+        Ok(id) => Json(serde_json::json!({"ok": true, "id": id})).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{e}")})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct TaskLogListQuery {
+    #[serde(default = "default_task_limit")]
+    limit: u32,
+    before_id: Option<i64>,
+}
+
+fn default_task_limit() -> u32 {
+    50
+}
+
+/// GET /tasks/log?limit=50&before_id=X — mobile reads the task log.
+/// Requires read or master auth.
+async fn task_log_list(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Query(q): Query<TaskLogListQuery>,
+) -> Response {
+    if let Some(resp) = require_read_or_master_access(&state, &headers) {
+        return resp;
+    }
+    let tl = task_log!(state);
+    let limit = q.limit.min(200);
+    match tl.list(limit, q.before_id) {
+        Ok(entries) => Json(entries).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{e}")})),
+        )
+            .into_response(),
+    }
+}
+
+/// PATCH /tasks/log/{id}/shared — mark an entry as posted to socials.
+/// Requires read or master auth.
+async fn task_log_mark_shared(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Path(id): Path<i64>,
+) -> Response {
+    if let Some(resp) = require_read_or_master_access(&state, &headers) {
+        return resp;
+    }
+    let tl = task_log!(state);
+    match tl.mark_shared(id) {
+        Ok(true) => Json(serde_json::json!({"ok": true, "id": id})).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "entry not found"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{e}")})),
+        )
+            .into_response(),
+    }
+}
+
+/// DELETE /tasks/log/{id} — owner privacy control.
+/// Requires api_secret (master only — this is a destructive action).
+async fn task_log_delete(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Path(id): Path<i64>,
+) -> Response {
+    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
+        return resp;
+    }
+    let tl = task_log!(state);
+    match tl.delete(id) {
+        Ok(true) => Json(serde_json::json!({"ok": true, "id": id})).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "entry not found"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{e}")})),
+        )
+            .into_response(),
+    }
 }
 
 #[cfg(test)]

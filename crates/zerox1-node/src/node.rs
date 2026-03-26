@@ -357,12 +357,20 @@ impl Zx01Node {
             bags_launch,
             config.skill_workspace.clone(),
             mpp_config,
-            // Build file delivery adapter if a gateway URL is configured.
-            config.filedelivery_0g_gateway.as_deref().map(|gateway| {
-                let indexer = config.filedelivery_0g_indexer.as_deref()
-                    .unwrap_or("https://indexer-storage-turbo.0g.ai");
-                std::sync::Arc::new(zerox1_filedelivery_0g::ZeroGStorage::new(gateway, indexer))
-            }),
+            // TODO: re-enable 0G file delivery adapter when zerox1-filedelivery-0g is back in scope.
+            None::<std::sync::Arc<dyn zerox1_filedelivery_core::FileDelivery>>,
+            // Build task audit log if a path is configured.
+            if let Some(ref path) = config.task_log_path {
+                match crate::task_log::TaskLog::open(path) {
+                    Ok(tl) => Some(std::sync::Arc::new(tl)),
+                    Err(e) => {
+                        tracing::warn!("Failed to open task log at {}: {e}", path.display());
+                        None
+                    }
+                }
+            } else {
+                None
+            },
         );
 
         // Load portfolio history from disk

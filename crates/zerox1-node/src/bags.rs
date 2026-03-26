@@ -395,11 +395,15 @@ impl BagsLaunchClient {
         claimers: &[&str],
         bps: &[u32],
     ) -> anyhow::Result<(String, Vec<String>)> {
+        let fee_claimers: Vec<serde_json::Value> = claimers
+            .iter()
+            .zip(bps.iter())
+            .map(|(user, user_bps)| serde_json::json!({ "user": user, "userBps": user_bps }))
+            .collect();
         let body = serde_json::json!({
             "payer": payer,
             "baseMint": base_mint,
-            "claimersArray": claimers,
-            "basisPointsArray": bps,
+            "feeClaimers": fee_claimers,
         });
         let r: BagsResponse<FeeShareConfigInner> = self
             .post_json("fee-share/config", &body)
@@ -529,8 +533,9 @@ impl BagsLaunchClient {
         wallet: &str,
         quote: &serde_json::Value,
     ) -> anyhow::Result<Vec<u8>> {
+        // trade/swap returns fields at the top level (no `response` wrapper).
         #[derive(Deserialize)]
-        struct SwapTxInner {
+        struct SwapTxResponse {
             #[serde(rename = "swapTransaction")]
             swap_transaction: String,
         }
@@ -538,13 +543,13 @@ impl BagsLaunchClient {
             "quoteResponse": quote,
             "userPublicKey": wallet,
         });
-        let r: BagsResponse<SwapTxInner> = self
+        let r: SwapTxResponse = self
             .post_json("trade/swap", &body)
             .await?
             .json()
             .await
             .map_err(|e| anyhow!("Bags trade/swap parse error: {e}"))?;
-        bs58::decode(&r.response.swap_transaction)
+        bs58::decode(&r.swap_transaction)
             .into_vec()
             .map_err(|e| anyhow!("Bags swap tx base58 decode error: {e}"))
     }

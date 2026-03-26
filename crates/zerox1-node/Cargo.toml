@@ -52,6 +52,7 @@ serde_json = { workspace = true }
 tower-http = { workspace = true }
 
 zerox1-filedelivery-core = { workspace = true }
+zerox1-filedelivery-aggregator = { workspace = true }
 # zerox1-filedelivery-0g   = { workspace = true }  # TODO: re-enable when 0g is back in scope
 
 [features]

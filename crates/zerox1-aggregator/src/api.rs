@@ -1718,6 +1718,27 @@ pub async fn get_broadcasts(
     Json(state.store.list_broadcasts(limit, topic, before))
 }
 
+#[derive(Deserialize)]
+pub struct BountiesParams {
+    capability: Option<String>,
+    #[serde(default = "default_limit")]
+    limit: usize,
+}
+
+/// GET /bounties[?capability=<name>&limit=50]
+///
+/// Returns open bounties broadcast to the mesh, newest first.
+/// Bounties past their deadline are automatically excluded.
+pub async fn get_bounties(
+    State(state): State<AppState>,
+    Query(params): Query<BountiesParams>,
+) -> impl IntoResponse {
+    let cap = params.capability.as_deref().filter(|s| !s.is_empty());
+    let limit = params.limit.min(200);
+    let bounties = state.store.list_bounties(cap, limit);
+    Json(bounties)
+}
+
 /// GET /ws/activity
 ///
 /// WebSocket endpoint that streams activity events in real-time.

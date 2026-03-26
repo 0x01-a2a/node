@@ -357,6 +357,21 @@ pub enum IngestEvent {
     Reject(RejectEvent),
     #[serde(rename = "DELIVER")]
     Deliver(DeliverEvent),
+    #[serde(rename = "BOUNTY")]
+    Bounty {
+        sender: String,
+        required_capability: String,
+        max_budget_usd: f64,
+        /// Seconds from now until the bounty expires. Converted to absolute epoch on ingest.
+        #[serde(default)]
+        deadline_secs: u64,
+        #[serde(default)]
+        task_summary: String,
+        #[serde(default)]
+        conversation_id: String,
+        #[serde(default)]
+        slot: u64,
+    },
 }
 
 // ============================================================================
@@ -1166,6 +1181,22 @@ ALTER TABLE agent_registry ADD COLUMN IF NOT EXISTS downpayment_bps    INTEGER N
 ALTER TABLE agent_registry ADD COLUMN IF NOT EXISTS price_range_usd_min REAL;
 ALTER TABLE agent_registry ADD COLUMN IF NOT EXISTS price_range_usd_max REAL;
 ",
+    // v19: Mesh bounty board — open task announcements broadcast by agents.
+    "
+CREATE TABLE IF NOT EXISTS bounties (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender               TEXT    NOT NULL,
+    required_capability  TEXT    NOT NULL,
+    max_budget_usd       REAL    NOT NULL,
+    deadline_at          INTEGER NOT NULL,
+    task_summary         TEXT    NOT NULL DEFAULT '',
+    conversation_id      TEXT    NOT NULL DEFAULT '',
+    slot                 INTEGER NOT NULL DEFAULT 0,
+    ts                   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bounties_cap ON bounties(required_capability, deadline_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bounties_ts ON bounties(ts DESC);
+",
 ];
 
 struct Db(rusqlite::Connection);
@@ -1940,6 +1971,43 @@ impl Db {
                 d.slot as i64,
                 ts as i64,
             ],
+        )?;
+        Ok(())
+    }
+
+    fn insert_bounty(
+        &self,
+        sender: &str,
+        capability: &str,
+        max_budget_usd: f64,
+        deadline_at: u64,
+        task_summary: &str,
+        conversation_id: &str,
+        slot: u64,
+        ts: u64,
+    ) -> rusqlite::Result<()> {
+        self.0.execute(
+            "INSERT INTO bounties
+             (sender, required_capability, max_budget_usd, deadline_at, task_summary, conversation_id, slot, ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                sender,
+                capability,
+                max_budget_usd,
+                deadline_at as i64,
+                task_summary,
+                conversation_id,
+                slot as i64,
+                ts as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn expire_bounties(&self, now: u64) -> rusqlite::Result<()> {
+        self.0.execute(
+            "DELETE FROM bounties WHERE deadline_at > 0 AND deadline_at < ?1",
+            rusqlite::params![now as i64],
         )?;
         Ok(())
     }
@@ -3395,6 +3463,39 @@ impl ReputationStore {
                 }
                 None
             }
+            IngestEvent::Bounty { sender, required_capability, max_budget_usd, deadline_secs, task_summary, conversation_id, slot } => {
+                if !is_valid_agent_id(&sender) {
+                    tracing::warn!("Ingest: invalid sender in BOUNTY '{}' — dropped", &sender);
+                    return None;
+                }
+                if required_capability.is_empty() || max_budget_usd <= 0.0 {
+                    tracing::warn!("Ingest: BOUNTY missing required fields — dropped");
+                    return None;
+                }
+                drop(inner);
+                let ts = now_secs();
+                let deadline_at = if deadline_secs > 0 { ts + deadline_secs } else { 0 };
+                // Clamp task_summary to 200 chars
+                let task_summary: String = task_summary.chars().take(200).collect();
+                tracing::debug!(
+                    "BOUNTY sender={} cap={} budget={}",
+                    &sender[..8.min(sender.len())],
+                    required_capability,
+                    max_budget_usd,
+                );
+                let db = self.db.lock().unwrap();
+                if let Some(ref conn) = *db {
+                    if let Err(e) = conn.insert_bounty(
+                        &sender, &required_capability, max_budget_usd, deadline_at,
+                        &task_summary, &conversation_id, slot, ts,
+                    ) {
+                        tracing::warn!("SQLite insert_bounty failed: {e}");
+                    }
+                    // Expire old bounties inline (best-effort)
+                    let _ = conn.expire_bounties(ts);
+                }
+                None
+            }
             IngestEvent::Latency(lev) => {
                 if !is_valid_agent_id(&lev.agent_id) {
                     tracing::warn!(
@@ -3592,6 +3693,45 @@ impl ReputationStore {
         match rows {
             Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
             Err(e) => { tracing::warn!("list_broadcasts query failed: {e}"); vec![] }
+        }
+    }
+
+    /// Return open bounties from the database, newest first.
+    /// Bounties past their `deadline_at` are automatically excluded.
+    /// Pass `capability` to filter by required capability.
+    pub fn list_bounties(&self, capability: Option<&str>, limit: usize) -> Vec<serde_json::Value> {
+        let now = now_secs() as i64;
+        let limit = limit.min(200) as i64;
+        let db = self.db.lock().unwrap();
+        let Some(ref conn) = *db else { return vec![] };
+        let mapper = |row: &rusqlite::Row| -> rusqlite::Result<serde_json::Value> {
+            Ok(serde_json::json!({
+                "id":                   row.get::<_, i64>(0)?,
+                "sender":               row.get::<_, String>(1)?,
+                "required_capability":  row.get::<_, String>(2)?,
+                "max_budget_usd":       row.get::<_, f64>(3)?,
+                "deadline_at":          row.get::<_, i64>(4)?,
+                "task_summary":         row.get::<_, String>(5)?,
+                "conversation_id":      row.get::<_, String>(6)?,
+                "ts":                   row.get::<_, i64>(7)?,
+            }))
+        };
+        let rows: rusqlite::Result<Vec<_>> = if let Some(cap) = capability {
+            conn.0.prepare(
+                "SELECT id, sender, required_capability, max_budget_usd, deadline_at, task_summary, conversation_id, ts
+                 FROM bounties WHERE required_capability = ?1 AND (deadline_at = 0 OR deadline_at > ?2)
+                 ORDER BY ts DESC LIMIT ?3"
+            ).and_then(|mut s| s.query_map(rusqlite::params![cap, now, limit], mapper).and_then(|r| r.collect()))
+        } else {
+            conn.0.prepare(
+                "SELECT id, sender, required_capability, max_budget_usd, deadline_at, task_summary, conversation_id, ts
+                 FROM bounties WHERE (deadline_at = 0 OR deadline_at > ?1)
+                 ORDER BY ts DESC LIMIT ?2"
+            ).and_then(|mut s| s.query_map(rusqlite::params![now, limit], mapper).and_then(|r| r.collect()))
+        };
+        match rows {
+            Ok(v) => v,
+            Err(e) => { tracing::warn!("list_bounties query failed: {e}"); vec![] }
         }
     }
 

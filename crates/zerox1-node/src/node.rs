@@ -357,8 +357,16 @@ impl Zx01Node {
             bags_launch,
             config.skill_workspace.clone(),
             mpp_config,
-            // TODO: re-enable 0G file delivery adapter when zerox1-filedelivery-0g is back in scope.
-            None::<std::sync::Arc<dyn zerox1_filedelivery_core::FileDelivery>>,
+            // Use the aggregator as a blob relay for large DELIVER payloads.
+            // Enabled whenever an aggregator URL is configured; the node signs
+            // uploads with its own identity key (no extra credentials needed).
+            aggregator_url.as_deref().map(|url| {
+                let adapter = zerox1_filedelivery_aggregator::AggregatorBlobDelivery::new(
+                    url,
+                    std::sync::Arc::new(identity.signing_key.clone()),
+                );
+                std::sync::Arc::new(adapter) as std::sync::Arc<dyn zerox1_filedelivery_core::FileDelivery>
+            }),
             // Build task audit log if a path is configured.
             if let Some(ref path) = config.task_log_path {
                 match crate::task_log::TaskLog::open(path) {
@@ -1396,8 +1404,98 @@ impl Zx01Node {
                 }
                 MsgType::Discover => {
                     tracing::debug!("DISCOVER from {}", hex::encode(env.sender));
+                    if let Some(ref agg_url) = self.aggregator_url {
+                        if let Ok(payload_str) = std::str::from_utf8(&env.payload) {
+                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload_str) {
+                                let query = val["query"].as_str().unwrap_or("").to_string();
+                                if !query.is_empty() {
+                                    let encoded_query: String = query.chars().map(|c| {
+                                        if c.is_alphanumeric() || c == '-' || c == '_' {
+                                            c.to_string()
+                                        } else {
+                                            format!("%{:02X}", c as u32)
+                                        }
+                                    }).collect();
+                                    let url = format!("{}/agents/search?capability={}&limit=20", agg_url, encoded_query);
+                                    let http = self.http_client.clone();
+                                    let api = self.api.clone();
+                                    let sender = env.sender;
+                                    let conv_id = env.conversation_id;
+                                    let self_agent = self.identity.agent_id;
+                                    tokio::spawn(async move {
+                                        match http.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
+                                            Ok(r) if r.status().is_success() => {
+                                                if let Ok(results) = r.json::<serde_json::Value>().await {
+                                                    let payload = serde_json::json!({
+                                                        "type": "discover_response",
+                                                        "results": results,
+                                                    }).to_string().into_bytes();
+                                                    let payload_hash = zerox1_protocol::hash::keccak256(&payload);
+                                                    let payload_len = payload.len() as u32;
+                                                    let timestamp = std::time::SystemTime::now()
+                                                        .duration_since(std::time::UNIX_EPOCH)
+                                                        .unwrap_or_default()
+                                                        .as_micros() as u64;
+                                                    let response_env = zerox1_protocol::envelope::Envelope {
+                                                        version: 1,
+                                                        msg_type: zerox1_protocol::message::MsgType::Advertise,
+                                                        sender: self_agent,
+                                                        recipient: sender,
+                                                        timestamp,
+                                                        block_ref: 0,
+                                                        nonce: 0,
+                                                        conversation_id: conv_id,
+                                                        payload_hash,
+                                                        payload_len,
+                                                        payload,
+                                                        signature: [0u8; 64],
+                                                    };
+                                                    api.push_inbound(&response_env, 0);
+                                                    tracing::debug!(
+                                                        "DISCOVER: sent capability search results back to requester"
+                                                    );
+                                                }
+                                            }
+                                            _ => {
+                                                tracing::debug!("DISCOVER: aggregator search failed for query={}", query);
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
                 MsgType::Beacon => { /* already handled above */ }
+                MsgType::Bounty => {
+                    if let Ok(payload_str) = std::str::from_utf8(&env.payload) {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload_str) {
+                            let required_cap = val["required_capability"].as_str().unwrap_or("").to_string();
+                            let max_budget   = val["max_budget_usd"].as_f64().unwrap_or(0.0);
+                            let deadline     = val["deadline_secs"].as_u64().unwrap_or(0);
+                            let summary      = val["task_summary"].as_str().unwrap_or("").to_string();
+                            let conv_id      = val["conversation_id"].as_str().unwrap_or("").to_string();
+                            if !required_cap.is_empty() && max_budget > 0.0 {
+                                tracing::info!(
+                                    from = %hex::encode(env.sender),
+                                    capability = %required_cap,
+                                    budget = max_budget,
+                                    "BOUNTY received"
+                                );
+                                self.push_to_aggregator(serde_json::json!({
+                                    "msg_type":            "BOUNTY",
+                                    "sender":              hex::encode(env.sender),
+                                    "required_capability": required_cap,
+                                    "max_budget_usd":      max_budget,
+                                    "deadline_secs":       deadline,
+                                    "task_summary":        summary,
+                                    "conversation_id":     conv_id,
+                                    "slot":                self.current_slot,
+                                }));
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1504,6 +1602,14 @@ impl Zx01Node {
                     bid_value,
                     slot: self.current_slot,
                 });
+                self.push_to_aggregator(serde_json::json!({
+                    "msg_type":        "PROPOSE",
+                    "sender":          hex::encode(env.sender),
+                    "recipient":       hex::encode(env.recipient),
+                    "conversation_id": hex::encode(env.conversation_id),
+                    "bid_value":       bid_value,
+                    "slot":            self.current_slot,
+                }));
             }
             MsgType::Counter => {
                 // Same bid extraction as PROPOSE — the counter-offered amount

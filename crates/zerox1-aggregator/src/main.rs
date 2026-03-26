@@ -483,6 +483,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/activity", get(api::get_activity))
         .route("/ws/activity", get(api::ws_activity))
         .route("/broadcasts", get(api::get_broadcasts))
+        .route("/bounties", get(api::get_bounties))
         .route("/hosting/nodes", get(api::get_hosting_nodes))
         .route("/blobs/{cid}", get(api::get_blob))
         // MPP protocol fee endpoints — public (agents call these directly)

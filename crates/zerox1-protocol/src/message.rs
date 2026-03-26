@@ -32,6 +32,8 @@ pub enum MsgType {
     Beacon = 0x0D,
     /// Named-topic pubsub: publish content to a named gossipsub topic.
     Broadcast = 0x0E,
+    /// Broadcast: "I need X done, paying up to Y" — open bounty to the mesh
+    Bounty = 0x0F,
 }
 
 impl MsgType {
@@ -51,6 +53,7 @@ impl MsgType {
             0x0C => Ok(Self::Dispute),
             0x0D => Ok(Self::Beacon),
             0x0E => Ok(Self::Broadcast),
+            0x0F => Ok(Self::Bounty),
             other => Err(ProtocolError::UnknownMsgType(other)),
         }
     }
@@ -61,7 +64,7 @@ impl MsgType {
 
     /// Returns true if this message type is sent via pubsub broadcast.
     pub fn is_broadcast(self) -> bool {
-        matches!(self, Self::Advertise | Self::Discover | Self::Beacon)
+        matches!(self, Self::Advertise | Self::Discover | Self::Beacon | Self::Bounty)
     }
 
     /// Returns true if this message type goes to the notary pubsub topic.
@@ -107,6 +110,7 @@ impl std::fmt::Display for MsgType {
             Self::Dispute => "DISPUTE",
             Self::Beacon => "BEACON",
             Self::Broadcast => "BROADCAST",
+            Self::Bounty => "BOUNTY",
         };
         write!(f, "{}", name)
     }

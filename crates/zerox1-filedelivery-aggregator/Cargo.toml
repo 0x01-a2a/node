@@ -1,0 +1,22 @@
+[package]
+name = "zerox1-filedelivery-aggregator"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "0x01 aggregator blob relay adapter for zerox1-filedelivery"
+repository = "https://github.com/0x01-a2a/filedelivery"
+homepage = "https://0x01.world"
+keywords = ["zerox1", "filedelivery", "aggregator", "blob"]
+
+[dependencies]
+zerox1-filedelivery-core = { path = "../zerox1-filedelivery-core" }
+
+anyhow = "1"
+async-trait = "0.1"
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

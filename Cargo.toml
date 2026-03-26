@@ -7,6 +7,8 @@ members = [
     "crates/zerox1-simulator",
     "crates/zerox1-client",
     "crates/zerox1-mailbox",
+    "crates/zerox1-filedelivery-core",
+    "crates/zerox1-filedelivery-aggregator",
 ]
 
 [workspace.package]
@@ -73,6 +75,7 @@ serde_json = "1"
 tower-http = { version = "0.6", features = ["cors"] }
 
 # File delivery
-zerox1-filedelivery-core = { path = "../filedelivery/core" }
+zerox1-filedelivery-core = { path = "crates/zerox1-filedelivery-core" }
+zerox1-filedelivery-aggregator = { path = "crates/zerox1-filedelivery-aggregator" }
 # zerox1-filedelivery-0g = { path = "../filedelivery/0g" }  # TODO: re-enable when 0g is back in scope
 

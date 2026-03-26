@@ -8115,8 +8115,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "zerox1-filedelivery-aggregator"
+version = "0.4.5"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "ed25519-dalek 2.2.0",
+ "hex",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "zerox1-filedelivery-core",
+]
+
+[[package]]
 name = "zerox1-filedelivery-core"
-version = "0.1.0"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8181,6 +8196,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "zerox1-filedelivery-aggregator",
  "zerox1-filedelivery-core",
  "zerox1-protocol",
 ]

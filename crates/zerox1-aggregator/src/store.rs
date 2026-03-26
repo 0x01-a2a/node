@@ -1226,7 +1226,24 @@ impl Db {
         for (i, &migration_sql) in MIGRATIONS.iter().enumerate() {
             let migration_version = (i + 1) as i64;
             if migration_version > current_version {
-                tx.execute_batch(migration_sql)?;
+                // Execute each semicolon-delimited statement individually so that
+                // "duplicate column name" errors (ALTER TABLE ADD COLUMN on a column
+                // that already exists) are silently skipped. This keeps migrations
+                // compatible with SQLite < 3.35.0 which lacks ADD COLUMN IF NOT EXISTS.
+                for stmt in migration_sql.split(';') {
+                    let stmt = stmt.trim();
+                    if stmt.is_empty() {
+                        continue;
+                    }
+                    if let Err(e) = tx.execute_batch(stmt) {
+                        let msg = e.to_string();
+                        if msg.contains("duplicate column name") {
+                            tracing::debug!("Migration v{migration_version}: skipping duplicate column ({msg})");
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                }
                 tx.execute(
                     "INSERT INTO schema_migrations (version) VALUES (?)",
                     [migration_version],

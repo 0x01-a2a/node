@@ -1,6 +1,6 @@
 {
   "name": "@zerox1/core",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "0x01 core protocol — types, codec, and Ed25519 crypto. Zero I/O, runs everywhere.",
   "license": "MIT",
   "repository": {

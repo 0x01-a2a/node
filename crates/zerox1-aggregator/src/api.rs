@@ -3896,6 +3896,10 @@ pub async fn sponsor_fee_share_config(
         .to_string();
 
     // Sign and broadcast each fee-share config transaction with the sponsor key.
+    // Bags pre-signs one slot per tx; we add the sponsor signature if our key
+    // is one of the required signers.  If try_partial_sign fails (e.g. our key
+    // isn't in this tx's account list), broadcast the tx as-is — Bags may have
+    // already provided all required signatures for that tx.
     if let Some(txs) = fee_share_val["response"]["transactions"].as_array() {
         for tx_item in txs {
             if let Some(tx_b58) = tx_item["transaction"].as_str() {
@@ -3903,8 +3907,15 @@ pub async fn sponsor_fee_share_config(
                     if let Ok(mut tx) =
                         bincode::deserialize::<solana_sdk::transaction::Transaction>(&tx_bytes)
                     {
+                        let blockhash = tx.message.recent_blockhash;
                         let kp = signing_key_to_solana_kp(&signing_key);
-                        tx.partial_sign(&[&kp], tx.message.recent_blockhash);
+                        // try_partial_sign returns Err instead of panicking when
+                        // our key isn't a required signer for this particular tx.
+                        if let Err(e) = tx.try_partial_sign(&[&kp], blockhash) {
+                            tracing::debug!(
+                                "sponsor_fee_share_config: sponsor not a signer for this tx ({e}), broadcasting as-is"
+                            );
+                        }
                         if let Ok(serialized) = bincode::serialize(&tx) {
                             if let Err(e) = broadcast_solana_tx(
                                 &state.sponsor_rpc_url,

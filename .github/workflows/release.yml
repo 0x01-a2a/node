@@ -152,7 +152,8 @@ jobs:
           path: target/aarch64-apple-ios/release/libzerox1_node.a
           if-no-files-found: error
 
-  # ── Build zerox1-aggregator (Linux only — server-side service) ───────────
+  # ── Build zerox1-mailbox (release artifact bundled into GitHub release) ──
+  # Aggregator is built and deployed separately via deploy-aggregator.yml.
   build-server-services:
     name: Build server services
     runs-on: ubuntu-22.04
@@ -171,18 +172,6 @@ jobs:
             ~/.cargo/git/db
           key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-registry-${{ runner.os }}-
-
-      - name: Build aggregator
-        run: cargo build --release -p zerox1-aggregator --features zerox1-aggregator/data-bounty
-        env:
-          CARGO_TERM_COLOR: always
-
-      - name: Upload aggregator artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: zerox1-aggregator
-          path: target/release/zerox1-aggregator
-          if-no-files-found: error
 
       - name: Build mailbox
         run: cargo build --release -p zerox1-mailbox

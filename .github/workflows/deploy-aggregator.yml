@@ -1,0 +1,56 @@
+name: Deploy Aggregator
+
+# Builds zerox1-aggregator independently and deploys to GCP genesis nodes.
+# Triggered manually or on pushes to main that touch aggregator source.
+#
+# Manual trigger lets you deploy a hotfix without cutting a full node release.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/zerox1-aggregator/**'
+      - 'crates/zerox1-common/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    name: Build aggregator
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-${{ runner.os }}-
+
+      - name: Build zerox1-aggregator
+        run: cargo build --release -p zerox1-aggregator --features zerox1-aggregator/data-bounty
+        env:
+          CARGO_TERM_COLOR: always
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zerox1-aggregator
+          path: target/release/zerox1-aggregator
+          if-no-files-found: error
+          retention-days: 7

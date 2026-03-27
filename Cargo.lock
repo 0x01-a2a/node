@@ -8072,7 +8072,7 @@ dependencies = [
 
 [[package]]
 name = "zerox1-aggregator"
-version = "0.5.6"
+version = "0.5.11"
 dependencies = [
  "anyhow",
  "axum",
@@ -8101,7 +8101,7 @@ dependencies = [
 
 [[package]]
 name = "zerox1-client"
-version = "0.5.6"
+version = "0.5.11"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -8118,7 +8118,7 @@ dependencies = [
 
 [[package]]
 name = "zerox1-filedelivery-aggregator"
-version = "0.5.6"
+version = "0.5.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8133,7 +8133,7 @@ dependencies = [
 
 [[package]]
 name = "zerox1-filedelivery-core"
-version = "0.5.6"
+version = "0.5.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8142,7 +8142,7 @@ dependencies = [
 
 [[package]]
 name = "zerox1-mailbox"
-version = "0.5.6"
+version = "0.5.11"
 dependencies = [
  "anyhow",
  "axum",
@@ -8167,7 +8167,7 @@ dependencies = [
 
 [[package]]
 name = "zerox1-node"
-version = "0.5.6"
+version = "0.5.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8207,7 +8207,7 @@ dependencies = [
 
 [[package]]
 name = "zerox1-protocol"
-version = "0.5.6"
+version = "0.5.11"
 dependencies = [
  "bytes",
  "ciborium",
@@ -8222,7 +8222,7 @@ dependencies = [
 
 [[package]]
 name = "zerox1-simulator"
-version = "0.5.6"
+version = "0.5.11"
 dependencies = [
  "clap",
  "rand 0.8.5",

@@ -506,6 +506,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/broadcasts", get(api::get_broadcasts))
         .route("/bounties", get(api::get_bounties))
         .route("/hosting/nodes", get(api::get_hosting_nodes))
+        // Agent search — public discovery feature, no API key required
+        .route("/agents/search", get(api::search_agents))
+        .route("/agents/search/name", get(api::search_agents_by_name))
         .route("/blobs/{cid}", get(api::get_blob))
         // MPP protocol fee endpoints — public (agents call these directly)
         .route(
@@ -578,8 +581,6 @@ async fn main() -> anyhow::Result<()> {
             "/epochs/{agent_id}/{epoch}/envelopes",
             get(api::get_epoch_envelopes),
         )
-        .route("/agents/search", get(api::search_agents))
-        .route("/agents/search/name", get(api::search_agents_by_name))
         .route("/interactions/by/{agent_id}", get(api::get_interactions_by))
         .route("/disputes/{agent_id}", get(api::get_disputes))
         .route("/registry", get(api::get_registry))

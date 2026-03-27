@@ -3900,26 +3900,29 @@ pub async fn sponsor_fee_share_config(
     // signature slot that the sponsor wallet must fill.
     // We operate directly on wire bytes to avoid bincode round-trip corruption.
     if let Some(txs) = fee_share_val["response"]["transactions"].as_array() {
-        for tx_item in txs {
-            if let Some(tx_b58) = tx_item["transaction"].as_str() {
-                if let Ok(tx_bytes) = bs58::decode(tx_b58).into_vec() {
-                    let signed = sign_wire_tx_if_signer(&tx_bytes, &signing_key)
-                        .unwrap_or(tx_bytes);
-                    if let Err(e) = broadcast_solana_tx(
-                        &state.sponsor_rpc_url,
-                        client,
-                        &B64.encode(&signed),
-                    )
-                    .await
-                    {
-                        tracing::warn!("sponsor_fee_share_config: tx broadcast failed: {e}");
-                    }
-                }
+        tracing::warn!("sponsor_fee_share_config: {} txs, raw[0]={}", txs.len(), txs.first().map(|t| t.to_string()).unwrap_or_default());
+        for (idx, tx_item) in txs.iter().enumerate() {
+            let Some(tx_b58) = tx_item["transaction"].as_str() else {
+                tracing::warn!("sponsor_fee_share_config: tx[{idx}] no 'transaction' field in {tx_item}");
+                continue;
+            };
+            let tx_bytes = match bs58::decode(tx_b58).into_vec() {
+                Ok(b) => b,
+                Err(e) => { tracing::warn!("sponsor_fee_share_config: tx[{idx}] bs58 fail: {e}"); continue; }
+            };
+            tracing::warn!("sponsor_fee_share_config: tx[{idx}] {} bytes first=0x{:02x}", tx_bytes.len(), tx_bytes.first().copied().unwrap_or(0));
+            let signed = sign_wire_tx_if_signer(&tx_bytes, &signing_key).unwrap_or(tx_bytes);
+            if let Err(e) = broadcast_solana_tx(&state.sponsor_rpc_url, client, &B64.encode(&signed)).await {
+                tracing::warn!("sponsor_fee_share_config: tx[{idx}] broadcast failed: {e}");
+            } else {
+                tracing::warn!("sponsor_fee_share_config: tx[{idx}] broadcast ok");
             }
         }
         if !txs.is_empty() {
             tokio::time::sleep(std::time::Duration::from_secs(4)).await;
         }
+    } else {
+        tracing::warn!("sponsor_fee_share_config: no 'transactions' array in response: {fee_share_val}");
     }
 
     (StatusCode::OK, Json(json!({"config_key": config_key}))).into_response()
@@ -3979,13 +3982,22 @@ fn sign_wire_tx_if_signer(
 
     // Find our pubkey among the signer accounts.
     let our_pubkey = key.verifying_key().to_bytes();
+    tracing::warn!(
+        "sign_wire_tx: sponsor={} num_sigs={} num_req_sigs={} num_accounts={}",
+        bs58::encode(&our_pubkey).into_string(),
+        num_sigs,
+        num_required_sigs,
+        num_accounts,
+    );
     let mut our_slot: Option<usize> = None;
     for i in 0..num_required_sigs.min(num_accounts) {
         let off = accounts_start + i * 32;
         if off + 32 > message_bytes.len() {
             break;
         }
-        if message_bytes[off..off + 32] == our_pubkey {
+        let acc = &message_bytes[off..off + 32];
+        tracing::warn!("sign_wire_tx: account[{}]={}", i, bs58::encode(acc).into_string());
+        if acc == our_pubkey {
             our_slot = Some(i);
             break;
         }

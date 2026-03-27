@@ -3895,18 +3895,20 @@ pub async fn sponsor_fee_share_config(
         .unwrap_or("")
         .to_string();
 
-    // Broadcast each fee-share config transaction.
-    // Bags returns base58-encoded wire-format transactions (already signed by
-    // their authority). We base64-encode the raw wire bytes and send directly
-    // — no deserialize/reserialize round-trip which would corrupt the format.
+    // Sign and broadcast each fee-share config transaction.
+    // Bags returns base58-encoded wire-format transactions with one empty
+    // signature slot that the sponsor wallet must fill.
+    // We operate directly on wire bytes to avoid bincode round-trip corruption.
     if let Some(txs) = fee_share_val["response"]["transactions"].as_array() {
         for tx_item in txs {
             if let Some(tx_b58) = tx_item["transaction"].as_str() {
                 if let Ok(tx_bytes) = bs58::decode(tx_b58).into_vec() {
+                    let signed = sign_wire_tx_if_signer(&tx_bytes, &signing_key)
+                        .unwrap_or(tx_bytes);
                     if let Err(e) = broadcast_solana_tx(
                         &state.sponsor_rpc_url,
                         client,
-                        &B64.encode(&tx_bytes),
+                        &B64.encode(&signed),
                     )
                     .await
                     {
@@ -3927,6 +3929,86 @@ fn remove_sponsor_reservation(state: &AppState, agent_pubkey: &str) {
     if let Ok(mut launched) = state.sponsor_launches.lock() {
         launched.remove(agent_pubkey);
     }
+}
+
+/// Sign a Solana wire-format transaction with `key` if our pubkey appears in
+/// the signer account list and the corresponding signature slot is empty.
+/// Returns the (possibly modified) wire bytes, or None on parse errors.
+fn sign_wire_tx_if_signer(
+    tx_bytes: &[u8],
+    key: &ed25519_dalek::SigningKey,
+) -> Option<Vec<u8>> {
+    use ed25519_dalek::Signer as _;
+
+    // Parse compact-u16 num_sigs (values < 128 fit in 1 byte).
+    if tx_bytes.is_empty() {
+        return None;
+    }
+    let (num_sigs, sigs_start) = if tx_bytes[0] & 0x80 == 0 {
+        (tx_bytes[0] as usize, 1usize)
+    } else if tx_bytes.len() >= 2 {
+        let lo = (tx_bytes[0] & 0x7f) as usize;
+        let hi = tx_bytes[1] as usize;
+        (lo | (hi << 7), 2usize)
+    } else {
+        return None;
+    };
+
+    let msg_start = sigs_start + num_sigs * 64;
+    if tx_bytes.len() <= msg_start {
+        return None;
+    }
+    let message_bytes = &tx_bytes[msg_start..];
+
+    // Message header: [num_required_sigs u8, num_ro_signed u8, num_ro_unsigned u8]
+    if message_bytes.len() < 4 {
+        return None;
+    }
+    let num_required_sigs = message_bytes[0] as usize;
+
+    // Compact-u16 account count (1 byte if < 128).
+    let (num_accounts, accounts_start) = if message_bytes[3] & 0x80 == 0 {
+        (message_bytes[3] as usize, 4usize)
+    } else if message_bytes.len() >= 5 {
+        let lo = (message_bytes[3] & 0x7f) as usize;
+        let hi = message_bytes[4] as usize;
+        (lo | (hi << 7), 5usize)
+    } else {
+        return None;
+    };
+
+    // Find our pubkey among the signer accounts.
+    let our_pubkey = key.verifying_key().to_bytes();
+    let mut our_slot: Option<usize> = None;
+    for i in 0..num_required_sigs.min(num_accounts) {
+        let off = accounts_start + i * 32;
+        if off + 32 > message_bytes.len() {
+            break;
+        }
+        if message_bytes[off..off + 32] == our_pubkey {
+            our_slot = Some(i);
+            break;
+        }
+    }
+
+    let slot = our_slot?;
+
+    // Only sign if the slot is empty (all-zero placeholder).
+    let slot_start = sigs_start + slot * 64;
+    if slot_start + 64 > tx_bytes.len() {
+        return None;
+    }
+    if tx_bytes[slot_start..slot_start + 64].iter().any(|&b| b != 0) {
+        // Already signed — nothing to do.
+        return Some(tx_bytes.to_vec());
+    }
+
+    // ed25519 sign the raw message bytes.
+    let sig = key.sign(message_bytes);
+
+    let mut result = tx_bytes.to_vec();
+    result[slot_start..slot_start + 64].copy_from_slice(&sig.to_bytes());
+    Some(result)
 }
 
 fn signing_key_to_solana_kp(key: &ed25519_dalek::SigningKey) -> solana_sdk::signer::keypair::Keypair {

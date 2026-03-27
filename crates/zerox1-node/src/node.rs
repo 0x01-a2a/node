@@ -359,6 +359,8 @@ impl Zx01Node {
             #[cfg(feature = "trade")]
             config.jupiter_api_url.clone(),
             #[cfg(feature = "trade")]
+            config.jupiter_api_key.clone(),
+            #[cfg(feature = "trade")]
             config.jupiter_fee_bps,
             #[cfg(feature = "trade")]
             config.jupiter_fee_account.clone(),

@@ -257,6 +257,11 @@ pub struct Config {
     #[arg(long, env = "ZX01_JUPITER_API_URL")]
     pub jupiter_api_url: Option<String>,
 
+    /// Optional Jupiter API key for higher-rate-limit and advanced endpoints
+    /// such as Trigger and Recurring orders.
+    #[arg(long, env = "ZX01_JUPITER_API_KEY")]
+    pub jupiter_api_key: Option<String>,
+
     /// Jupiter platform fee in basis points (1 bps = 0.01%).
     /// Deducted from swap output and routed to `jupiter_fee_account`.
     /// Max 100 bps (1%). Set 0 to disable. Default: 50 (0.5%).

@@ -392,7 +392,9 @@ async fn report_token_to_aggregator(state: &ApiState, token_mint: &str) {
     };
     let sig = state.0.node_signing_key.sign(&body_bytes);
     let url = format!("{}/agents/{}/token", base.trim_end_matches('/'), agent_id);
-    let req = state.0.http_client
+    let req = state
+        .0
+        .http_client
         .post(url)
         .header("X-Signature", hex::encode(sig.to_bytes()))
         .header("Content-Type", "application/json")
@@ -513,6 +515,9 @@ pub struct ApiInner {
     /// Set to https://api.jup.ag with --jupiter-api-url for higher rate limits.
     #[cfg(feature = "trade")]
     pub(crate) jupiter_api_url: Option<String>,
+    /// Optional Jupiter API key for higher-rate-limit and advanced endpoints.
+    #[cfg(feature = "trade")]
+    pub(crate) jupiter_api_key: Option<String>,
     /// Jupiter platform fee basis points (0 = disabled).
     #[cfg(feature = "trade")]
     pub(crate) jupiter_fee_bps: u16,
@@ -610,6 +615,7 @@ impl ApiState {
         rpc_url: String,
         trade_rpc_url: String,
         #[cfg(feature = "trade")] jupiter_api_url: Option<String>,
+        #[cfg(feature = "trade")] jupiter_api_key: Option<String>,
         #[cfg(feature = "trade")] jupiter_fee_bps: u16,
         #[cfg(feature = "trade")] jupiter_fee_account: Option<String>,
         #[cfg(feature = "trade")] launchlab_share_fee_wallet: Option<String>,
@@ -684,6 +690,8 @@ impl ApiState {
             trade_rpc_url,
             #[cfg(feature = "trade")]
             jupiter_api_url,
+            #[cfg(feature = "trade")]
+            jupiter_api_key,
             #[cfg(feature = "trade")]
             jupiter_fee_bps,
             #[cfg(feature = "trade")]
@@ -854,15 +862,17 @@ impl ApiState {
         };
 
         let deliver = if env.msg_type == zerox1_protocol::message::MsgType::Deliver {
-            zerox1_protocol::payload::DeliverPayload::decode(&env.payload).ok().map(|p| {
-                serde_json::json!({
-                    "conversation_id": hex::encode(p.conversation_id),
-                    "content_type":    p.content_type,
-                    "inline_b64":      p.inline.as_deref().map(|b| B64.encode(b)),
-                    "payload_uri":     p.payload_uri,
-                    "payload_size":    p.payload_size,
+            zerox1_protocol::payload::DeliverPayload::decode(&env.payload)
+                .ok()
+                .map(|p| {
+                    serde_json::json!({
+                        "conversation_id": hex::encode(p.conversation_id),
+                        "content_type":    p.content_type,
+                        "inline_b64":      p.inline.as_deref().map(|b| B64.encode(b)),
+                        "payload_uri":     p.payload_uri,
+                        "payload_size":    p.payload_size,
+                    })
                 })
-            })
         } else {
             None
         };
@@ -983,19 +993,49 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
     #[cfg(feature = "trade")]
     let router = router
         .route("/trade/swap", post(crate::trade::trade_swap_handler))
-        .route("/trade/swap/pending", get(crate::trade::trade_swap_pending_handler))
-        .route("/trade/swap/confirm/{id}", post(crate::trade::trade_swap_confirm_handler))
-        .route("/trade/swap/reject/{id}", post(crate::trade::trade_swap_reject_handler))
+        .route(
+            "/trade/swap/pending",
+            get(crate::trade::trade_swap_pending_handler),
+        )
+        .route(
+            "/trade/swap/confirm/{id}",
+            post(crate::trade::trade_swap_confirm_handler),
+        )
+        .route(
+            "/trade/swap/reject/{id}",
+            post(crate::trade::trade_swap_reject_handler),
+        )
         .route("/trade/quote", get(crate::trade::trade_quote_handler))
         .route("/trade/price", get(crate::trade::trade_price_handler))
         .route("/trade/tokens", get(crate::trade::trade_tokens_handler))
-        .route("/trade/limit/create", post(crate::trade::trade_limit_create_handler))
-        .route("/trade/limit/orders", get(crate::trade::trade_limit_orders_handler))
-        .route("/trade/limit/cancel", post(crate::trade::trade_limit_cancel_handler))
-        .route("/trade/dca/create", post(crate::trade::trade_dca_create_handler))
-        .route("/trade/launchlab/buy", post(crate::launchlab::launchlab_buy_handler))
-        .route("/trade/launchlab/sell", post(crate::launchlab::launchlab_sell_handler))
-        .route("/trade/cpmm/create-pool", post(crate::cpmm::cpmm_create_pool_handler))
+        .route(
+            "/trade/limit/create",
+            post(crate::trade::trade_limit_create_handler),
+        )
+        .route(
+            "/trade/limit/orders",
+            get(crate::trade::trade_limit_orders_handler),
+        )
+        .route(
+            "/trade/limit/cancel",
+            post(crate::trade::trade_limit_cancel_handler),
+        )
+        .route(
+            "/trade/dca/create",
+            post(crate::trade::trade_dca_create_handler),
+        )
+        .route(
+            "/trade/launchlab/buy",
+            post(crate::launchlab::launchlab_buy_handler),
+        )
+        .route(
+            "/trade/launchlab/sell",
+            post(crate::launchlab::launchlab_sell_handler),
+        )
+        .route(
+            "/trade/cpmm/create-pool",
+            post(crate::cpmm::cpmm_create_pool_handler),
+        )
         .route("/wallet/send", post(wallet_send_handler))
         .route("/portfolio/history", get(portfolio_history))
         .route("/portfolio/balances", get(portfolio_balances));
@@ -1016,8 +1056,14 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
         .route("/bags/swap/execute", post(bags_swap_execute_handler))
         .route("/bags/pool/{mint}", get(bags_pool_handler))
         .route("/bags/claimable", get(bags_claimable_handler))
-        .route("/bags/dexscreener/check/{mint}", get(bags_dexscreener_check_handler))
-        .route("/bags/dexscreener/list", post(bags_dexscreener_list_handler));
+        .route(
+            "/bags/dexscreener/check/{mint}",
+            get(bags_dexscreener_check_handler),
+        )
+        .route(
+            "/bags/dexscreener/list",
+            post(bags_dexscreener_list_handler),
+        );
 
     let app = router
         .layer({
@@ -1132,9 +1178,7 @@ async fn identity_sign(
     }
     let bytes_hex = match body.get("bytes_hex").and_then(|v| v.as_str()) {
         Some(h) => h,
-        None => {
-            return Json(serde_json::json!({ "error": "bytes_hex required" })).into_response()
-        }
+        None => return Json(serde_json::json!({ "error": "bytes_hex required" })).into_response(),
     };
     if bytes_hex.len() > 512 {
         return Json(serde_json::json!({ "error": "bytes_hex too long (max 256 bytes)" }))
@@ -1142,9 +1186,7 @@ async fn identity_sign(
     }
     let bytes = match hex::decode(bytes_hex) {
         Ok(b) => b,
-        Err(_) => {
-            return Json(serde_json::json!({ "error": "invalid hex" })).into_response()
-        }
+        Err(_) => return Json(serde_json::json!({ "error": "invalid hex" })).into_response(),
     };
     use ed25519_dalek::Signer as _;
     let sig = state.0.node_signing_key.sign(&bytes);
@@ -1162,10 +1204,7 @@ async fn identity_sign(
 /// the user to import their agent's hot wallet into any Solana wallet app.
 ///
 /// Requires master (api_secret) access only — never accessible with read-only keys.
-async fn identity_export_key(
-    headers: HeaderMap,
-    State(state): State<ApiState>,
-) -> Response {
+async fn identity_export_key(headers: HeaderMap, State(state): State<ApiState>) -> Response {
     // Always require the master secret — never open even in dev mode.
     if state.0.api_secret.is_none() {
         return (
@@ -1373,9 +1412,20 @@ async fn send_envelope(
         && raw_payload.first() == Some(&b'{')
     {
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw_payload) {
-            let score = v.get("score").and_then(|x| x.as_i64()).unwrap_or(0).clamp(-100, 100) as i8;
-            let outcome_str = v.get("outcome").and_then(|x| x.as_str()).unwrap_or("neutral");
-            let outcome: u8 = match outcome_str { "positive" => 2, "negative" => 0, _ => 1 };
+            let score = v
+                .get("score")
+                .and_then(|x| x.as_i64())
+                .unwrap_or(0)
+                .clamp(-100, 100) as i8;
+            let outcome_str = v
+                .get("outcome")
+                .and_then(|x| x.as_str())
+                .unwrap_or("neutral");
+            let outcome: u8 = match outcome_str {
+                "positive" => 2,
+                "negative" => 0,
+                _ => 1,
+            };
             zerox1_protocol::payload::FeedbackPayload {
                 conversation_id,
                 target_agent: recipient,
@@ -1383,7 +1433,8 @@ async fn send_envelope(
                 outcome,
                 is_dispute: false,
                 role: zerox1_protocol::payload::FeedbackPayload::ROLE_PARTICIPANT,
-            }.encode()
+            }
+            .encode()
         } else {
             raw_payload
         }
@@ -1408,7 +1459,8 @@ async fn send_envelope(
                             inline: None,
                             payload_uri: Some(ref_.uri),
                             payload_size: Some(ref_.size_bytes),
-                        }.encode()
+                        }
+                        .encode()
                     }
                     Err(e) => {
                         tracing::warn!(err = %e, "0G Storage upload failed; sending inline (may exceed size limit)");
@@ -1418,7 +1470,8 @@ async fn send_envelope(
                             inline: Some(raw_payload),
                             payload_uri: None,
                             payload_size: None,
-                        }.encode()
+                        }
+                        .encode()
                     }
                 }
             } else {
@@ -1432,7 +1485,8 @@ async fn send_envelope(
                 inline: Some(raw_payload),
                 payload_uri: None,
                 payload_size: None,
-            }.encode()
+            }
+            .encode()
         }
     } else {
         raw_payload
@@ -1518,7 +1572,9 @@ async fn topic_broadcast(
     // Validate slug: alphanumeric, hyphens, underscores, colons — max 128 chars.
     if slug.is_empty()
         || slug.len() > 128
-        || !slug.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == ':')
+        || !slug
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == ':')
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -1554,7 +1610,9 @@ async fn topic_broadcast(
         if url.len() > 2048 || (!url.starts_with("https://") && !url.starts_with("http://")) {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "content_url must be an http/https URL, max 2048 chars" })),
+                Json(
+                    serde_json::json!({ "error": "content_url must be an http/https URL, max 2048 chars" }),
+                ),
             );
         }
     }
@@ -1619,7 +1677,10 @@ async fn topic_broadcast(
     }
 
     match reply_rx.await {
-        Ok(Ok(conf)) => (StatusCode::OK, Json(serde_json::to_value(conf).unwrap_or_default())),
+        Ok(Ok(conf)) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(conf).unwrap_or_default()),
+        ),
         Ok(Err(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e })),
@@ -1696,7 +1757,10 @@ async fn ws_topics_handler(
 
     // Request the node loop to subscribe to this gossipsub topic (best-effort).
     if let Err(e) = state.0.sub_topic_tx.try_send(topic.clone()) {
-        tracing::warn!("sub_topic_tx full, subscription request for {:?} dropped: {e}", topic);
+        tracing::warn!(
+            "sub_topic_tx full, subscription request for {:?} dropped: {e}",
+            topic
+        );
     }
 
     ws.on_upgrade(move |socket| ws_topics_task(socket, state, topic))
@@ -2179,56 +2243,54 @@ async fn hosted_send(
     }
 
     // Parse msg_type.
-    let msg_type = match parse_msg_type(&req.msg_type) {
-        Some(t) => t,
-        None => {
-            return (
+    let msg_type =
+        match parse_msg_type(&req.msg_type) {
+            Some(t) => t,
+            None => return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "error": format!("unknown msg_type: {}", req.msg_type) })),
             )
-                .into_response()
-        }
-    };
+                .into_response(),
+        };
 
     // Parse recipient.
-    let recipient: [u8; 32] = if msg_type.is_broadcast()
-        || msg_type.is_notary_pubsub()
-        || msg_type.is_reputation_pubsub()
-        || msg_type.is_named_broadcast()
-    {
-        BROADCAST_RECIPIENT
-    } else {
-        match &req.recipient {
-            None => {
-                return (
+    let recipient: [u8; 32] =
+        if msg_type.is_broadcast()
+            || msg_type.is_notary_pubsub()
+            || msg_type.is_reputation_pubsub()
+            || msg_type.is_named_broadcast()
+        {
+            BROADCAST_RECIPIENT
+        } else {
+            match &req.recipient {
+                None => return (
                     StatusCode::BAD_REQUEST,
                     Json(
                         serde_json::json!({ "error": "recipient required for bilateral messages" }),
                     ),
                 )
-                    .into_response()
-            }
-            Some(hex_str) => match hex::decode(hex_str) {
-                Ok(b) => match b.try_into() {
-                    Ok(arr) => arr,
-                    Err(_) => {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(serde_json::json!({ "error": "recipient must be 32 bytes" })),
-                        )
-                            .into_response()
+                    .into_response(),
+                Some(hex_str) => {
+                    match hex::decode(hex_str) {
+                        Ok(b) => match b.try_into() {
+                            Ok(arr) => arr,
+                            Err(_) => return (
+                                StatusCode::BAD_REQUEST,
+                                Json(serde_json::json!({ "error": "recipient must be 32 bytes" })),
+                            )
+                                .into_response(),
+                        },
+                        Err(_) => {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(serde_json::json!({ "error": "recipient: invalid hex" })),
+                            )
+                                .into_response()
+                        }
                     }
-                },
-                Err(_) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({ "error": "recipient: invalid hex" })),
-                    )
-                        .into_response()
                 }
-            },
-        }
-    };
+            }
+        };
 
     // Parse conversation_id.
     let conversation_id: [u8; 16] = match hex::decode(&req.conversation_id) {
@@ -3622,8 +3684,7 @@ async fn x402_pay(
     };
 
     let accepted = accepts.iter().find(|e| {
-        e["scheme"].as_str() == Some("exact")
-            && e["network"].as_str() == Some(expected_network)
+        e["scheme"].as_str() == Some("exact") && e["network"].as_str() == Some(expected_network)
     });
     let accepted = match accepted {
         Some(a) => a,
@@ -3716,17 +3777,17 @@ async fn x402_pay(
     let dest_ata = derive_ata(&pay_to, &usdc_mint);
 
     // 5. Fetch recent blockhash.
-    let blockhash =
-        match fetch_latest_blockhash(&state.0.trade_rpc_url, &state.0.http_client).await {
-            Ok(bh) => bh,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({ "error": format!("blockhash fetch failed: {e}") })),
-                )
-                    .into_response();
-            }
-        };
+    let blockhash = match fetch_latest_blockhash(&state.0.trade_rpc_url, &state.0.http_client).await
+    {
+        Ok(bh) => bh,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("blockhash fetch failed: {e}") })),
+            )
+                .into_response();
+        }
+    };
 
     // 6. Build the three required instructions in the order mandated by x402:
     //      a) SetComputeUnitLimit (max 40_000)
@@ -3874,7 +3935,11 @@ fn sign_wire_tx_for_agent(tx_bytes: &[u8], key: &SigningKey) -> Vec<u8> {
     }
     let message_bytes = &tx_bytes[msg_start..];
     // V0 message starts with 0x80 version prefix; skip it for header parsing.
-    let hdr = if message_bytes[0] == 0x80 { 1usize } else { 0usize };
+    let hdr = if message_bytes[0] == 0x80 {
+        1usize
+    } else {
+        0usize
+    };
     if message_bytes.len() < hdr + 4 {
         return tx_bytes.to_vec();
     }
@@ -3893,7 +3958,9 @@ fn sign_wire_tx_for_agent(tx_bytes: &[u8], key: &SigningKey) -> Vec<u8> {
     let mut our_slot: Option<usize> = None;
     for i in 0..num_required_sigs.min(num_accounts) {
         let off = accounts_start + i * 32;
-        if off + 32 > message_bytes.len() { break; }
+        if off + 32 > message_bytes.len() {
+            break;
+        }
         if message_bytes[off..off + 32] == our_pubkey {
             our_slot = Some(i);
             break;
@@ -3907,7 +3974,10 @@ fn sign_wire_tx_for_agent(tx_bytes: &[u8], key: &SigningKey) -> Vec<u8> {
     if slot_start + 64 > tx_bytes.len() {
         return tx_bytes.to_vec();
     }
-    if tx_bytes[slot_start..slot_start + 64].iter().any(|&b| b != 0) {
+    if tx_bytes[slot_start..slot_start + 64]
+        .iter()
+        .any(|&b| b != 0)
+    {
         return tx_bytes.to_vec(); // already signed
     }
     use ed25519_dalek::Signer as _;
@@ -3986,10 +4056,16 @@ async fn check_mpp_gate(agent_id_hex: &str, state: &ApiInner) -> Option<Response
     // Safety: generate_challenge() produces Solana pubkeys (base58 ASCII) and u64 integers,
     // both of which are always valid HeaderValues. The parse() cannot fail in practice.
     headers.insert("X-MPP-Recipient", challenge.recipient.parse().unwrap());
-    headers.insert("X-MPP-Amount", challenge.amount.to_string().parse().unwrap());
+    headers.insert(
+        "X-MPP-Amount",
+        challenge.amount.to_string().parse().unwrap(),
+    );
     headers.insert("X-MPP-Mint", challenge.mint.parse().unwrap());
     headers.insert("X-MPP-Reference", challenge.reference.parse().unwrap());
-    headers.insert("X-MPP-Expires", challenge.expires_at.to_string().parse().unwrap());
+    headers.insert(
+        "X-MPP-Expires",
+        challenge.expires_at.to_string().parse().unwrap(),
+    );
 
     let body = serde_json::json!({
         "error": "payment_required",
@@ -4002,14 +4078,7 @@ async fn check_mpp_gate(agent_id_hex: &str, state: &ApiInner) -> Option<Response
         }
     });
 
-    Some(
-        (
-            StatusCode::PAYMENT_REQUIRED,
-            headers,
-            Json(body),
-        )
-            .into_response(),
-    )
+    Some((StatusCode::PAYMENT_REQUIRED, headers, Json(body)).into_response())
 }
 
 /// GET /mpp/challenge — generate a fresh MPP challenge.
@@ -4581,8 +4650,7 @@ async fn wallet_send_handler(
         }
     } else {
         // ── Native SOL transfer ─────────────────────────────────────────────
-        let transfer_ix =
-            solana_sdk::system_instruction::transfer(&agent_pubkey, &to, body.amount);
+        let transfer_ix = solana_sdk::system_instruction::transfer(&agent_pubkey, &to, body.amount);
         let tx = solana_sdk::transaction::Transaction::new_signed_with_payer(
             &[transfer_ix],
             Some(&agent_pubkey),
@@ -4611,7 +4679,10 @@ async fn wallet_send_handler(
         }
     };
 
-    tracing::info!("wallet_send: {amount} base units → {to} tx={signature}", amount = body.amount);
+    tracing::info!(
+        "wallet_send: {amount} base units → {to} tx={signature}",
+        amount = body.amount
+    );
     Json(serde_json::json!({
         "signature": signature,
         "amount": body.amount,
@@ -4984,10 +5055,14 @@ async fn bags_launch_handler(
             .into_response();
     }
     // Reject supplying more than one image source — Bags API enforces oneOf.
-    let image_sources = [req.image_bytes.is_some(), req.image_url.is_some(), req.image_cid.is_some()]
-        .iter()
-        .filter(|&&x| x)
-        .count();
+    let image_sources = [
+        req.image_bytes.is_some(),
+        req.image_url.is_some(),
+        req.image_cid.is_some(),
+    ]
+    .iter()
+    .filter(|&&x| x)
+    .count();
     if image_sources > 1 {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -5034,25 +5109,23 @@ async fn bags_launch_handler(
         // Fetch blob bytes from the aggregator and send them directly as multipart.
         let blob_url = format!("{}/{}", AGGREGATOR_BLOB_URL, cid);
         match reqwest::get(&blob_url).await {
-            Ok(resp) if resp.status().is_success() => {
-                match resp.bytes().await {
-                    Ok(bytes) if bytes.len() <= MAX_IMAGE_BYTES => Some(bytes.to_vec()),
-                    Ok(_) => {
-                        return (
-                            StatusCode::UNPROCESSABLE_ENTITY,
-                            Json(serde_json::json!({"error": "blob exceeds 15 MB limit"})),
-                        )
-                            .into_response();
-                    }
-                    Err(e) => {
-                        return (
-                            StatusCode::BAD_GATEWAY,
-                            Json(serde_json::json!({"error": format!("failed to read blob: {e}")})),
-                        )
-                            .into_response();
-                    }
+            Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+                Ok(bytes) if bytes.len() <= MAX_IMAGE_BYTES => Some(bytes.to_vec()),
+                Ok(_) => {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(serde_json::json!({"error": "blob exceeds 15 MB limit"})),
+                    )
+                        .into_response();
                 }
-            }
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({"error": format!("failed to read blob: {e}")})),
+                    )
+                        .into_response();
+                }
+            },
             Ok(resp) => {
                 return (
                     StatusCode::BAD_GATEWAY,
@@ -5167,7 +5240,9 @@ async fn bags_launch_handler(
         }
     } else {
         // No aggregator configured — try direct (requires agent wallet to have SOL).
-        tracing::warn!("No aggregator_url configured; attempting direct fee-share config (agent needs SOL)");
+        tracing::warn!(
+            "No aggregator_url configured; attempting direct fee-share config (agent needs SOL)"
+        );
         match launch
             .create_fee_share_config(
                 &agent_wallet,
@@ -5339,13 +5414,10 @@ async fn bags_claim_handler(
     let agent_wallet = agent_pubkey.to_string();
 
     // Capture SOL balance before claiming so we can compute the 1% protocol fee.
-    let pre_sol_balance = crate::bags::get_sol_balance(
-        &state.0.trade_rpc_url,
-        &state.0.http_client,
-        &agent_pubkey,
-    )
-    .await
-    .unwrap_or(0);
+    let pre_sol_balance =
+        crate::bags::get_sol_balance(&state.0.trade_rpc_url, &state.0.http_client, &agent_pubkey)
+            .await
+            .unwrap_or(0);
 
     let claim_txs = match launch
         .claim_fee_transactions(&agent_wallet, &req.token_mint)
@@ -5464,50 +5536,77 @@ async fn bags_positions_handler(headers: HeaderMap, State(state): State<ApiState
     let agent_pubkey = Pubkey::new_from_array(state.0.node_signing_key.verifying_key().to_bytes());
     let agent_wallet = agent_pubkey.to_string();
 
-    // Local portfolio history — tokens we know regardless of fee accumulation.
-    let local_mints: std::collections::HashSet<String> = {
+    // Build launch metadata from portfolio history (name, symbol, txid, timestamp).
+    let launch_meta: std::collections::HashMap<String, (String, String, String, u64)> = {
         let history = state.0.portfolio_history.read().await;
-        history.events.iter()
+        history
+            .events
+            .iter()
             .filter_map(|e| match e {
-                PortfolioEvent::BagsLaunch { token_mint, .. } => Some(token_mint.clone()),
+                PortfolioEvent::BagsLaunch {
+                    token_mint,
+                    name,
+                    symbol,
+                    txid,
+                    timestamp,
+                } => Some((
+                    token_mint.clone(),
+                    (name.clone(), symbol.clone(), txid.clone(), *timestamp),
+                )),
                 _ => None,
             })
             .collect()
     };
 
-    // Bags claimable-positions: per-token claimable SOL and tx count.
-    let (mut positions, seen_mints) = match launch.claimable_positions(&agent_wallet).await {
-        Ok(data) => {
-            let mut seen = std::collections::HashSet::new();
-            if let Some(arr) = data.as_array() {
-                for pos in arr {
-                    if let Some(m) = pos.get("tokenMint").and_then(|v| v.as_str()) {
-                        seen.insert(m.to_string());
-                    }
+    // Fetch claimable-positions from Bags API → map baseMint → position object.
+    // Bags API returns ClaimablePosition[] with `baseMint` as the token key and
+    // `totalClaimableLamportsUserShare` (lamports, i64) as the earned amount.
+    let claimable_map: std::collections::HashMap<String, serde_json::Value> =
+        match launch.claimable_positions(&agent_wallet).await {
+            Ok(data) => {
+                if let Some(arr) = data.as_array() {
+                    arr.iter()
+                        .filter_map(|pos| {
+                            pos.get("baseMint")?
+                                .as_str()
+                                .map(|m| (m.to_string(), pos.clone()))
+                        })
+                        .collect()
+                } else {
+                    Default::default()
                 }
-                (arr.clone(), seen)
-            } else {
-                (vec![], std::collections::HashSet::new())
             }
-        }
-        Err(e) => {
-            tracing::warn!("claimable-positions fetch failed: {e}");
-            (vec![], std::collections::HashSet::new())
-        }
-    };
+            Err(e) => {
+                tracing::warn!("claimable-positions fetch failed: {e}");
+                Default::default()
+            }
+        };
 
-    // Append locally-known tokens that have zero fees yet (not in API response).
-    for mint in &local_mints {
-        if !seen_mints.contains(mint) {
-            positions.push(serde_json::json!({
-                "tokenMint": mint,
-                "claimableSOL": 0.0,
-                "txCount": 0,
-            }));
-        }
-    }
+    // Merge: for each locally-known launch, enrich with claimable amounts.
+    // Returns a bare array so mobile can treat it as BagsToken[] directly.
+    let result: Vec<serde_json::Value> = launch_meta
+        .iter()
+        .map(|(mint, (name, symbol, txid, timestamp))| {
+            let pos = claimable_map.get(mint);
+            // `totalClaimableLamportsUserShare` is the V2 field for total lamports claimable.
+            // Divide by 1e9 to get SOL.
+            let claimable_lamports = pos
+                .and_then(|p| p.get("totalClaimableLamportsUserShare"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let claimable_sol = claimable_lamports / 1_000_000_000.0;
+            serde_json::json!({
+                "token_mint": mint,
+                "name": name,
+                "symbol": symbol,
+                "txid": txid,
+                "launched_at": timestamp,
+                "claimable_sol": claimable_sol,
+            })
+        })
+        .collect();
 
-    Json(serde_json::json!({"positions": positions})).into_response()
+    Json(serde_json::json!(result)).into_response()
 }
 
 /// Map a Bags client error to an HTTP status + message string.
@@ -5605,13 +5704,18 @@ async fn bags_swap_quote_handler(
     }
     let launch = match state.0.bags_launch.as_ref() {
         Some(l) => l.clone(),
-        None => return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "Bags API key not configured"})),
-        )
-            .into_response(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Bags API key not configured"})),
+            )
+                .into_response()
+        }
     };
-    match launch.swap_quote(&req.token_mint, req.amount, &req.action, req.slippage_bps).await {
+    match launch
+        .swap_quote(&req.token_mint, req.amount, &req.action, req.slippage_bps)
+        .await
+    {
         Ok(quote) => Json(quote).into_response(),
         Err(e) => {
             let (code, msg) = bags_error_response(&e);
@@ -5655,11 +5759,13 @@ async fn bags_swap_execute_handler(
     }
     let launch = match state.0.bags_launch.as_ref() {
         Some(l) => l.clone(),
-        None => return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "Bags API key not configured"})),
-        )
-            .into_response(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Bags API key not configured"})),
+            )
+                .into_response()
+        }
     };
 
     let agent_pubkey = Pubkey::new_from_array(state.0.node_signing_key.verifying_key().to_bytes());
@@ -5689,21 +5795,25 @@ async fn bags_swap_execute_handler(
     // Step 3 — sign + broadcast.
     let mut tx = match bincode::deserialize::<solana_sdk::transaction::Transaction>(&tx_bytes) {
         Ok(t) => t,
-        Err(e) => return (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": format!("swap tx deserialize: {e}")})),
-        )
-            .into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": format!("swap tx deserialize: {e}")})),
+            )
+                .into_response()
+        }
     };
     let kp = to_solana_keypair(&state.0.node_signing_key);
     tx.partial_sign(&[&kp], tx.message.recent_blockhash);
     let serialized = match bincode::serialize(&tx) {
         Ok(b) => b,
-        Err(e) => return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("swap tx serialize: {e}")})),
-        )
-            .into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("swap tx serialize: {e}")})),
+            )
+                .into_response()
+        }
     };
     match broadcast_transaction(
         &state.0.trade_rpc_url,
@@ -5747,11 +5857,13 @@ async fn bags_pool_handler(
     }
     let launch = match state.0.bags_launch.as_ref() {
         Some(l) => l.clone(),
-        None => return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "Bags API key not configured"})),
-        )
-            .into_response(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Bags API key not configured"})),
+            )
+                .into_response()
+        }
     };
     match launch.pool_info(&mint).await {
         Ok(info) => Json(info).into_response(),
@@ -5764,20 +5876,19 @@ async fn bags_pool_handler(
 
 /// GET /bags/claimable — all claimable fee positions for the agent wallet.
 #[cfg(feature = "bags")]
-async fn bags_claimable_handler(
-    headers: HeaderMap,
-    State(state): State<ApiState>,
-) -> Response {
+async fn bags_claimable_handler(headers: HeaderMap, State(state): State<ApiState>) -> Response {
     if let Some(resp) = require_read_or_master_access(&state, &headers) {
         return resp;
     }
     let launch = match state.0.bags_launch.as_ref() {
         Some(l) => l.clone(),
-        None => return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "Bags API key not configured"})),
-        )
-            .into_response(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Bags API key not configured"})),
+            )
+                .into_response()
+        }
     };
     let agent_pubkey = Pubkey::new_from_array(state.0.node_signing_key.verifying_key().to_bytes());
     let agent_wallet = agent_pubkey.to_string();
@@ -5809,11 +5920,13 @@ async fn bags_dexscreener_check_handler(
     }
     let launch = match state.0.bags_launch.as_ref() {
         Some(l) => l.clone(),
-        None => return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "Bags API key not configured"})),
-        )
-            .into_response(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Bags API key not configured"})),
+            )
+                .into_response()
+        }
     };
     match launch.dexscreener_check(&mint).await {
         Ok(info) => Json(info).into_response(),
@@ -5863,11 +5976,13 @@ async fn bags_dexscreener_list_handler(
     }
     let launch = match state.0.bags_launch.as_ref() {
         Some(l) => l.clone(),
-        None => return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "Bags API key not configured"})),
-        )
-            .into_response(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Bags API key not configured"})),
+            )
+                .into_response()
+        }
     };
 
     let agent_pubkey = Pubkey::new_from_array(state.0.node_signing_key.verifying_key().to_bytes());
@@ -5893,13 +6008,11 @@ async fn bags_dexscreener_list_handler(
 
     let order_uuid = match order.get("orderUUID").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
-        None => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": "Bags dexscreener order response missing orderUUID"})),
-            )
-                .into_response()
-        }
+        None => return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": "Bags dexscreener order response missing orderUUID"})),
+        )
+            .into_response(),
     };
 
     // Step 2 — sign payment tx and broadcast; get back the txid (signature).
@@ -5919,11 +6032,13 @@ async fn bags_dexscreener_list_handler(
     // Payment tx is base58-encoded.
     let tx_bytes = match bs58::decode(&tx_field).into_vec() {
         Ok(b) => b,
-        Err(e) => return (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": format!("dexscreener payment tx decode: {e}")})),
-        )
-            .into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": format!("dexscreener payment tx decode: {e}")})),
+            )
+                .into_response()
+        }
     };
 
     let mut tx = match bincode::deserialize::<solana_sdk::transaction::Transaction>(&tx_bytes) {
@@ -5936,14 +6051,17 @@ async fn bags_dexscreener_list_handler(
     };
     let kp = to_solana_keypair(&state.0.node_signing_key);
     tx.partial_sign(&[&kp], tx.message.recent_blockhash);
-    let serialized = match bincode::serialize(&tx) {
-        Ok(b) => b,
-        Err(e) => return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("dexscreener payment tx serialize: {e}")})),
-        )
-            .into_response(),
-    };
+    let serialized =
+        match bincode::serialize(&tx) {
+            Ok(b) => b,
+            Err(e) => return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::json!({"error": format!("dexscreener payment tx serialize: {e}")}),
+                ),
+            )
+                .into_response(),
+        };
 
     let txid = match broadcast_transaction(
         &state.0.trade_rpc_url,
@@ -5953,11 +6071,13 @@ async fn bags_dexscreener_list_handler(
     .await
     {
         Ok(id) => id,
-        Err(e) => return (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": format!("dexscreener payment broadcast: {e}")})),
-        )
-            .into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": format!("dexscreener payment broadcast: {e}")})),
+            )
+                .into_response()
+        }
     };
 
     // Step 3 — submit the payment signature to Bags.
@@ -5970,7 +6090,11 @@ async fn bags_dexscreener_list_handler(
         .into_response(),
         Err(e) => {
             let (code, msg) = bags_error_response(&e);
-            (code, Json(serde_json::json!({"error": msg, "order_uuid": order_uuid}))).into_response()
+            (
+                code,
+                Json(serde_json::json!({"error": msg, "order_uuid": order_uuid})),
+            )
+                .into_response()
         }
     }
 }
@@ -6112,7 +6236,9 @@ async fn agent_reload(headers: HeaderMap, State(state): State<ApiState>) -> Resp
                 let _ = pid;
                 (
                     StatusCode::NOT_IMPLEMENTED,
-                    Json(serde_json::json!({"error": "agent reload not supported on this platform"})),
+                    Json(
+                        serde_json::json!({"error": "agent reload not supported on this platform"}),
+                    ),
                 )
                     .into_response()
             }

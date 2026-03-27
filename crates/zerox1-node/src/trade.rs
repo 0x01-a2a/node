@@ -74,6 +74,7 @@ struct JupiterQuoteResponse {
 /// Free public endpoint — no API key required, rate-limited.
 /// Use `--jupiter-api-url https://api.jup.ag` with x-api-key for higher limits.
 const JUPITER_LITE_BASE: &str = "https://lite-api.jup.ag";
+const JUPITER_API_BASE: &str = "https://api.jup.ag";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -224,7 +225,12 @@ pub async fn trade_swap_handler(
             expires_at: now + PENDING_SWAP_TTL_SECS,
             req,
         };
-        state.inner().pending_swaps.lock().await.insert(swap_id.clone(), pending);
+        state
+            .inner()
+            .pending_swaps
+            .lock()
+            .await
+            .insert(swap_id.clone(), pending);
         tracing::info!("Pending swap {swap_id}: unknown CA, awaiting user confirmation");
         return (
             StatusCode::ACCEPTED,
@@ -286,13 +292,16 @@ pub(crate) async fn execute_swap_core(
         )
     };
 
-    let quote_res = match client.get(&quote_url).send().await {
+    let quote_res = match with_jup_auth(state, client.get(&quote_url)).send().await {
         Ok(res) => res,
         Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("Quote fail: {e}")),
     };
 
     if !quote_res.status().is_success() {
-        return err_resp(StatusCode::BAD_GATEWAY, "Jupiter Quote returned error".into());
+        return err_resp(
+            StatusCode::BAD_GATEWAY,
+            "Jupiter Quote returned error".into(),
+        );
     }
 
     let quote_json: serde_json::Value = match quote_res.json().await {
@@ -316,22 +325,21 @@ pub(crate) async fn execute_swap_core(
     const WRAPPED_SOL: &str = "So11111111111111111111111111111111111111112";
     let selling_sol = req.input_mint == WRAPPED_SOL;
 
-    let kora_fee_payer_opt =
-        if !selling_sol && crate::api::try_use_kora_budget(state).await {
-            if let Some(ref kora) = state.inner().kora {
-                match kora.get_fee_payer().await {
-                    Ok(fp) => Some(fp),
-                    Err(e) => {
-                        tracing::warn!("Kora fee payer unavailable, agent pays gas: {e}");
-                        None
-                    }
+    let kora_fee_payer_opt = if !selling_sol && crate::api::try_use_kora_budget(state).await {
+        if let Some(ref kora) = state.inner().kora {
+            match kora.get_fee_payer().await {
+                Ok(fp) => Some(fp),
+                Err(e) => {
+                    tracing::warn!("Kora fee payer unavailable, agent pays gas: {e}");
+                    None
                 }
-            } else {
-                None
             }
         } else {
             None
-        };
+        }
+    } else {
+        None
+    };
 
     let swap_req = JupiterSwapRequest {
         user_public_key: signer.to_string(),
@@ -353,13 +361,19 @@ pub(crate) async fn execute_swap_core(
     };
 
     let swap_url = format!("{}/swap/v1/swap", jupiter_base);
-    let swap_res = match client.post(&swap_url).json(&swap_req).send().await {
+    let swap_res = match with_jup_auth(state, client.post(&swap_url).json(&swap_req))
+        .send()
+        .await
+    {
         Ok(res) => res,
         Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("Swap req fail: {e}")),
     };
 
     if !swap_res.status().is_success() {
-        return err_resp(StatusCode::BAD_GATEWAY, "Jupiter Swap returned error".into());
+        return err_resp(
+            StatusCode::BAD_GATEWAY,
+            "Jupiter Swap returned error".into(),
+        );
     }
 
     let swap_data: JupiterSwapResponse = match swap_res.json().await {
@@ -618,7 +632,7 @@ pub async fn trade_quote_handler(
         jupiter_base, query.input_mint, query.output_mint, query.amount, slippage
     );
 
-    let res = match client.get(&quote_url).send().await {
+    let res = match with_jup_auth(&state, client.get(&quote_url)).send().await {
         Ok(r) => r,
         Err(e) => {
             return err_resp(
@@ -652,15 +666,37 @@ pub async fn trade_quote_handler(
 // Price, token search, limit orders, DCA
 // ============================================================================
 
-/// Jupiter token list base — free, no key required.
-const JUPITER_TOKEN_BASE: &str = "https://tokens.jup.ag";
-
-/// Jupiter full API base — used for limit orders and DCA.
-/// Identical to the lite base for price/quote but needed separately for routing.
-const JUPITER_FULL_BASE: &str = "https://api.jup.ag";
-
 fn jup_swap_base(state: &ApiState) -> &str {
-    state.inner().jupiter_api_url.as_deref().unwrap_or(JUPITER_LITE_BASE)
+    state
+        .inner()
+        .jupiter_api_url
+        .as_deref()
+        .unwrap_or(JUPITER_LITE_BASE)
+}
+
+fn jup_advanced_base(state: &ApiState) -> &str {
+    match state.inner().jupiter_api_url.as_deref() {
+        Some(base) if !base.contains("lite-api.jup.ag") => base,
+        _ => JUPITER_API_BASE,
+    }
+}
+
+fn jup_price_url(state: &ApiState, ids: &str) -> String {
+    format!("{}/price/v3?ids={ids}", jup_swap_base(state))
+}
+
+fn jup_tokens_search_url(state: &ApiState, query: &str) -> String {
+    format!(
+        "{}/tokens/v2/search?query={query}&limit=20",
+        jup_swap_base(state)
+    )
+}
+
+fn with_jup_auth(state: &ApiState, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    match state.inner().jupiter_api_key.as_deref() {
+        Some(key) if !key.trim().is_empty() => req.header("x-api-key", key),
+        _ => req,
+    }
 }
 
 // ── Price ──────────────────────────────────────────────────────────────────
@@ -673,7 +709,7 @@ pub struct PriceQuery {
 
 /// GET /trade/price?ids=mint1,mint2,...
 ///
-/// Returns current USD price for each mint via Jupiter Price API v2.
+/// Returns current USD price for each mint via Jupiter Price API v3.
 pub async fn trade_price_handler(
     headers: HeaderMap,
     State(state): State<ApiState>,
@@ -691,22 +727,29 @@ pub async fn trade_price_handler(
             return err_resp(StatusCode::BAD_REQUEST, format!("invalid mint: {id}"));
         }
     }
-    let url = format!(
-        "{}/price/v2?ids={}",
-        jup_swap_base(&state),
-        query.ids
-    );
+    let url = jup_price_url(&state, &query.ids);
     let client = reqwest::Client::new();
-    let res = match client.get(&url).send().await {
+    let res = match with_jup_auth(&state, client.get(&url)).send().await {
         Ok(r) => r,
-        Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("Jupiter price failed: {e}")),
+        Err(e) => {
+            return err_resp(
+                StatusCode::BAD_GATEWAY,
+                format!("Jupiter price failed: {e}"),
+            )
+        }
     };
     if !res.status().is_success() {
-        return err_resp(StatusCode::BAD_GATEWAY, format!("Jupiter price error: {}", res.status()));
+        return err_resp(
+            StatusCode::BAD_GATEWAY,
+            format!("Jupiter price error: {}", res.status()),
+        );
     }
     match res.json::<serde_json::Value>().await {
         Ok(j) => Json(j).into_response(),
-        Err(e) => err_resp(StatusCode::INTERNAL_SERVER_ERROR, format!("Jupiter price parse: {e}")),
+        Err(e) => err_resp(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Jupiter price parse: {e}"),
+        ),
     }
 }
 
@@ -736,26 +779,36 @@ pub async fn trade_tokens_handler(
         return err_resp(StatusCode::BAD_REQUEST, "q must not be empty".into());
     }
     // Encode the query param safely.
-    let encoded: String = q.chars().flat_map(|c| {
-        if c.is_alphanumeric() || matches!(c, '-' | '_' | ' ') {
-            vec![c]
-        } else {
-            format!("%{:02X}", c as u32).chars().collect()
-        }
-    }).collect::<String>().replace(' ', "+");
+    let encoded: String = q
+        .chars()
+        .flat_map(|c| {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | ' ') {
+                vec![c]
+            } else {
+                format!("%{:02X}", c as u32).chars().collect()
+            }
+        })
+        .collect::<String>()
+        .replace(' ', "+");
 
-    let url = format!("{}/search?query={}&limit=20", JUPITER_TOKEN_BASE, encoded);
+    let url = jup_tokens_search_url(&state, &encoded);
     let client = reqwest::Client::new();
-    let res = match client.get(&url).send().await {
+    let res = match with_jup_auth(&state, client.get(&url)).send().await {
         Ok(r) => r,
         Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("token search failed: {e}")),
     };
     if !res.status().is_success() {
-        return err_resp(StatusCode::BAD_GATEWAY, format!("token search error: {}", res.status()));
+        return err_resp(
+            StatusCode::BAD_GATEWAY,
+            format!("token search error: {}", res.status()),
+        );
     }
     match res.json::<serde_json::Value>().await {
         Ok(j) => Json(j).into_response(),
-        Err(e) => err_resp(StatusCode::INTERNAL_SERVER_ERROR, format!("token search parse: {e}")),
+        Err(e) => err_resp(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("token search parse: {e}"),
+        ),
     }
 }
 
@@ -773,7 +826,7 @@ pub struct LimitCreateRequest {
     pub expired_at: Option<u64>,
 }
 
-/// POST /trade/limit/create — place a limit order via Jupiter Limit Order v2.
+/// POST /trade/limit/create — place a limit order via Jupiter Trigger API.
 ///
 /// Builds the order tx, signs with the agent key, and broadcasts.
 pub async fn trade_limit_create_handler(
@@ -802,8 +855,9 @@ pub async fn trade_limit_create_handler(
         return err_resp(StatusCode::BAD_REQUEST, "amounts must be > 0".into());
     }
 
-    let wallet = solana_sdk::pubkey::Pubkey::from(signing_key.verifying_key().to_bytes()).to_string();
-    let url = format!("{}/limit/v2/createOrder", JUPITER_FULL_BASE);
+    let wallet =
+        solana_sdk::pubkey::Pubkey::from(signing_key.verifying_key().to_bytes()).to_string();
+    let url = format!("{}/trigger/v1/createOrder", jup_advanced_base(&state));
     let body = serde_json::json!({
         "inputMint": req.input_mint,
         "outputMint": req.output_mint,
@@ -820,26 +874,47 @@ pub async fn trade_limit_create_handler(
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .unwrap_or_default();
-    let res = match client.post(&url).json(&body).send().await {
+    let res = match with_jup_auth(&state, client.post(&url).json(&body))
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("limit create failed: {e}")),
     };
     if !res.status().is_success() {
         let status = res.status();
         let text = res.text().await.unwrap_or_default();
-        return err_resp(StatusCode::BAD_GATEWAY, format!("limit create error {status}: {text}"));
+        return err_resp(
+            StatusCode::BAD_GATEWAY,
+            format!("limit create error {status}: {text}"),
+        );
     }
     let order_json: serde_json::Value = match res.json().await {
         Ok(j) => j,
-        Err(e) => return err_resp(StatusCode::INTERNAL_SERVER_ERROR, format!("limit parse: {e}")),
+        Err(e) => {
+            return err_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("limit parse: {e}"),
+            )
+        }
     };
 
     // Sign and broadcast the returned transaction.
-    let tx_b64 = match order_json.get("tx").and_then(|v| v.as_str()) {
+    let tx_b64 = match order_json.get("transaction").and_then(|v| v.as_str()) {
         Some(t) => t.to_string(),
-        None => return err_resp(StatusCode::BAD_GATEWAY, "limit create: missing tx field".into()),
+        None => {
+            return err_resp(
+                StatusCode::BAD_GATEWAY,
+                "limit create: missing transaction field".into(),
+            )
+        }
     };
-    let order_key = order_json.get("order").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let order_key = order_json
+        .get("order")
+        .and_then(|v| v.as_str())
+        .or_else(|| order_json.get("requestId").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string();
 
     let tx_bytes = match B64.decode(&tx_b64) {
         Ok(b) => b,
@@ -847,19 +922,30 @@ pub async fn trade_limit_create_handler(
     };
     let mut versioned_tx: VersionedTransaction = match bincode::deserialize(&tx_bytes) {
         Ok(t) => t,
-        Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("limit tx deserialize: {e}")),
+        Err(e) => {
+            return err_resp(
+                StatusCode::BAD_GATEWAY,
+                format!("limit tx deserialize: {e}"),
+            )
+        }
     };
     let signer_pk = solana_sdk::pubkey::Pubkey::from(signing_key.verifying_key().to_bytes());
     let msg_bytes = versioned_tx.message.serialize();
     let sig = signing_key.sign(&msg_bytes);
-    if let Some(idx) = versioned_tx.message.static_account_keys().iter().position(|&k| k == signer_pk) {
+    if let Some(idx) = versioned_tx
+        .message
+        .static_account_keys()
+        .iter()
+        .position(|&k| k == signer_pk)
+    {
         if idx < versioned_tx.signatures.len() {
             versioned_tx.signatures[idx] = solana_sdk::signature::Signature::from(sig.to_bytes());
         }
     }
     let rpc = RpcClient::new(state.inner().trade_rpc_url.clone());
     match rpc.send_and_confirm_transaction(&versioned_tx).await {
-        Ok(txid) => Json(serde_json::json!({ "order": order_key, "txid": txid.to_string() })).into_response(),
+        Ok(txid) => Json(serde_json::json!({ "order": order_key, "txid": txid.to_string() }))
+            .into_response(),
         Err(e) => err_resp(StatusCode::BAD_GATEWAY, format!("limit broadcast: {e}")),
     }
 }
@@ -869,7 +955,7 @@ pub struct LimitOrdersQuery {
     pub wallet: Option<String>,
 }
 
-/// GET /trade/limit/orders — list open limit orders for the agent wallet.
+/// GET /trade/limit/orders — list active trigger orders for the agent wallet.
 pub async fn trade_limit_orders_handler(
     headers: HeaderMap,
     State(state): State<ApiState>,
@@ -883,22 +969,34 @@ pub async fn trade_limit_orders_handler(
     let wallet = match query.wallet {
         Some(w) => w,
         None => {
-            let pk = solana_sdk::pubkey::Pubkey::from(state.inner().node_signing_key.verifying_key().to_bytes());
+            let pk = solana_sdk::pubkey::Pubkey::from(
+                state.inner().node_signing_key.verifying_key().to_bytes(),
+            );
             pk.to_string()
         }
     };
-    let url = format!("{}/limit/v2/openOrders?wallet={}", JUPITER_FULL_BASE, wallet);
+    let url = format!(
+        "{}/trigger/v1/getTriggerOrders?user={}&orderStatus=active",
+        jup_advanced_base(&state),
+        wallet
+    );
     let client = reqwest::Client::new();
-    let res = match client.get(&url).send().await {
+    let res = match with_jup_auth(&state, client.get(&url)).send().await {
         Ok(r) => r,
         Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("limit orders failed: {e}")),
     };
     if !res.status().is_success() {
-        return err_resp(StatusCode::BAD_GATEWAY, format!("limit orders error: {}", res.status()));
+        return err_resp(
+            StatusCode::BAD_GATEWAY,
+            format!("limit orders error: {}", res.status()),
+        );
     }
     match res.json::<serde_json::Value>().await {
         Ok(j) => Json(j).into_response(),
-        Err(e) => err_resp(StatusCode::INTERNAL_SERVER_ERROR, format!("limit orders parse: {e}")),
+        Err(e) => err_resp(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("limit orders parse: {e}"),
+        ),
     }
 }
 
@@ -930,8 +1028,9 @@ pub async fn trade_limit_cancel_handler(
         return err_resp(StatusCode::BAD_REQUEST, "orders must not be empty".into());
     }
 
-    let wallet = solana_sdk::pubkey::Pubkey::from(signing_key.verifying_key().to_bytes()).to_string();
-    let url = format!("{}/limit/v2/cancelOrders", JUPITER_FULL_BASE);
+    let wallet =
+        solana_sdk::pubkey::Pubkey::from(signing_key.verifying_key().to_bytes()).to_string();
+    let url = format!("{}/trigger/v1/cancelOrders", jup_advanced_base(&state));
     let body = serde_json::json!({
         "maker": wallet,
         "computeUnitPrice": "auto",
@@ -942,21 +1041,36 @@ pub async fn trade_limit_cancel_handler(
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .unwrap_or_default();
-    let res = match client.post(&url).json(&body).send().await {
+    let res = match with_jup_auth(&state, client.post(&url).json(&body))
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("limit cancel failed: {e}")),
     };
     if !res.status().is_success() {
         let status = res.status();
         let text = res.text().await.unwrap_or_default();
-        return err_resp(StatusCode::BAD_GATEWAY, format!("limit cancel error {status}: {text}"));
+        return err_resp(
+            StatusCode::BAD_GATEWAY,
+            format!("limit cancel error {status}: {text}"),
+        );
     }
     let cancel_json: serde_json::Value = match res.json().await {
         Ok(j) => j,
-        Err(e) => return err_resp(StatusCode::INTERNAL_SERVER_ERROR, format!("cancel parse: {e}")),
+        Err(e) => {
+            return err_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("cancel parse: {e}"),
+            )
+        }
     };
 
-    let txs = cancel_json.get("txs").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let txs = cancel_json
+        .get("transactions")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     let signer_pk = solana_sdk::pubkey::Pubkey::from(signing_key.verifying_key().to_bytes());
     let rpc = RpcClient::new(state.inner().trade_rpc_url.clone());
     let mut txids: Vec<String> = Vec::new();
@@ -976,7 +1090,12 @@ pub async fn trade_limit_cancel_handler(
         };
         let msg_bytes = vtx.message.serialize();
         let sig = signing_key.sign(&msg_bytes);
-        if let Some(idx) = vtx.message.static_account_keys().iter().position(|&k| k == signer_pk) {
+        if let Some(idx) = vtx
+            .message
+            .static_account_keys()
+            .iter()
+            .position(|&k| k == signer_pk)
+        {
             if idx < vtx.signatures.len() {
                 vtx.signatures[idx] = solana_sdk::signature::Signature::from(sig.to_bytes());
             }
@@ -1008,7 +1127,7 @@ pub struct DcaCreateRequest {
     pub max_out_amount_per_cycle: Option<u64>,
 }
 
-/// POST /trade/dca/create — create a DCA (dollar-cost averaging) order.
+/// POST /trade/dca/create — create a recurring time-based Jupiter order.
 ///
 /// Builds the DCA tx, signs, and broadcasts.
 pub async fn trade_dca_create_handler(
@@ -1034,49 +1153,74 @@ pub async fn trade_dca_create_handler(
         return err_resp(StatusCode::BAD_REQUEST, "mints must differ".into());
     }
     if req.in_amount == 0 || req.in_amount_per_cycle == 0 || req.cycle_seconds == 0 {
-        return err_resp(StatusCode::BAD_REQUEST, "amounts and cycle_seconds must be > 0".into());
+        return err_resp(
+            StatusCode::BAD_REQUEST,
+            "amounts and cycle_seconds must be > 0".into(),
+        );
     }
     if req.in_amount_per_cycle > req.in_amount {
-        return err_resp(StatusCode::BAD_REQUEST, "in_amount_per_cycle cannot exceed in_amount".into());
+        return err_resp(
+            StatusCode::BAD_REQUEST,
+            "in_amount_per_cycle cannot exceed in_amount".into(),
+        );
     }
 
-    let wallet = solana_sdk::pubkey::Pubkey::from(signing_key.verifying_key().to_bytes()).to_string();
-    let url = format!("{}/dca/v2/createDca", JUPITER_FULL_BASE);
+    let number_of_orders = req.in_amount.div_ceil(req.in_amount_per_cycle);
+    let wallet =
+        solana_sdk::pubkey::Pubkey::from(signing_key.verifying_key().to_bytes()).to_string();
+    let url = format!("{}/recurring/v1/createOrder", jup_advanced_base(&state));
     let body = serde_json::json!({
-        "payer": wallet,
+        "user": wallet,
         "inputMint": req.input_mint,
         "outputMint": req.output_mint,
-        "inAmount": req.in_amount,
-        "inAmountPerCycle": req.in_amount_per_cycle,
-        "cycleSecondsApart": req.cycle_seconds,
-        "minOutAmountPerCycle": req.min_out_amount_per_cycle,
-        "maxOutAmountPerCycle": req.max_out_amount_per_cycle,
-        "startAt": null,
+        "params": {
+            "time": {
+                "inAmount": req.in_amount,
+                "numberOfOrders": number_of_orders,
+                "interval": req.cycle_seconds,
+            }
+        }
     });
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .unwrap_or_default();
-    let res = match client.post(&url).json(&body).send().await {
+    let res = match with_jup_auth(&state, client.post(&url).json(&body))
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => return err_resp(StatusCode::BAD_GATEWAY, format!("DCA create failed: {e}")),
     };
     if !res.status().is_success() {
         let status = res.status();
         let text = res.text().await.unwrap_or_default();
-        return err_resp(StatusCode::BAD_GATEWAY, format!("DCA create error {status}: {text}"));
+        return err_resp(
+            StatusCode::BAD_GATEWAY,
+            format!("DCA create error {status}: {text}"),
+        );
     }
     let dca_json: serde_json::Value = match res.json().await {
         Ok(j) => j,
         Err(e) => return err_resp(StatusCode::INTERNAL_SERVER_ERROR, format!("DCA parse: {e}")),
     };
 
-    let tx_b64 = match dca_json.get("tx").and_then(|v| v.as_str()) {
+    let tx_b64 = match dca_json.get("transaction").and_then(|v| v.as_str()) {
         Some(t) => t.to_string(),
-        None => return err_resp(StatusCode::BAD_GATEWAY, "DCA create: missing tx field".into()),
+        None => {
+            return err_resp(
+                StatusCode::BAD_GATEWAY,
+                "DCA create: missing transaction field".into(),
+            )
+        }
     };
-    let dca_key = dca_json.get("dcaKey").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let dca_key = dca_json
+        .get("dcaKey")
+        .and_then(|v| v.as_str())
+        .or_else(|| dca_json.get("requestId").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string();
 
     let tx_bytes = match B64.decode(&tx_b64) {
         Ok(b) => b,
@@ -1089,14 +1233,20 @@ pub async fn trade_dca_create_handler(
     let signer_pk = solana_sdk::pubkey::Pubkey::from(signing_key.verifying_key().to_bytes());
     let msg_bytes = versioned_tx.message.serialize();
     let sig = signing_key.sign(&msg_bytes);
-    if let Some(idx) = versioned_tx.message.static_account_keys().iter().position(|&k| k == signer_pk) {
+    if let Some(idx) = versioned_tx
+        .message
+        .static_account_keys()
+        .iter()
+        .position(|&k| k == signer_pk)
+    {
         if idx < versioned_tx.signatures.len() {
             versioned_tx.signatures[idx] = solana_sdk::signature::Signature::from(sig.to_bytes());
         }
     }
     let rpc = RpcClient::new(state.inner().trade_rpc_url.clone());
     match rpc.send_and_confirm_transaction(&versioned_tx).await {
-        Ok(txid) => Json(serde_json::json!({ "dca_key": dca_key, "txid": txid.to_string() })).into_response(),
+        Ok(txid) => Json(serde_json::json!({ "dca_key": dca_key, "txid": txid.to_string() }))
+            .into_response(),
         Err(e) => err_resp(StatusCode::BAD_GATEWAY, format!("DCA broadcast: {e}")),
     }
 }

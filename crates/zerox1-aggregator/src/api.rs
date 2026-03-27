@@ -3916,9 +3916,13 @@ pub async fn sponsor_fee_share_config(
                 tracing::warn!("sponsor_fee_share_config: tx[{idx}] broadcast failed: {e}");
             } else {
                 tracing::warn!("sponsor_fee_share_config: tx[{idx}] broadcast ok");
+                // Wait for this tx to confirm before submitting the next one.
+                // Bags txs are ordered: later txs depend on accounts created by earlier ones.
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
         }
         if !txs.is_empty() {
+            // Extra buffer for the last tx to finalize before the node uses config_key.
             tokio::time::sleep(std::time::Duration::from_secs(4)).await;
         }
     } else {

@@ -194,6 +194,10 @@ pub struct AppState {
     pub sponsor_rpc_url: String,
     /// Default avatar image URL fetched when the client sends no custom image.
     pub sponsor_default_image_url: Option<String>,
+    /// Bags.fm partner wallet (base58) — added to fee-share/config for revenue share.
+    pub bags_partner_wallet: Option<String>,
+    /// Bags.fm partner config account (base58) — added to fee-share/config for revenue share.
+    pub bags_partner_config: Option<String>,
     /// Rate limit: agent_pubkey (base58) → last launch timestamp (unix secs).
     /// One sponsored launch per agent_pubkey, ever.
     /// Maps agent_id_hex → token_mint once a sponsored launch succeeds.
@@ -3671,12 +3675,18 @@ pub async fn sponsor_launch(
     // ── Step 2: create-fee-share-config ───────────────────────────────────
     // Sponsor pays gas. Agent is sole claimer — receives the creator share
     // after Bags platform fee and partner cut are applied.
-    let fee_share_body = json!({
+    let mut fee_share_body = json!({
         "payer": sponsor_pubkey_str,
         "baseMint": token_mint,
         "claimersArray": [agent_pubkey_str],
         "basisPointsArray": [10_000u32],
     });
+    if let Some(pw) = &state.bags_partner_wallet {
+        fee_share_body["partner"] = pw.clone().into();
+    }
+    if let Some(pc) = &state.bags_partner_config {
+        fee_share_body["partnerConfig"] = pc.clone().into();
+    }
     let fee_share_resp = client
         .post(format!("{BAGS_API_BASE}/fee-share/config"))
         .header("x-api-key", &bags_api_key)

@@ -259,6 +259,16 @@ struct Config {
     /// Example: https://0x01.world/default-agent.png
     #[arg(long, env = "SPONSOR_DEFAULT_IMAGE_URL")]
     sponsor_default_image_url: Option<String>,
+
+    /// Bags.fm partner wallet (base58 Solana pubkey) to receive partner fee share.
+    /// Must be set together with BAGS_PARTNER_CONFIG.
+    #[arg(long, env = "BAGS_PARTNER_WALLET")]
+    bags_partner_wallet: Option<String>,
+
+    /// Bags.fm partner config account address (base58) returned by partner registration.
+    /// Must be set together with BAGS_PARTNER_WALLET.
+    #[arg(long, env = "BAGS_PARTNER_CONFIG")]
+    bags_partner_config: Option<String>,
 }
 
 #[tokio::main]
@@ -440,6 +450,8 @@ async fn main() -> anyhow::Result<()> {
         bags_api_key: config.bags_api_key,
         sponsor_rpc_url: config.sponsor_rpc_url,
         sponsor_default_image_url: config.sponsor_default_image_url,
+        bags_partner_wallet: config.bags_partner_wallet,
+        bags_partner_config: config.bags_partner_config,
         sponsor_launches: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 

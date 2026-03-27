@@ -4044,13 +4044,6 @@ fn sign_wire_tx_if_signer(
     Some(result)
 }
 
-fn signing_key_to_solana_kp(key: &ed25519_dalek::SigningKey) -> solana_sdk::signer::keypair::Keypair {
-    let mut bytes = [0u8; 64];
-    bytes[..32].copy_from_slice(key.as_bytes());
-    bytes[32..].copy_from_slice(key.verifying_key().as_bytes());
-    solana_sdk::signer::keypair::Keypair::try_from(bytes.as_slice())
-        .expect("valid ed25519 keypair bytes")
-}
 
 async fn broadcast_solana_tx(
     rpc_url: &str,

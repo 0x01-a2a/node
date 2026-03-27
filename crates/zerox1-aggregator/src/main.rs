@@ -1,8 +1,10 @@
-mod api;
-mod billing;
-mod mpp;
-mod registry_8004;
-mod store;
+use zerox1_aggregator::api;
+#[cfg(any(feature = "celo-settlement", feature = "base-settlement", feature = "sui-settlement"))]
+use zerox1_aggregator::billing;
+#[allow(unused_imports)]
+use zerox1_aggregator::mpp;
+use zerox1_aggregator::registry_8004;
+use zerox1_aggregator::store;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -627,7 +629,7 @@ async fn main() -> anyhow::Result<()> {
 
                     // ── Celo direct settlement ──────────────────────────
                     #[cfg(feature = "celo-settlement")]
-                    if crate::billing::is_celo_domain(entry.dest_chain.unwrap_or(0)) {
+                    if billing::is_celo_domain(entry.dest_chain.unwrap_or(0)) {
                         process_celo_settlement(
                             entry.id,
                             &entry.conversation_id,
@@ -641,7 +643,7 @@ async fn main() -> anyhow::Result<()> {
 
                     // ── Base direct settlement ──────────────────────────
                     #[cfg(feature = "base-settlement")]
-                    if crate::billing::is_base_domain(entry.dest_chain.unwrap_or(0)) {
+                    if billing::is_base_domain(entry.dest_chain.unwrap_or(0)) {
                         process_base_settlement(
                             entry.id,
                             &entry.conversation_id,
@@ -655,7 +657,7 @@ async fn main() -> anyhow::Result<()> {
 
                     // ── Sui Move settlement ─────────────────────────────
                     #[cfg(feature = "sui-settlement")]
-                    if crate::billing::is_sui_domain(entry.dest_chain.unwrap_or(0)) {
+                    if billing::is_sui_domain(entry.dest_chain.unwrap_or(0)) {
                         process_sui_settlement(
                             entry.id,
                             &entry.conversation_id,

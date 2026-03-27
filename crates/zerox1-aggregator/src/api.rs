@@ -4073,6 +4073,104 @@ async fn broadcast_solana_tx(
         .ok_or_else(|| anyhow::anyhow!("sendTransaction: missing result"))
 }
 
+/// Build the aggregator HTTP router from a fully-initialised `AppState`.
+/// Extracted from `main.rs` so integration tests can call it without binding a port.
+pub fn build_router(state: AppState) -> axum::Router {
+    use axum::{extract::DefaultBodyLimit, middleware, routing::{get, post}};
+    use tower_http::cors::CorsLayer;
+
+    let public_routes = axum::Router::new()
+        .route("/health",  get(health))
+        .route("/version", get(get_version))
+        .route("/ingest/envelope",   post(ingest_envelope))
+        .route("/hosting/register",  post(post_hosting_register))
+        .route("/fcm/register",      post(fcm_register))
+        .route("/fcm/sleep",         post(fcm_sleep))
+        .route("/agents/{agent_id}/pending",       get(get_pending).post(post_pending))
+        .route("/agents/{agent_id}/propose-owner", post(post_propose_owner))
+        .route("/agents/{agent_id}/claim-owner",   post(post_claim_owner))
+        .route("/agents/{agent_id}/token",         post(post_agent_token))
+        .route("/agents/{agent_id}/owner",         get(get_agent_owner))
+        .route("/agents/by-owner/{wallet}",        get(get_agents_by_owner))
+        .route("/stats/network",  get(get_network_stats))
+        .route("/league/current", get(get_skr_league))
+        .route("/league/bags-claim", post(post_bags_claim))
+        .route("/agents",             get(get_agents))
+        .route("/sponsor/launch",     post(sponsor_launch))
+        .route("/sponsor/fee-share-config", post(sponsor_fee_share_config))
+        .route("/agents/{agent_id}/profile", get(get_agent_profile))
+        .route("/activity",   get(get_activity))
+        .route("/ws/activity", get(ws_activity))
+        .route("/broadcasts", get(get_broadcasts))
+        .route("/bounties",   get(get_bounties))
+        .route("/hosting/nodes", get(get_hosting_nodes))
+        .route("/blobs/{cid}", get(get_blob))
+        .route("/mpp/protocol-fee/challenge", get(mpp_protocol_fee_challenge))
+        .route("/mpp/protocol-fee/verify",    post(mpp_protocol_fee_verify))
+        .route("/identity/verify/{agent_id_hex}", get(verify_identity))
+        .route("/billing/deposit",    post(post_billing_deposit))
+        .route("/billing/balance/{account_id}", get(get_billing_balance))
+        .route("/billing/withdraw",   post(post_billing_withdraw))
+        .route("/billing/set-payout", post(post_billing_set_payout))
+        .route("/billing/transactions/{account_id}", get(get_billing_transactions))
+        .route("/billing/estimate-settlement", get(get_billing_estimate));
+
+    #[cfg(feature = "data-bounty")]
+    let public_routes = public_routes
+        .route("/campaigns", get(get_campaigns).post(post_campaign))
+        .route("/campaigns/{id}", get(get_campaign_by_id))
+        .route("/ws/campaigns", get(ws_campaigns));
+
+    let gated_routes = axum::Router::new()
+        .route("/reputation/{agent_id}", get(get_reputation))
+        .route("/leaderboard",           get(get_leaderboard))
+        .route("/leaderboard/anomaly",   get(get_anomaly_leaderboard))
+        .route("/interactions",          get(get_interactions))
+        .route("/stats/timeseries",      get(get_timeseries))
+        .route("/entropy/{agent_id}",         get(get_entropy))
+        .route("/entropy/{agent_id}/history", get(get_entropy_history))
+        .route("/entropy/{agent_id}/rolling", get(get_rolling_entropy))
+        .route("/leaderboard/verifier-concentration", get(get_verifier_concentration))
+        .route("/leaderboard/ownership-clusters",     get(get_ownership_clusters))
+        .route("/params/calibrated",          get(get_calibrated_params))
+        .route("/system/sri",                 get(get_sri_status))
+        .route("/stake/required/{agent_id}",  get(get_required_stake))
+        .route("/graph/flow",                 get(get_flow_graph))
+        .route("/graph/clusters",             get(get_flow_clusters))
+        .route("/graph/agent/{agent_id}",     get(get_agent_flow))
+        .route("/epochs/{agent_id}/{epoch}/envelopes", get(get_epoch_envelopes))
+        .route("/agents/search",              get(search_agents))
+        .route("/agents/search/name",         get(search_agents_by_name))
+        .route("/interactions/by/{agent_id}", get(get_interactions_by))
+        .route("/disputes/{agent_id}",        get(get_disputes))
+        .route("/registry",                   get(get_registry))
+        .route("/agents/{agent_id}/sleeping", get(get_sleep_status))
+        .route("/blobs", post(post_blob).layer(DefaultBodyLimit::max(10 * 1024 * 1024)))
+        .route("/admin/billing/accounts",     get(get_admin_billing_accounts))
+        .route("/admin/billing/settlements",  get(get_admin_settlements))
+        .route("/admin/billing/revenue",      get(get_admin_revenue))
+        .route("/admin/billing/settlements/{id}/retry",          post(post_admin_retry_settlement))
+        .route("/admin/billing/accounts/{id}/skip-settlement",   post(post_admin_set_skip_settlement))
+        .route_layer(middleware::from_fn_with_state(state.clone(), api_key_middleware));
+
+    public_routes
+        .merge(gated_routes)
+        .layer(
+            CorsLayer::new()
+                .allow_origin(tower_http::cors::Any)
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::OPTIONS,
+                ])
+                .allow_headers([
+                    axum::http::header::AUTHORIZATION,
+                    axum::http::header::CONTENT_TYPE,
+                ]),
+        )
+        .with_state(state)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

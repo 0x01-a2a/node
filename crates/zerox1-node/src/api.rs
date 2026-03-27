@@ -921,7 +921,7 @@ impl ApiState {
 // Server
 // ============================================================================
 
-pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>) {
+pub fn build_router(state: ApiState, cors_origins: Vec<String>) -> axum::Router {
     let router = Router::new()
         // Visualization
         .route("/ws/events", get(ws_events_handler))
@@ -963,8 +963,6 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
             "/registry/8004/register-local",
             post(registry_8004_register_local),
         )
-        // Escrow
-        // Escrow routes removed — on-chain settlement moved to settlement/solana
         // Hot wallet sweep + x402 micropayments
         .route("/wallet/sweep", post(sweep_usdc))
         .route("/wallet/x402/pay", post(x402_pay))
@@ -1065,7 +1063,7 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
             post(bags_dexscreener_list_handler),
         );
 
-    let app = router
+    router
         .layer({
             let origins: Vec<axum::http::HeaderValue> = if cors_origins.is_empty() {
                 // Default: loopback only (zeroclaw, React Native WebView).
@@ -1085,7 +1083,11 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
                 ])
                 .allow_headers(tower_http::cors::Any)
         })
-        .with_state(state);
+        .with_state(state)
+}
+
+pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>) {
+    let app = build_router(state, cors_origins);
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => listener,
@@ -1098,7 +1100,7 @@ pub async fn serve(state: ApiState, addr: SocketAddr, cors_origins: Vec<String>)
     tracing::info!("API listening on http://{addr}");
 
     if let Err(e) = axum::serve(listener, app).await {
-        tracing::error!("API server error on {addr}: {e}");
+        tracing::error!("API server error: {e}");
     }
 }
 

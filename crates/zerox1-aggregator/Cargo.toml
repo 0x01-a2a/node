@@ -25,6 +25,10 @@ sui-settlement = []  # re-add dep:zerox1-settlement-sui after publishing
 name = "zerox1-aggregator"
 path = "src/main.rs"
 
+[lib]
+name = "zerox1_aggregator"
+path = "src/lib.rs"
+
 [dependencies]
 axum       = { workspace = true }
 tokio      = { workspace = true }
@@ -50,3 +54,7 @@ bincode = { workspace = true }
 # zerox1-settlement-celo = { version = "0.1.0", optional = true }  # uncomment after publishing
 # zerox1-settlement-base = { version = "0.1.0", optional = true }  # uncomment after publishing
 # zerox1-settlement-sui  = { version = "0.1.0", optional = true }  # uncomment after publishing
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

@@ -3844,6 +3844,79 @@ pub(crate) fn to_solana_keypair(sk: &SigningKey) -> solana_sdk::signature::Keypa
     solana_sdk::signature::Keypair::try_from(bytes.as_slice()).expect("valid ed25519 keypair bytes")
 }
 
+/// Sign an empty signature slot in a Solana wire-format transaction (legacy or V0).
+///
+/// Bags returns V0 versioned transactions that cannot be round-tripped through
+/// `bincode::deserialize::<Transaction>`. This function operates directly on the
+/// raw wire bytes, locates the agent's pubkey in the signer account list, and
+/// fills the corresponding empty (all-zero) signature slot.
+///
+/// Returns the bytes unchanged if the agent's pubkey is not found or the slot is
+/// already filled.
+#[cfg(feature = "bags")]
+fn sign_wire_tx_for_agent(tx_bytes: &[u8], key: &SigningKey) -> Vec<u8> {
+    if tx_bytes.is_empty() {
+        return tx_bytes.to_vec();
+    }
+    // compact-u16 num_sigs
+    let (num_sigs, sigs_start) = if tx_bytes[0] & 0x80 == 0 {
+        (tx_bytes[0] as usize, 1usize)
+    } else if tx_bytes.len() >= 2 {
+        let lo = (tx_bytes[0] & 0x7f) as usize;
+        let hi = tx_bytes[1] as usize;
+        (lo | (hi << 7), 2usize)
+    } else {
+        return tx_bytes.to_vec();
+    };
+    let msg_start = sigs_start + num_sigs * 64;
+    if tx_bytes.len() <= msg_start {
+        return tx_bytes.to_vec();
+    }
+    let message_bytes = &tx_bytes[msg_start..];
+    // V0 message starts with 0x80 version prefix; skip it for header parsing.
+    let hdr = if message_bytes[0] == 0x80 { 1usize } else { 0usize };
+    if message_bytes.len() < hdr + 4 {
+        return tx_bytes.to_vec();
+    }
+    let num_required_sigs = message_bytes[hdr] as usize;
+    let ac_off = hdr + 3;
+    let (num_accounts, accounts_start) = if message_bytes[ac_off] & 0x80 == 0 {
+        (message_bytes[ac_off] as usize, ac_off + 1)
+    } else if message_bytes.len() >= ac_off + 2 {
+        let lo = (message_bytes[ac_off] & 0x7f) as usize;
+        let hi = message_bytes[ac_off + 1] as usize;
+        (lo | (hi << 7), ac_off + 2)
+    } else {
+        return tx_bytes.to_vec();
+    };
+    let our_pubkey = key.verifying_key().to_bytes();
+    let mut our_slot: Option<usize> = None;
+    for i in 0..num_required_sigs.min(num_accounts) {
+        let off = accounts_start + i * 32;
+        if off + 32 > message_bytes.len() { break; }
+        if message_bytes[off..off + 32] == our_pubkey {
+            our_slot = Some(i);
+            break;
+        }
+    }
+    let slot = match our_slot {
+        Some(s) => s,
+        None => return tx_bytes.to_vec(),
+    };
+    let slot_start = sigs_start + slot * 64;
+    if slot_start + 64 > tx_bytes.len() {
+        return tx_bytes.to_vec();
+    }
+    if tx_bytes[slot_start..slot_start + 64].iter().any(|&b| b != 0) {
+        return tx_bytes.to_vec(); // already signed
+    }
+    use ed25519_dalek::Signer as _;
+    let sig = key.sign(message_bytes);
+    let mut result = tx_bytes.to_vec();
+    result[slot_start..slot_start + 64].copy_from_slice(&sig.to_bytes());
+    result
+}
+
 /// Derive the Associated Token Account address for a given owner and mint.
 pub(crate) fn derive_ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
     let spl_token: Pubkey = SPL_TOKEN_PROGRAM_ID
@@ -5175,33 +5248,13 @@ async fn bags_launch_handler(
     };
 
     // ── Step 4: Agent signs + broadcasts ────────────────────────────────────
-    let mut tx =
-        match bincode::deserialize::<solana_sdk::transaction::Transaction>(&launch_tx_bytes) {
-            Ok(t) => t,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": format!("launch-tx deserialize: {e}")})),
-                )
-                    .into_response()
-            }
-        };
-    let kp = to_solana_keypair(&state.0.node_signing_key);
-    tx.partial_sign(&[&kp], tx.message.recent_blockhash);
-    let serialized = match bincode::serialize(&tx) {
-        Ok(b) => b,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("launch-tx serialize: {e}")})),
-            )
-                .into_response()
-        }
-    };
+    // Bags returns a V0 versioned transaction (wire format). We sign directly on
+    // the wire bytes to avoid bincode round-trip corruption.
+    let signed_launch_bytes = sign_wire_tx_for_agent(&launch_tx_bytes, &state.0.node_signing_key);
     let txid = match broadcast_transaction(
         &state.0.trade_rpc_url,
         &state.0.http_client,
-        &B64.encode(&serialized),
+        &B64.encode(&signed_launch_bytes),
     )
     .await
     {

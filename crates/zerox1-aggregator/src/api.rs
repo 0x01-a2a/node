@@ -3702,26 +3702,25 @@ pub async fn sponsor_launch(
         .unwrap_or("")
         .to_string();
 
-    // Sign and broadcast each fee-share config transaction.
+    // Sign and broadcast each fee-share config transaction (wire-format, handles V0).
     if let Some(txs) = fee_share_val["response"]["transactions"].as_array() {
-        for tx_item in txs {
+        for (idx, tx_item) in txs.iter().enumerate() {
             if let Some(tx_b58) = tx_item["transaction"].as_str() {
                 if let Ok(tx_bytes) = bs58::decode(tx_b58).into_vec() {
-                    if let Ok(mut tx) = bincode::deserialize::<solana_sdk::transaction::Transaction>(&tx_bytes) {
-                        let kp = signing_key_to_solana_kp(&signing_key);
-                        tx.partial_sign(&[&kp], tx.message.recent_blockhash);
-                        if let Ok(serialized) = bincode::serialize(&tx) {
-                            let signed_b64 = B64.encode(&serialized);
-                            if let Err(e) = broadcast_solana_tx(&state.sponsor_rpc_url, client, &signed_b64).await {
-                                tracing::warn!("sponsor_launch: fee-share tx broadcast failed: {e}");
-                            }
+                    if let Some(signed) = sign_wire_tx_if_signer(&tx_bytes, &signing_key) {
+                        let signed_b64 = B64.encode(&signed);
+                        if let Err(e) = broadcast_solana_tx(&state.sponsor_rpc_url, client, &signed_b64).await {
+                            tracing::warn!("sponsor_launch: fee-share tx[{idx}] broadcast failed: {e}");
+                        } else {
+                            tracing::warn!("sponsor_launch: fee-share tx[{idx}] broadcast ok");
+                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                         }
                     }
                 }
             }
         }
         if !txs.is_empty() {
-            // Wait for fee-share config to confirm before creating launch tx.
+            // Extra buffer after all fee-share txs before creating launch tx.
             tokio::time::sleep(std::time::Duration::from_secs(4)).await;
         }
     }
@@ -3774,26 +3773,15 @@ pub async fn sponsor_launch(
         }
     };
 
-    let mut launch_tx = match bincode::deserialize::<solana_sdk::transaction::Transaction>(&launch_tx_bytes) {
-        Ok(t) => t,
-        Err(e) => {
+    let signed_launch_bytes = match sign_wire_tx_if_signer(&launch_tx_bytes, &signing_key) {
+        Some(b) => b,
+        None => {
             remove_sponsor_reservation(&state, &dedup_key);
-            return (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("launch-tx deserialize: {e}")}))).into_response();
+            return (StatusCode::BAD_GATEWAY, Json(json!({"error": "launch-tx: sponsor pubkey not found as signer"}))).into_response();
         }
     };
 
-    let kp = signing_key_to_solana_kp(&signing_key);
-    launch_tx.partial_sign(&[&kp], launch_tx.message.recent_blockhash);
-
-    let serialized = match bincode::serialize(&launch_tx) {
-        Ok(s) => s,
-        Err(e) => {
-            remove_sponsor_reservation(&state, &dedup_key);
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("launch-tx serialize: {e}")}))).into_response();
-        }
-    };
-
-    let txid = match broadcast_solana_tx(&state.sponsor_rpc_url, client, &B64.encode(&serialized)).await {
+    let txid = match broadcast_solana_tx(&state.sponsor_rpc_url, client, &B64.encode(&signed_launch_bytes)).await {
         Ok(sig) => sig,
         Err(e) => {
             remove_sponsor_reservation(&state, &dedup_key);

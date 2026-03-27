@@ -345,7 +345,6 @@ jobs:
           cp artifacts/zerox1-node-darwin-x64/zerox1-node    zerox1-node-darwin-x64
           cp artifacts/zerox1-node-linux-x64/zerox1-node     zerox1-node-linux-x64
           cp artifacts/zerox1-node-win32-x64/zerox1-node.exe zerox1-node-win32-x64.exe
-          cp artifacts/zerox1-aggregator/zerox1-aggregator   zerox1-aggregator-linux-x64
           cp artifacts/zerox1-mailbox/zerox1-mailbox         zerox1-mailbox-linux-x64
           cp artifacts/zerox1-node-android-arm64/zerox1-node zerox1-node-android-arm64
 
@@ -357,7 +356,6 @@ jobs:
             zerox1-node-darwin-x64
             zerox1-node-linux-x64
             zerox1-node-win32-x64.exe
-            zerox1-aggregator-linux-x64
             zerox1-mailbox-linux-x64
             zerox1-node-android-arm64
           generate_release_notes: true

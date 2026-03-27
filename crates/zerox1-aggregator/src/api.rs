@@ -3963,19 +3963,24 @@ fn sign_wire_tx_if_signer(
     }
     let message_bytes = &tx_bytes[msg_start..];
 
+    // V0 versioned transactions start with 0x80 (version prefix); skip it for header parsing.
+    // Legacy transactions have no prefix — header starts immediately.
+    let header_offset = if message_bytes[0] == 0x80 { 1usize } else { 0usize };
+
     // Message header: [num_required_sigs u8, num_ro_signed u8, num_ro_unsigned u8]
-    if message_bytes.len() < 4 {
+    if message_bytes.len() < header_offset + 4 {
         return None;
     }
-    let num_required_sigs = message_bytes[0] as usize;
+    let num_required_sigs = message_bytes[header_offset] as usize;
 
-    // Compact-u16 account count (1 byte if < 128).
-    let (num_accounts, accounts_start) = if message_bytes[3] & 0x80 == 0 {
-        (message_bytes[3] as usize, 4usize)
-    } else if message_bytes.len() >= 5 {
-        let lo = (message_bytes[3] & 0x7f) as usize;
-        let hi = message_bytes[4] as usize;
-        (lo | (hi << 7), 5usize)
+    // Compact-u16 account count follows the 3-byte header.
+    let ac_off = header_offset + 3;
+    let (num_accounts, accounts_start) = if message_bytes[ac_off] & 0x80 == 0 {
+        (message_bytes[ac_off] as usize, ac_off + 1)
+    } else if message_bytes.len() >= ac_off + 2 {
+        let lo = (message_bytes[ac_off] & 0x7f) as usize;
+        let hi = message_bytes[ac_off + 1] as usize;
+        (lo | (hi << 7), ac_off + 2)
     } else {
         return None;
     };

@@ -196,7 +196,9 @@ pub struct AppState {
     pub sponsor_default_image_url: Option<String>,
     /// Rate limit: agent_pubkey (base58) → last launch timestamp (unix secs).
     /// One sponsored launch per agent_pubkey, ever.
-    pub sponsor_launches: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Maps agent_id_hex → token_mint once a sponsored launch succeeds.
+    /// None while the launch is in-flight (reserved but not yet confirmed).
+    pub sponsor_launches: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Option<String>>>>,
 }
 
 /// Check if the request carries a valid API key.
@@ -3550,14 +3552,21 @@ pub async fn sponsor_launch(
     // ── One launch per agent pubkey ───────────────────────────────────────
     {
         let mut launched = state.sponsor_launches.lock().unwrap();
-        if launched.contains(&dedup_key) {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({"error": "this agent already has a sponsored token launch"})),
-            ).into_response();
+        if let Some(entry) = launched.get(&dedup_key) {
+            return match entry {
+                // Launch already completed — return the token mint idempotently.
+                Some(mint) => (StatusCode::OK, Json(json!({
+                    "token_mint": mint,
+                    "already_launched": true,
+                }))).into_response(),
+                // Launch is in-flight — tell the caller to retry later.
+                None => (StatusCode::CONFLICT, Json(json!({
+                    "error": "token launch in progress, please retry in a few seconds"
+                }))).into_response(),
+            };
         }
-        // Reserve the slot immediately to prevent concurrent duplicate requests.
-        launched.insert(dedup_key.clone());
+        // Reserve the slot immediately (None = in-flight) to prevent concurrent duplicates.
+        launched.insert(dedup_key.clone(), None);
     }
 
     let sponsor_pubkey = Pubkey::new_from_array(signing_key.verifying_key().to_bytes());
@@ -3793,6 +3802,11 @@ pub async fn sponsor_launch(
         "sponsor_launch: success agent={} token_mint={} txid={}",
         agent_pubkey_str, token_mint, txid
     );
+
+    // Persist the token_mint so retries get an idempotent 200 instead of an error.
+    if let Ok(mut launched) = state.sponsor_launches.lock() {
+        launched.insert(dedup_key, Some(token_mint.clone()));
+    }
 
     (StatusCode::OK, Json(json!({
         "token_mint": token_mint,

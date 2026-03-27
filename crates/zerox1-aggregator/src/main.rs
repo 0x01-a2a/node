@@ -440,7 +440,7 @@ async fn main() -> anyhow::Result<()> {
         bags_api_key: config.bags_api_key,
         sponsor_rpc_url: config.sponsor_rpc_url,
         sponsor_default_image_url: config.sponsor_default_image_url,
-        sponsor_launches: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        sponsor_launches: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // Capital Flow indexer (GAP-02) moved to settlement/solana.

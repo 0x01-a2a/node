@@ -3895,38 +3895,22 @@ pub async fn sponsor_fee_share_config(
         .unwrap_or("")
         .to_string();
 
-    // Sign and broadcast each fee-share config transaction with the sponsor key.
-    // Bags pre-signs one slot per tx; we add the sponsor signature if our key
-    // is one of the required signers.  If try_partial_sign fails (e.g. our key
-    // isn't in this tx's account list), broadcast the tx as-is — Bags may have
-    // already provided all required signatures for that tx.
+    // Broadcast each fee-share config transaction.
+    // Bags returns base58-encoded wire-format transactions (already signed by
+    // their authority). We base64-encode the raw wire bytes and send directly
+    // — no deserialize/reserialize round-trip which would corrupt the format.
     if let Some(txs) = fee_share_val["response"]["transactions"].as_array() {
         for tx_item in txs {
             if let Some(tx_b58) = tx_item["transaction"].as_str() {
                 if let Ok(tx_bytes) = bs58::decode(tx_b58).into_vec() {
-                    if let Ok(mut tx) =
-                        bincode::deserialize::<solana_sdk::transaction::Transaction>(&tx_bytes)
+                    if let Err(e) = broadcast_solana_tx(
+                        &state.sponsor_rpc_url,
+                        client,
+                        &B64.encode(&tx_bytes),
+                    )
+                    .await
                     {
-                        let blockhash = tx.message.recent_blockhash;
-                        let kp = signing_key_to_solana_kp(&signing_key);
-                        // try_partial_sign returns Err instead of panicking when
-                        // our key isn't a required signer for this particular tx.
-                        if let Err(e) = tx.try_partial_sign(&[&kp], blockhash) {
-                            tracing::debug!(
-                                "sponsor_fee_share_config: sponsor not a signer for this tx ({e}), broadcasting as-is"
-                            );
-                        }
-                        if let Ok(serialized) = bincode::serialize(&tx) {
-                            if let Err(e) = broadcast_solana_tx(
-                                &state.sponsor_rpc_url,
-                                client,
-                                &B64.encode(&serialized),
-                            )
-                            .await
-                            {
-                                tracing::warn!("sponsor_fee_share_config: tx broadcast failed: {e}");
-                            }
-                        }
+                        tracing::warn!("sponsor_fee_share_config: tx broadcast failed: {e}");
                     }
                 }
             }

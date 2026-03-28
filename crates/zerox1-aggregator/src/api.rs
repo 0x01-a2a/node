@@ -520,9 +520,6 @@ async fn compute_wallet_league_entry(
 
     let (season, start_ts, _end_ts) = month_window(SystemTime::now());
     let balance = fetch_skr_balance(&state.http_client, wallet).await?;
-    if balance < SKR_MIN_ACCESS {
-        return Ok(None);
-    }
     let bags_fee_score = bags_claim_score(state, &season, wallet);
 
     let mut signatures: HashMap<String, u64> = HashMap::new();
@@ -769,87 +766,77 @@ pub async fn get_skr_league(
     let mut wallet_view = SkrLeagueWalletView {
         wallet: params.wallet.clone(),
         skr_balance: 0.0,
-        has_access: false,
+        has_access: true,
         rank: None,
         earn_rate_pct: 0.0,
         bags_fee_score: 0.0,
         points: 0,
         trade_count: 0,
         active_days: 0,
-        access_message: "Link a Phantom wallet to enter the SKR League.".to_string(),
+        access_message: "Link a wallet in You → Wallet to see your rank.".to_string(),
     };
 
     if let Some(wallet) = params.wallet.as_deref() {
-        match fetch_skr_balance(&state.http_client, wallet).await {
-            Ok(balance) => {
-                wallet_view.skr_balance = (balance * 100.0).round() / 100.0;
-                wallet_view.has_access = balance >= SKR_MIN_ACCESS;
-                let cached_entry = {
-                    state
-                        .skr_league_cache
-                        .lock()
-                        .unwrap()
-                        .as_ref()
-                        .and_then(|cache| {
-                            cache
-                                .rows
-                                .iter()
-                                .find(|entry| entry.wallet.eq_ignore_ascii_case(wallet))
-                                .cloned()
-                        })
-                };
-                if let Some(entry) = cached_entry {
-                    wallet_view.rank = Some(entry.rank);
-                    wallet_view.earn_rate_pct = entry.earn_rate_pct;
-                    wallet_view.bags_fee_score = entry.bags_fee_score;
-                    wallet_view.points = entry.points;
-                    wallet_view.trade_count = entry.trade_count;
-                    wallet_view.active_days = entry.active_days;
-                } else if wallet_view.has_access {
-                    if let Ok(Some(entry)) = compute_wallet_league_entry(&state, wallet).await {
-                        wallet_view.earn_rate_pct = entry.earn_rate_pct;
-                        wallet_view.bags_fee_score = entry.bags_fee_score;
-                        wallet_view.points = entry.points;
-                        wallet_view.trade_count = entry.trade_count;
-                        wallet_view.active_days = entry.active_days;
-                    }
-                }
-                wallet_view.access_message = if wallet_view.has_access {
-                    format!(
-                        "Access granted. {:+.2}% swap earn rate and {:.4} SOL in claimed Bags fees this season across {} eligible trade{} on {} active day{}.",
-                        wallet_view.earn_rate_pct,
-                        wallet_view.bags_fee_score,
-                        wallet_view.trade_count,
-                        if wallet_view.trade_count == 1 { "" } else { "s" },
-                        wallet_view.active_days,
-                        if wallet_view.active_days == 1 { "" } else { "s" },
-                    )
-                } else {
-                    format!(
-                        "SKR League is available to wallets holding at least {:.0} SKR. Your wallet currently has {:.2} SKR.",
-                        SKR_MIN_ACCESS,
-                        wallet_view.skr_balance
-                    )
-                };
-            }
-            Err(_) => {
-                wallet_view.access_message =
-                    "Could not verify your SKR balance right now. Please try again.".to_string();
-            }
+        let cached_entry = {
+            state
+                .skr_league_cache
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|cache| {
+                    cache
+                        .rows
+                        .iter()
+                        .find(|entry| entry.wallet.eq_ignore_ascii_case(wallet))
+                        .cloned()
+                })
+        };
+        if let Some(entry) = cached_entry {
+            wallet_view.rank = Some(entry.rank);
+            wallet_view.earn_rate_pct = entry.earn_rate_pct;
+            wallet_view.bags_fee_score = entry.bags_fee_score;
+            wallet_view.points = entry.points;
+            wallet_view.trade_count = entry.trade_count;
+            wallet_view.active_days = entry.active_days;
+            wallet_view.access_message = format!(
+                "{:+.2}% swap earn rate and {:.4} SOL in claimed Bags fees this season across {} eligible trade{} on {} active day{}.",
+                wallet_view.earn_rate_pct,
+                wallet_view.bags_fee_score,
+                wallet_view.trade_count,
+                if wallet_view.trade_count == 1 { "" } else { "s" },
+                wallet_view.active_days,
+                if wallet_view.active_days == 1 { "" } else { "s" },
+            );
+        } else if let Ok(Some(entry)) = compute_wallet_league_entry(&state, wallet).await {
+            // rank stays None — compute_wallet_league_entry does not scan the full leaderboard
+            wallet_view.earn_rate_pct = entry.earn_rate_pct;
+            wallet_view.bags_fee_score = entry.bags_fee_score;
+            wallet_view.points = entry.points;
+            wallet_view.trade_count = entry.trade_count;
+            wallet_view.active_days = entry.active_days;
+            wallet_view.access_message = format!(
+                "{:+.2}% swap earn rate this season across {} eligible trade{}.",
+                wallet_view.earn_rate_pct,
+                wallet_view.trade_count,
+                if wallet_view.trade_count == 1 { "" } else { "s" },
+            );
+        } else {
+            wallet_view.access_message =
+                "Your agent hasn't completed any eligible trades this season yet.".to_string();
         }
     }
 
     let response = SkrLeagueResponse {
-        title: "SKR League".to_string(),
+        title: "Earnings League".to_string(),
         season,
         ends_at,
         min_skr: SKR_MIN_ACCESS,
         reward_pool_skr: SKR_REWARD_POOL,
         scoring: vec![
-            "Ranked by seasonal SKR earn rate percentage, not raw profit".to_string(),
-            "Bags contributes via claimed launch fees only, not wallet PnL".to_string(),
-            "Eligible activity is limited to embedded trade rails: Jupiter, Raydium, and Bags".to_string(),
-            "Claimed Bags fees and activity score are tiebreakers after earn rate".to_string(),
+            "Ranked by seasonal fee earn rate — SOL income from swaps your agent executed".to_string(),
+            "Eligible activity: Jupiter, Raydium, and Bags swaps only".to_string(),
+            "Earn rate = fee income ÷ total volume traded this season".to_string(),
+            "Bags launch fees count as tiebreaker after earn rate".to_string(),
         ],
         rewards: vec![
             "1st: 1,500 SKR".to_string(),

@@ -322,13 +322,11 @@ const MAX_KORA_DAILY_USES: u32 = 100;
 /// Prevents a large JSON serialisation from creating an oversized envelope.
 const MAX_NEGOTIATE_MESSAGE_LEN: usize = 4_096;
 
-// USDC sweep constants
+// USDC mint addresses — used by the x402 micropayment gate.
 pub(crate) const USDC_MINT_DEVNET: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
 pub(crate) const USDC_MINT_MAINNET: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 pub(crate) const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const SPL_ATA_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bJo";
-/// Minimum balance (atomic USDC units, 6 decimals) required to attempt a sweep.
-const MIN_SWEEP_AMOUNT: u64 = 10_000;
 /// Maximum single x402 micropayment (atomic USDC units). 10 USDC = 10_000_000.
 const MAX_X402_PAYMENT_MICRO: u64 = 10_000_000;
 
@@ -497,7 +495,7 @@ pub struct ApiInner {
     /// Defaults to mainnet so financial ops are on real network even when
     /// mesh rpc_url points at devnet.
     pub trade_rpc_url: String,
-    /// Node's own Ed25519 signing key — used for /wallet/sweep.
+    /// Node's own Ed25519 signing key — used for /wallet/send and internal signing.
     pub node_signing_key: Arc<SigningKey>,
     /// Shared HTTP client for registry RPC calls.
     pub(crate) http_client: reqwest::Client,
@@ -964,7 +962,6 @@ pub fn build_router(state: ApiState, cors_origins: Vec<String>) -> axum::Router 
             post(registry_8004_register_local),
         )
         // Hot wallet sweep + x402 micropayments
-        .route("/wallet/sweep", post(sweep_usdc))
         .route("/wallet/x402/pay", post(x402_pay))
         // MPP — Machine Payment Protocol daily gate
         .route("/mpp/challenge", get(mpp_challenge))
@@ -3888,18 +3885,9 @@ async fn x402_pay(
 }
 
 // ============================================================================
-// Wallet sweep — POST /wallet/sweep
+// Shared wallet helpers
 // ============================================================================
 
-#[derive(Deserialize)]
-pub struct SweepRequest {
-    destination: String,
-    amount: Option<u64>,
-}
-
-/// Convert an ed25519_dalek SigningKey to a solana_sdk Keypair.
-///
-/// solana_sdk::signature::Keypair is a 64-byte keypair: [secret(32) || public(32)].
 pub(crate) fn to_solana_keypair(sk: &SigningKey) -> solana_sdk::signature::Keypair {
     let mut bytes = [0u8; 64];
     bytes[..32].copy_from_slice(&sk.to_bytes());
@@ -4240,266 +4228,6 @@ async fn mpp_verify(
 /// Otherwise, it sweeps the entire balance.
 ///
 /// Returns: `{ "signature": "...", "amount_usdc": 1.23, "destination": "..." }`
-pub async fn sweep_usdc(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(body): Json<SweepRequest>,
-) -> Response {
-    // CRITICAL: sweep moves real money — require master secret.
-    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
-        return resp;
-    }
-    // 1. Validate destination pubkey.
-    let destination: Pubkey = match body.destination.parse() {
-        Ok(pk) => pk,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "invalid destination pubkey" })),
-            )
-                .into_response();
-        }
-    };
-
-    // 2. Derive agent's hot wallet pubkey.
-    let signing_key = Arc::clone(&state.0.node_signing_key);
-    let agent_pubkey: Pubkey = {
-        let vk_bytes = signing_key.verifying_key().to_bytes();
-        Pubkey::new_from_array(vk_bytes)
-    };
-
-    // 3. Select USDC mint based on trading network.
-    let usdc_mint_str = if state.0.is_trading_mainnet {
-        USDC_MINT_MAINNET
-    } else {
-        USDC_MINT_DEVNET
-    };
-    let usdc_mint: Pubkey = usdc_mint_str.parse().expect("valid USDC mint");
-
-    // 4. Derive source and destination ATAs.
-    let source_ata = derive_ata(&agent_pubkey, &usdc_mint);
-    let dest_ata = derive_ata(&destination, &usdc_mint);
-
-    // 5. Query source ATA balance via RPC.
-    let balance_resp = state
-        .0
-        .http_client
-        .post(&state.0.trade_rpc_url)
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getTokenAccountBalance",
-            "params": [source_ata.to_string()]
-        }))
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await;
-
-    let available_balance: u64 = match balance_resp {
-        Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": format!("RPC request failed: {e}") })),
-            )
-                .into_response();
-        }
-        Ok(resp) => {
-            let data: serde_json::Value = match resp.json().await {
-                Ok(v) => v,
-                Err(e) => {
-                    return (
-                        StatusCode::BAD_GATEWAY,
-                        Json(serde_json::json!({ "error": format!("RPC parse error: {e}") })),
-                    )
-                        .into_response();
-                }
-            };
-            if data.get("error").is_some() {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(
-                        serde_json::json!({ "error": "token account not found or has no balance" }),
-                    ),
-                )
-                    .into_response();
-            }
-            match data["result"]["value"]["amount"]
-                .as_str()
-                .and_then(|s| s.parse::<u64>().ok())
-            {
-                Some(v) => v,
-                None => {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({ "error": "token account not found or has no balance" })),
-                    )
-                        .into_response();
-                }
-            }
-        }
-    };
-
-    let amount_to_sweep = body.amount.unwrap_or(available_balance);
-
-    if amount_to_sweep < MIN_SWEEP_AMOUNT {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "requested amount too low to sweep",
-                "amount_atomic": amount_to_sweep,
-                "min_atomic": MIN_SWEEP_AMOUNT,
-            })),
-        )
-            .into_response();
-    }
-
-    if amount_to_sweep > available_balance {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "insufficient balance",
-                "requested_atomic": amount_to_sweep,
-                "available_atomic": available_balance,
-            })),
-        )
-            .into_response();
-    }
-
-    // 6. Build SPL Token Transfer instruction (discriminant 3).
-    let spl_token_program: Pubkey = SPL_TOKEN_PROGRAM_ID
-        .parse()
-        .expect("valid SPL_TOKEN_PROGRAM_ID");
-    let mut ix_data = vec![3u8];
-    ix_data.extend_from_slice(&amount_to_sweep.to_le_bytes());
-    let transfer_ix = solana_sdk::instruction::Instruction {
-        program_id: spl_token_program,
-        accounts: vec![
-            solana_sdk::instruction::AccountMeta::new(source_ata, false),
-            solana_sdk::instruction::AccountMeta::new(dest_ata, false),
-            solana_sdk::instruction::AccountMeta::new(agent_pubkey, true),
-        ],
-        data: ix_data,
-    };
-
-    // 7. Fetch recent blockhash.
-    let blockhash = match fetch_latest_blockhash(&state.0.trade_rpc_url, &state.0.http_client).await
-    {
-        Ok(bh) => bh,
-        Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": format!("blockhash fetch failed: {e}") })),
-            )
-                .into_response();
-        }
-    };
-
-    // 8. Build, sign, and broadcast — Kora pays gas if configured and within daily budget,
-    //    otherwise agent pays SOL directly.
-    let solana_kp = to_solana_keypair(&signing_key);
-
-    let use_kora_sweep = state.0.kora.is_some() && try_use_kora_budget(&state).await;
-    if use_kora_sweep {
-        let kora = state.0.kora.as_ref().unwrap();
-        // ── Kora path: agent partial-signs, Kora adds fee-payer sig + broadcasts ──
-        let fee_payer = match kora.get_fee_payer().await {
-            Ok(fp) => fp,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({ "error": format!("Kora fee payer failed: {e}") })),
-                )
-                    .into_response();
-            }
-        };
-        let message = solana_sdk::message::Message::new_with_blockhash(
-            &[transfer_ix],
-            Some(&fee_payer),
-            &blockhash,
-        );
-        let mut tx = solana_sdk::transaction::Transaction {
-            signatures: vec![
-                solana_sdk::signature::Signature::default();
-                message.header.num_required_signatures as usize
-            ],
-            message,
-        };
-        tx.partial_sign(&[&solana_kp], blockhash);
-        let tx_b64 = match bincode::serialize(&tx) {
-            Ok(b) => B64.encode(&b),
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": format!("tx serialization failed: {e}") })),
-                )
-                    .into_response();
-            }
-        };
-        match kora.sign_and_send(&tx_b64).await {
-            Ok(signer) => {
-                let amount_usdc = amount_to_sweep as f64 / 1_000_000.0;
-                tracing::info!(
-                    "Swept {amount_usdc:.6} USDC → {destination} via Kora (gasless, signer={signer})"
-                );
-                Json(serde_json::json!({
-                    "signature": signer,
-                    "amount_usdc": amount_usdc,
-                    "destination": destination.to_string(),
-                    "via": "kora",
-                }))
-                .into_response()
-            }
-            Err(e) => {
-                tracing::warn!("sweep via Kora failed: {e}");
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({ "error": format!("Kora broadcast failed: {e}") })),
-                )
-                    .into_response()
-            }
-        }
-    } else {
-        // ── Direct path: agent is fee payer (requires SOL) ───────────────────
-        let tx = solana_sdk::transaction::Transaction::new_signed_with_payer(
-            &[transfer_ix],
-            Some(&agent_pubkey),
-            &[&solana_kp],
-            blockhash,
-        );
-        let serialized = match bincode::serialize(&tx) {
-            Ok(b) => b,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": format!("tx serialization failed: {e}") })),
-                )
-                    .into_response();
-            }
-        };
-        let signed_b64 = B64.encode(&serialized);
-        match broadcast_transaction(&state.0.trade_rpc_url, &state.0.http_client, &signed_b64).await
-        {
-            Ok(signature) => {
-                let amount_usdc = amount_to_sweep as f64 / 1_000_000.0;
-                tracing::info!("Swept {amount_usdc:.6} USDC → {destination}: tx={signature}");
-                Json(serde_json::json!({
-                    "signature": signature,
-                    "amount_usdc": amount_usdc,
-                    "destination": destination.to_string(),
-                }))
-                .into_response()
-            }
-            Err(e) => {
-                tracing::warn!("sweep broadcast failed: {e}");
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({ "error": format!("broadcast failed: {e}") })),
-                )
-                    .into_response()
-            }
-        }
-    }
-}
 
 // ============================================================================
 // Wallet send — POST /wallet/send

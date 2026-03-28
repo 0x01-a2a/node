@@ -660,7 +660,7 @@ async fn compute_wallet_league_entry(
         .first()
         .map(|tx| tx.pre)
         .filter(|v| *v > 0.0)
-        .unwrap_or(balance.max(SKR_MIN_ACCESS));
+        .unwrap_or(balance.max(SKR_MIN_ACCESS)); // floor prevents near-zero denominator from inflating earn rate for wallets with minimal history
     let closing_balance = league_txs.last().map(|tx| tx.post).unwrap_or(balance);
     let earn_rate_pct = if opening_balance > 0.0 {
         (((closing_balance - opening_balance) / opening_balance) * 10000.0).round() / 100.0
@@ -742,9 +742,9 @@ async fn load_or_compute_league(
 
 /// GET /league/current[?wallet=<base58>&limit=25]
 ///
-/// SKR League:
-/// - Access is gated behind a minimum SKR balance.
-/// - Leaderboard ranks known owner wallets by season points.
+/// Earnings League:
+/// - Public leaderboard — no minimum SKR balance required.
+/// - Ranks known owner wallets by seasonal fee earn rate (SOL income from swaps).
 /// - Points are derived from monthly on-chain SKR activity.
 /// - Rewards are informational; payout bookkeeping can be layered on later.
 pub async fn get_skr_league(
@@ -830,7 +830,7 @@ pub async fn get_skr_league(
         title: "Earnings League".to_string(),
         season,
         ends_at,
-        min_skr: SKR_MIN_ACCESS,
+        min_skr: 0.0,
         reward_pool_skr: SKR_REWARD_POOL,
         scoring: vec![
             "Ranked by seasonal fee earn rate — SOL income from swaps your agent executed".to_string(),

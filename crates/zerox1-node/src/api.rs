@@ -312,6 +312,7 @@ const MAX_REGISTRY_SUBMIT_PER_MINUTE: u32 = 20;
 /// Maximum `/hosted/send` requests per 60-second window.
 /// Maximum Kora gas sponsorships per 24-hour window.
 /// After this, callers fall back to agent-pays-SOL.
+#[allow(dead_code)]
 const MAX_KORA_DAILY_USES: u32 = 100;
 /// Maximum byte length of the `message` field in negotiate endpoints.
 /// Prevents a large JSON serialisation from creating an oversized envelope.
@@ -557,6 +558,7 @@ pub struct ApiInner {
     /// Rate limit for POST /agent/reload — max 3 reloads per minute.
     agent_reload_rate_limit: Mutex<RateLimitWindow>,
     /// Daily budget for Kora gas sponsorship — 100 uses per 24-hour window.
+    #[allow(dead_code)]
     kora_daily_uses: Mutex<RateLimitWindow>,
 
     // Skill manager
@@ -2887,6 +2889,7 @@ fn ct_eq(a: &str, b: &str) -> bool {
 /// Returns `true` and increments the counter if a slot is available.
 /// Returns `false` if the 24-hour limit has been reached — callers should
 /// fall back to agent-pays-SOL.
+#[allow(dead_code)]
 pub(crate) async fn try_use_kora_budget(state: &ApiState) -> bool {
     let mut rl = state.0.kora_daily_uses.lock().await;
     let now = now_secs();

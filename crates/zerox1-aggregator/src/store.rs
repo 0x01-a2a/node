@@ -6,7 +6,8 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
+use parking_lot::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signature, VerifyingKey, Verifier};
@@ -46,7 +47,7 @@ mod tests {
         // Using "agent-{i:02}" ensures lexicographical order matches numerical order for easy testing
         for i in 0..25 {
             let agent_id = format!("agent-{:02}", i);
-            let mut inner = store.inner.write().unwrap();
+            let mut inner = store.inner.write();
             inner
                 .agents
                 .insert(agent_id.clone(), AgentReputation::new(agent_id));
@@ -429,6 +430,9 @@ pub struct AgentReputation {
     /// Optional [min, max] job price range in USD. Helps requesters size the downpayment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price_range_usd: Option<[f64; 2]>,
+    /// Agent-posted highlight reel video URL. Optional — uploaded via POST /agents/{id}/reel/upload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reel_url: Option<String>,
 }
 
 fn default_trend() -> String {
@@ -537,6 +541,7 @@ impl AgentReputation {
             min_token_hold: None,
             downpayment_bps: 0,
             price_range_usd: None,
+            reel_url: None,
         }
     }
 
@@ -1197,6 +1202,14 @@ CREATE TABLE IF NOT EXISTS bounties (
 CREATE INDEX IF NOT EXISTS idx_bounties_cap ON bounties(required_capability, deadline_at DESC);
 CREATE INDEX IF NOT EXISTS idx_bounties_ts ON bounties(ts DESC);
 ",
+    // v20: Agent highlight reels — agents can upload short video reels to the aggregator.
+    "
+CREATE TABLE IF NOT EXISTS agent_reels (
+    agent_id   TEXT    PRIMARY KEY,
+    reel_url   TEXT    NOT NULL,
+    posted_at  INTEGER NOT NULL
+);
+",
 ];
 
 struct Db(rusqlite::Connection);
@@ -1300,6 +1313,7 @@ impl Db {
                 min_token_hold: None,
                 downpayment_bps: 0,
                 price_range_usd: None,
+                reel_url: None,
             })
         })?;
 
@@ -1413,6 +1427,25 @@ impl Db {
         for row in rows {
             let (agent_id, token_address) = row?;
             map.insert(agent_id, token_address);
+        }
+        Ok(map)
+    }
+
+    /// Load reel URLs from agent_reels: agent_id → reel_url.
+    fn load_reel_urls(&self) -> rusqlite::Result<HashMap<String, String>> {
+        let mut stmt = self
+            .0
+            .prepare("SELECT agent_id, reel_url FROM agent_reels")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+            ))
+        })?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let (agent_id, reel_url) = row?;
+            map.insert(agent_id, reel_url);
         }
         Ok(map)
     }
@@ -2436,6 +2469,15 @@ impl ReputationStore {
             }
         }
 
+        // Populate reel_url from agent_reels.
+        if let Ok(reel_map) = db.load_reel_urls() {
+            for (agent_id, reel_url) in reel_map {
+                if let Some(rep) = agents.get_mut(&agent_id) {
+                    rep.reel_url = Some(reel_url);
+                }
+            }
+        }
+
         tracing::info!(
             "Loaded {} reputation records from {}",
             agents.len(),
@@ -2477,7 +2519,6 @@ impl ReputationStore {
     pub fn get_agent_reputation_score(&self, agent_id: &str) -> f64 {
         self.inner
             .read()
-            .unwrap()
             .agents
             .get(agent_id)
             .map(|r| r.average_score)
@@ -2509,11 +2550,43 @@ impl ReputationStore {
         }
         drop(db);
         // Update in-memory only if not already set.
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write();
         if let Some(rep) = inner.agents.get_mut(agent_id) {
             if rep.token_address.is_none() {
                 rep.token_address = Some(token_address.to_string());
             }
+        }
+    }
+
+    pub fn set_reel_url(&self, agent_id: &str, reel_url: &str) {
+        let now = now_secs();
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            let _ = conn.0.execute(
+                "INSERT INTO agent_reels (agent_id, reel_url, posted_at) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(agent_id) DO UPDATE SET reel_url = excluded.reel_url, posted_at = excluded.posted_at",
+                rusqlite::params![agent_id, reel_url, now as i64],
+            );
+        }
+        drop(db);
+        let mut inner = self.inner.write();
+        if let Some(rep) = inner.agents.get_mut(agent_id) {
+            rep.reel_url = Some(reel_url.to_string());
+        }
+    }
+
+    pub fn remove_reel_url(&self, agent_id: &str) {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            let _ = conn.0.execute(
+                "DELETE FROM agent_reels WHERE agent_id = ?1",
+                rusqlite::params![agent_id],
+            );
+        }
+        drop(db);
+        let mut inner = self.inner.write();
+        if let Some(rep) = inner.agents.get_mut(agent_id) {
+            rep.reel_url = None;
         }
     }
 
@@ -2542,6 +2615,16 @@ impl ReputationStore {
             queue.pop_front();
         }
         queue.push_back(msg);
+    }
+
+    /// Return the number of pending messages queued for an agent without draining.
+    pub fn pending_count(&self, agent_id: &str) -> usize {
+        self.pending_messages
+            .lock()
+            .unwrap()
+            .get(agent_id)
+            .map(|q| q.len())
+            .unwrap_or(0)
     }
 
     /// Drain and return all pending messages for an agent.
@@ -2681,7 +2764,7 @@ impl ReputationStore {
         );
         // Reflect in memory so GET /agents returns updated state immediately.
         drop(db);
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write();
         if let Some(rep) = inner.agents.get_mut(agent_id) {
             for proof in rep.capability_proofs.iter_mut() {
                 if proof.get("capability").and_then(|v| v.as_str()) == Some(capability) {
@@ -2701,7 +2784,7 @@ impl ReputationStore {
             .map(|r| r.agent_id.clone())
             .collect();
         drop(claimed);
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
         agent_ids
             .iter()
             .filter_map(|id| inner.agents.get(id).cloned())
@@ -2734,7 +2817,7 @@ impl ReputationStore {
     // ========================================================================
 
     pub fn ingest(&self, event: IngestEvent) -> Option<ActivityEvent> {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write();
         match event {
             IngestEvent::Feedback(fb) => {
                 if !is_valid_agent_id(&fb.target_agent) {
@@ -2999,7 +3082,7 @@ impl ReputationStore {
                 drop(db);
                 // Update in-memory geo if present and valid.
                 if let Some((country, city)) = validated_geo {
-                    let mut inner = self.inner.write().unwrap();
+                    let mut inner = self.inner.write();
                     if let Some(rep) = inner.agents.get_mut(&ad.sender) {
                         rep.country = Some(country);
                         rep.city = city;
@@ -3030,7 +3113,7 @@ impl ReputationStore {
                         }
                         drop(db);
                         // Only update the in-memory value if not already set.
-                        let mut inner = self.inner.write().unwrap();
+                        let mut inner = self.inner.write();
                         if let Some(rep) = inner.agents.get_mut(&ad.sender) {
                             if rep.token_address.is_none() {
                                 rep.token_address = Some(token_addr.clone());
@@ -3057,7 +3140,7 @@ impl ReputationStore {
                         );
                     }
                     drop(db);
-                    let mut inner = self.inner.write().unwrap();
+                    let mut inner = self.inner.write();
                     if let Some(rep) = inner.agents.get_mut(&ad.sender) {
                         rep.downpayment_bps = bps;
                         rep.price_range_usd = match (price_min, price_max) {
@@ -3197,7 +3280,7 @@ impl ReputationStore {
                         })
                         .cloned()
                         .collect();
-                    let mut inner = self.inner.write().unwrap();
+                    let mut inner = self.inner.write();
                     if let Some(rep) = inner.agents.get_mut(&ad.sender) {
                         rep.capability_proofs = verified_proofs;
                     }
@@ -3205,7 +3288,7 @@ impl ReputationStore {
 
                 // Update min_token_hold in memory (no separate persistence needed — refreshed on ADVERTISE).
                 if let Some(hold) = ad.min_token_hold {
-                    let mut inner = self.inner.write().unwrap();
+                    let mut inner = self.inner.write();
                     if let Some(rep) = inner.agents.get_mut(&ad.sender) {
                         rep.min_token_hold = Some(hold);
                     }
@@ -3571,7 +3654,7 @@ impl ReputationStore {
                 drop(db);
 
                 // Update in-memory latency and recompute geo_consistent.
-                let mut inner = self.inner.write().unwrap();
+                let mut inner = self.inner.write();
                 if let Some(rep) = inner.agents.get_mut(&lev.agent_id) {
                     rep.latency.insert(region.to_string(), rtt_ms);
                     if let Some(ref country) = rep.country.clone() {
@@ -3588,7 +3671,7 @@ impl ReputationStore {
     }
 
     pub fn get(&self, agent_id: &str) -> Option<AgentReputation> {
-        let mut rep = self.inner.read().unwrap().agents.get(agent_id).cloned()?;
+        let mut rep = self.inner.read().agents.get(agent_id).cloned()?;
         // Compute trend from DB when available; keep "stable" otherwise.
         let db = self.db.lock().unwrap();
         if let Some(ref conn) = *db {
@@ -3600,7 +3683,7 @@ impl ReputationStore {
     }
 
     pub fn leaderboard(&self, limit: usize) -> Vec<AgentReputation> {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
         let mut agents: Vec<AgentReputation> = inner.agents.values().cloned().collect();
         agents.sort_by(|a, b| {
             b.average_score
@@ -3618,7 +3701,7 @@ impl ReputationStore {
         sort_by: &str,
         country_filter: Option<&str>,
     ) -> Vec<AgentReputation> {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
         let mut agents: Vec<&AgentReputation> = inner.agents.values().collect();
         if let Some(country) = country_filter {
             agents.retain(|a| {
@@ -3778,7 +3861,7 @@ impl ReputationStore {
 
     /// Network-wide summary stats: agent count, total interactions, uptime.
     pub fn network_stats(&self) -> NetworkStats {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
         let agent_count = inner.agents.len();
 
         // Prefer the authoritative SQLite count; fall back to in-memory ring buffer.
@@ -3791,7 +3874,7 @@ impl ReputationStore {
                     })
                     .unwrap_or(0) as u64
             } else {
-                self.inner.read().unwrap().interactions.len() as u64
+                self.inner.read().interactions.len() as u64
             }
         };
 
@@ -3888,7 +3971,7 @@ impl ReputationStore {
             }
         }
         // In-memory fallback.
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
         inner
             .interactions
             .iter()
@@ -3911,7 +3994,7 @@ impl ReputationStore {
             }
         }
         // In-memory fallback: bucket the ring buffer.
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
         let mut map: HashMap<u64, TimeseriesBucket> = HashMap::new();
         for i in inner.interactions.iter().filter(|i| i.ts >= since) {
             let bucket = (i.ts / 3600) * 3600;

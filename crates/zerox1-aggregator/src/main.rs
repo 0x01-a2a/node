@@ -62,6 +62,12 @@ struct Config {
     #[arg(long, env = "AGGREGATOR_BLOB_DIR")]
     blob_dir: Option<std::path::PathBuf>,
 
+    /// Path to a directory for storing agent highlight reel videos.
+    /// If absent, reel uploads are disabled (agents can still post external URLs).
+    /// Example: /var/lib/zerox1/reels
+    #[arg(long, env = "AGGREGATOR_REEL_DIR")]
+    reel_dir: Option<std::path::PathBuf>,
+
     /// 8004 Agent Registry GraphQL indexer URL.
     /// Defaults to the production indexer at Railway.
     #[arg(long, env = "ZX01_REGISTRY_8004_URL")]
@@ -271,6 +277,18 @@ struct Config {
     /// Must be set together with BAGS_PARTNER_WALLET.
     #[arg(long, env = "BAGS_PARTNER_CONFIG")]
     bags_partner_config: Option<String>,
+
+    /// Development / local mode.
+    /// When set, missing ingest_secret and empty api_keys are warnings rather than
+    /// fatal errors. NEVER use this in internet-facing production deployments.
+    #[arg(long, env = "AGGREGATOR_DEV", default_value_t = false)]
+    dev: bool,
+
+    /// Admin-only API key for /admin/* billing management routes.
+    /// When absent, all /admin/* routes return 403 Forbidden.
+    /// Set via AGGREGATOR_ADMIN_KEY; keep separate from general api_keys.
+    #[arg(long, env = "AGGREGATOR_ADMIN_KEY")]
+    admin_api_key: Option<String>,
 }
 
 #[tokio::main]
@@ -285,10 +303,35 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::parse();
 
     if config.ingest_secret.is_none() {
-        tracing::warn!(
-            "No --ingest-secret set. POST /ingest/envelope is unauthenticated. \
-             Set AGGREGATOR_INGEST_SECRET in production."
-        );
+        if config.dev {
+            tracing::warn!(
+                "No ingest_secret configured — /ingest/* routes are unauthenticated (dev mode)."
+            );
+        } else {
+            tracing::error!(
+                "ingest_secret is required in production. \
+                 Set --ingest-secret or AGGREGATOR_INGEST_SECRET. Use --dev to bypass."
+            );
+            std::process::exit(1);
+        }
+    }
+
+    if config.api_keys.is_empty() {
+        if config.dev {
+            tracing::warn!(
+                "No API keys configured — all gated routes are publicly accessible (dev mode)."
+            );
+        } else {
+            tracing::error!(
+                "api_keys is required in production. Configure at least one API key via \
+                 --api-keys or AGGREGATOR_API_KEYS. Use --dev to bypass."
+            );
+            std::process::exit(1);
+        }
+    }
+
+    if config.admin_api_key.is_none() {
+        tracing::warn!("[WARN] No admin API key configured — /admin/* routes are disabled.");
     }
 
     let store = match config.db_path.as_ref() {
@@ -414,6 +457,7 @@ async fn main() -> anyhow::Result<()> {
         ingest_secret: config.ingest_secret,
         hosting_secret: config.hosting_secret,
         blob_dir: config.blob_dir,
+        reel_dir: config.reel_dir,
         ntfy_server: config.ntfy_server,
         http_client,
         activity_tx,
@@ -455,6 +499,7 @@ async fn main() -> anyhow::Result<()> {
         bags_partner_wallet: config.bags_partner_wallet,
         bags_partner_config: config.bags_partner_config,
         sponsor_launches: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        admin_api_key: config.admin_api_key,
     };
 
     // Capital Flow indexer (GAP-02) moved to settlement/solana.
@@ -589,7 +634,13 @@ async fn main() -> anyhow::Result<()> {
             "/blobs",
             post(api::post_blob).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
         )
-        // ── Admin billing endpoints ────────────────────────────────────
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            api::api_key_middleware,
+        ));
+
+    // ── Admin-key gated routes (/admin/*) — require separate admin_api_key ──
+    let admin_routes = Router::new()
         .route("/admin/billing/accounts", get(api::get_admin_billing_accounts))
         .route("/admin/billing/settlements", get(api::get_admin_settlements))
         .route("/admin/billing/revenue", get(api::get_admin_revenue))
@@ -597,7 +648,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/billing/accounts/{id}/skip-settlement", post(api::post_admin_set_skip_settlement))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
-            api::api_key_middleware,
+            api::admin_key_middleware,
         ));
 
     // ── Settlement worker (processes payouts from the queue) ─────────────
@@ -762,6 +813,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = public_routes
         .merge(gated_routes)
+        .merge(admin_routes)
         .layer(
             tower_http::cors::CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
@@ -846,12 +898,23 @@ fn is_safe_attestation_url(url: &str) -> bool {
         .unwrap_or(host_str);
 
     if let Ok(addr) = ipv6_candidate.parse::<std::net::Ipv6Addr>() {
-        // Block loopback (::1) and link-local (fe80::/10).
+        // Block loopback (::1).
         if addr.is_loopback() {
             return false;
         }
         let segments = addr.segments();
+        // Link-local: fe80::/10
         if (segments[0] & 0xffc0) == 0xfe80 {
+            return false;
+        }
+        // Unique-local: fc00::/7 (covers fc00:: and fd00::)
+        if (segments[0] & 0xfe00) == 0xfc00 {
+            return false;
+        }
+        // IPv4-mapped: ::ffff:0:0/96
+        if segments[0] == 0 && segments[1] == 0 && segments[2] == 0
+            && segments[3] == 0 && segments[4] == 0 && segments[5] == 0xffff
+        {
             return false;
         }
         return true;

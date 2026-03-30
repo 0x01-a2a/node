@@ -120,6 +120,8 @@ pub struct AppState {
     pub activity_tx: broadcast::Sender<ActivityEvent>,
     /// Path to store media blobs.
     pub blob_dir: Option<PathBuf>,
+    /// Path to store agent highlight reel video files.
+    pub reel_dir: Option<PathBuf>,
     /// 8004 Agent Registry client for on-chain identity checks.
     pub registry: Registry8004Client,
     /// API keys for gating read endpoints.
@@ -203,6 +205,10 @@ pub struct AppState {
     /// Maps agent_id_hex → token_mint once a sponsored launch succeeds.
     /// None while the launch is in-flight (reserved but not yet confirmed).
     pub sponsor_launches: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Option<String>>>>,
+    /// Separate admin-only key for /admin/* routes.
+    /// None = /admin/* routes are disabled (rejected with 403).
+    /// Must be set explicitly — never falls back to api_keys.
+    pub admin_api_key: Option<String>,
 }
 
 /// Check if the request carries a valid API key.
@@ -246,6 +252,50 @@ pub async fn api_key_middleware(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     if let Some((status, body)) = require_api_key(&state, &headers) {
+        return (status, body).into_response();
+    }
+    next.run(request).await
+}
+
+/// Check if the request carries the admin API key.
+/// Unlike `require_api_key`, this NEVER passes when `admin_api_key` is None —
+/// admin access requires explicit configuration.
+pub fn require_admin_key(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    let Some(ref admin_key) = state.admin_api_key else {
+        return Some((
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "admin API key not configured — /admin/* routes are disabled" })),
+        ));
+    };
+
+    let provided = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("");
+
+    if ct_eq(provided, admin_key.as_str()) {
+        return None; // Valid admin key
+    }
+
+    Some((
+        StatusCode::UNAUTHORIZED,
+        Json(json!({ "error": "unauthorized — provide a valid admin API key via Authorization: Bearer <key>" })),
+    ))
+}
+
+/// Axum middleware that gates requests behind the admin API key.
+/// Applied via `route_layer(middleware::from_fn_with_state(...))` on /admin/* routes.
+pub async fn admin_key_middleware(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if let Some((status, body)) = require_admin_key(&state, &headers) {
         return (status, body).into_response();
     }
     next.run(request).await
@@ -1658,12 +1708,20 @@ pub async fn get_pending(
 /// If the agent has a registered FCM token and is sleeping, a push
 /// notification is fired immediately to wake the app.
 /// Requirement: Validate that the sender (body.from) matches the signature (HIGH-9).
+/// Maximum payload size for POST /agents/{agent_id}/pending (64 KiB).
+const MAX_PENDING_PAYLOAD_BYTES: usize = 64 * 1024;
+
 pub async fn post_pending(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
     headers: axum::http::HeaderMap,
     body_bytes: axum::body::Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
+    // Payload size cap — reject before parsing to avoid DoS via large payloads.
+    if body_bytes.len() > MAX_PENDING_PAYLOAD_BYTES {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
     let sig = headers.get("X-Signature").and_then(|h| h.to_str().ok());
     let body_str = std::str::from_utf8(&body_bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
     let body: PostPendingBody =
@@ -1678,6 +1736,11 @@ pub async fn post_pending(
 
     if !is_valid_agent_id(&agent_id) {
         return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Per-agent message cap — reject rather than silently dropping oldest.
+    if state.store.pending_count(&agent_id) >= 100 {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
     }
 
     let ts = std::time::SystemTime::now()
@@ -1922,9 +1985,20 @@ fn validate_host_api_url(url: &str) -> Result<(), &'static str> {
             return Err("api_url must not be a private IP address");
         }
 
-        // Link-local.
+        // Link-local (IPv4 169.254/16 and IPv6 fe80::/10).
         if host_str.starts_with("169.254.") || host_str.starts_with("fe80:") {
             return Err("api_url must not be a link-local address");
+        }
+
+        // IPv6 unique-local (fc00::/7) and IPv4-mapped (::ffff:).
+        if let Ok(addr) = host_str.trim_matches(|c| c == '[' || c == ']').parse::<std::net::Ipv6Addr>() {
+            let seg = addr.segments();
+            if (seg[0] & 0xfe00) == 0xfc00 {
+                return Err("api_url must not be a unique-local IPv6 address");
+            }
+            if seg[0] == 0 && seg[1] == 0 && seg[2] == 0 && seg[3] == 0 && seg[4] == 0 && seg[5] == 0xffff {
+                return Err("api_url must not be an IPv4-mapped IPv6 address");
+            }
         }
     } else {
         return Err("api_url has no host");
@@ -4060,6 +4134,166 @@ async fn broadcast_solana_tx(
         .ok_or_else(|| anyhow::anyhow!("sendTransaction: missing result"))
 }
 
+const MAX_REEL_SIZE: usize = 100 * 1024 * 1024; // 100 MB
+
+/// POST /agents/:agent_id/reel/upload
+///
+/// Upload a highlight reel video for this agent.
+/// Body: raw video bytes (MP4/WebM). Max 100 MB.
+/// Header: Content-Type should be video/mp4 or video/webm.
+pub async fn post_agent_reel_upload(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let reel_dir = match state.reel_dir {
+        Some(ref d) => d.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "reel storage disabled" })),
+            ).into_response();
+        }
+    };
+
+    if body.len() > MAX_REEL_SIZE {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "error": "video exceeds 100 MB limit" })),
+        ).into_response();
+    }
+
+    if body.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "empty body" })),
+        ).into_response();
+    }
+
+    if !is_valid_agent_id(&agent_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid agent_id" })),
+        ).into_response();
+    }
+
+    if let Err(e) = std::fs::create_dir_all(&reel_dir) {
+        tracing::error!("failed to create reel_dir: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "storage error" })),
+        ).into_response();
+    }
+
+    let filename = format!("{}.mp4", &agent_id[..16]);
+    let file_path = reel_dir.join(&filename);
+    if let Err(e) = std::fs::write(&file_path, &body) {
+        tracing::error!("failed to write reel file: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "storage error" })),
+        ).into_response();
+    }
+
+    // Derive a public URL. We expose the file at GET /reels/:filename.
+    // The caller (phone bridge) knows the aggregator base URL.
+    state.store.set_reel_url(&agent_id, &format!("/reels/{filename}"));
+
+    (StatusCode::OK, Json(json!({ "reel_url": format!("/reels/{filename}") }))).into_response()
+}
+
+/// GET /agents/:agent_id/reel
+///
+/// Returns the reel metadata for an agent.
+pub async fn get_agent_reel(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    let agents = state.store.list_agents(1, 0, "id", None);
+    if let Some(agent) = agents.into_iter().find(|a| a.agent_id == agent_id) {
+        if let Some(reel_url) = agent.reel_url {
+            return (StatusCode::OK, Json(json!({ "reel_url": reel_url }))).into_response();
+        }
+    }
+    (StatusCode::NOT_FOUND, Json(json!({ "error": "no reel" }))).into_response()
+}
+
+/// POST /agents/:agent_id/reel
+///
+/// Register an externally-hosted reel URL (e.g. from a video generation API).
+/// Body: { "reel_url": "https://..." }
+/// Use this instead of /reel/upload when the video is already hosted (AI-generated reels).
+pub async fn post_agent_reel_url(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if !is_valid_agent_id(&agent_id) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid agent_id" }))).into_response();
+    }
+    let reel_url = match body.get("reel_url").and_then(|v| v.as_str()) {
+        Some(u) if !u.is_empty() && u.starts_with("https://") => u.to_string(),
+        _ => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "reel_url must be a non-empty https:// URL" }))).into_response(),
+    };
+    if reel_url.len() > 2048 {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "reel_url too long" }))).into_response();
+    }
+    state.store.set_reel_url(&agent_id, &reel_url);
+    (StatusCode::OK, Json(json!({ "ok": true, "reel_url": reel_url }))).into_response()
+}
+
+/// DELETE /agents/:agent_id/reel
+///
+/// Removes the reel for an agent (agent self-service).
+pub async fn delete_agent_reel(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    if !is_valid_agent_id(&agent_id) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid agent_id" }))).into_response();
+    }
+    // Also delete the file if present.
+    if let Some(ref reel_dir) = state.reel_dir {
+        let filename = format!("{}.mp4", &agent_id[..16]);
+        let _ = std::fs::remove_file(reel_dir.join(filename));
+    }
+    state.store.remove_reel_url(&agent_id);
+    (StatusCode::OK, Json(json!({ "ok": true }))).into_response()
+}
+
+/// GET /reels/:filename
+///
+/// Serves a stored reel video file.
+pub async fn get_reel_file(
+    State(state): State<AppState>,
+    Path(filename): Path<String>,
+) -> impl IntoResponse {
+    let reel_dir = match state.reel_dir {
+        Some(ref d) => d.clone(),
+        None => {
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "reel storage disabled" }))).into_response();
+        }
+    };
+
+    // Security: only allow [hex16].mp4 filenames (no path traversal).
+    if !filename.ends_with(".mp4") || filename.len() != 20 || !filename[..16].chars().all(|c| c.is_ascii_hexdigit()) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid filename" }))).into_response();
+    }
+
+    let file_path = reel_dir.join(&filename);
+    match std::fs::read(file_path) {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [
+                ("Content-Type", "video/mp4"),
+                ("Cache-Control", "public, max-age=3600"),
+            ],
+            bytes,
+        ).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))).into_response(),
+    }
+}
+
 /// Build the aggregator HTTP router from a fully-initialised `AppState`.
 /// Extracted from `main.rs` so integration tests can call it without binding a port.
 pub fn build_router(state: AppState) -> axum::Router {
@@ -4086,6 +4320,9 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/sponsor/launch",     post(sponsor_launch))
         .route("/sponsor/fee-share-config", post(sponsor_fee_share_config))
         .route("/agents/{agent_id}/profile", get(get_agent_profile))
+        .route("/agents/{agent_id}/reel",          get(get_agent_reel).post(post_agent_reel_url).delete(delete_agent_reel))
+        .route("/agents/{agent_id}/reel/upload",   post(post_agent_reel_upload).layer(DefaultBodyLimit::max(MAX_REEL_SIZE)))
+        .route("/reels/{filename}",                get(get_reel_file))
         .route("/activity",   get(get_activity))
         .route("/ws/activity", get(ws_activity))
         .route("/broadcasts", get(get_broadcasts))

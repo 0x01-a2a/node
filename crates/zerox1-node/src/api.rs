@@ -124,11 +124,6 @@ pub enum ApiEvent {
         message_count: u32,
         batch_hash: String,
     },
-    #[allow(dead_code)]
-    LeaseStatus {
-        agent_id: String,
-        active: bool,
-    },
 }
 
 // ============================================================================
@@ -756,6 +751,14 @@ impl ApiState {
                     }
                 }
             });
+        }
+
+        if state.0.api_secret.is_none() {
+            tracing::warn!(
+                "No api_secret configured — mutating endpoints (/envelopes/send, /wallet, \
+                 /trade, /escrow) are unauthenticated. Set --api-secret / ZX01_API_SECRET \
+                 for production use."
+            );
         }
 
         (state, outbound_rx, hosted_outbound_rx, sub_topic_rx)
@@ -5982,6 +5985,11 @@ async fn agent_reload(headers: HeaderMap, State(state): State<ApiState>) -> Resp
 
 /// Validate a skill name: lowercase alphanumeric + hyphens + underscores,
 /// no path separators, no leading hyphens, 1–64 chars.
+const RESERVED_SKILL_NAMES: &[&str] = &[
+    "zerox1-mesh", "bags", "trade", "launchlab", "cpmm",
+    "health", "skill_manager", "web", "phone-ui",
+];
+
 fn validate_skill_name(name: &str) -> Result<(), &'static str> {
     if name.is_empty() || name.len() > 64 {
         return Err("skill name must be 1–64 chars");
@@ -5994,6 +6002,9 @@ fn validate_skill_name(name: &str) -> Result<(), &'static str> {
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
     {
         return Err("skill name may only contain lowercase letters, digits, hyphens, underscores");
+    }
+    if RESERVED_SKILL_NAMES.contains(&name) {
+        return Err("reserved skill name — cannot be overwritten via the API");
     }
     Ok(())
 }
@@ -6123,6 +6134,14 @@ struct SkillInstallUrlRequest {
     url: String,
 }
 
+fn is_private_ipv4(v4: std::net::Ipv4Addr) -> bool {
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_broadcast()
+        || v4.is_unspecified()
+}
+
 /// Reject private/loopback IP ranges used in SSRF attacks.
 fn is_private_host(host: &str) -> bool {
     if host == "localhost" {
@@ -6130,14 +6149,17 @@ fn is_private_host(host: &str) -> bool {
     }
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         return match ip {
-            std::net::IpAddr::V4(v4) => {
-                v4.is_loopback()
-                    || v4.is_private()
-                    || v4.is_link_local()
-                    || v4.is_broadcast()
-                    || v4.is_unspecified()
+            std::net::IpAddr::V4(v4) => is_private_ipv4(v4),
+            std::net::IpAddr::V6(v6) => {
+                let segs = v6.segments();
+                let is_link_local = (segs[0] & 0xffc0) == 0xfe80; // fe80::/10
+                let is_unique_local = (segs[0] & 0xfe00) == 0xfc00; // fc00::/7
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || is_link_local
+                    || is_unique_local
+                    || v6.to_ipv4_mapped().map(is_private_ipv4).unwrap_or(false)
             }
-            std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
         };
     }
     false

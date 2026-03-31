@@ -117,10 +117,13 @@ jobs:
           path: target/aarch64-linux-android/release/zerox1-node
           if-no-files-found: error
 
-  # ── Build zerox1-node as a static library for iOS (arm64) ───────────────
+  # ── Build zerox1-node as a static library for iOS (arm64 + sim) ───────────
   build-ios:
-    name: Build iOS ARM64 static library
+    name: Build iOS static library (${{ matrix.target }})
     runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [aarch64-apple-ios, aarch64-apple-ios-sim]
 
     steps:
       - uses: actions/checkout@v4
@@ -128,7 +131,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-ios
+          targets: ${{ matrix.target }}
 
       - name: Cache Cargo registry
         uses: actions/cache@v4
@@ -140,16 +143,16 @@ jobs:
           key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-registry-${{ runner.os }}-
 
-      - name: Build zerox1-node static library (iOS ARM64)
-        run: cargo build --release -p zerox1-node --target aarch64-apple-ios --features zerox1-node/ios-ffi
+      - name: Build zerox1-node static library (${{ matrix.target }})
+        run: cargo build --release -p zerox1-node --target ${{ matrix.target }} --features zerox1-node/ios-ffi
         env:
           CARGO_TERM_COLOR: always
 
       - name: Upload static library artifact
         uses: actions/upload-artifact@v4
         with:
-          name: libzerox1_node-ios-arm64
-          path: target/aarch64-apple-ios/release/libzerox1_node.a
+          name: libzerox1_node-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/libzerox1_node.a
           if-no-files-found: error
 
   # ── Build zerox1-mailbox (release artifact bundled into GitHub release) ──

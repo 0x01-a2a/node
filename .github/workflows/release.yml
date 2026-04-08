@@ -117,43 +117,13 @@ jobs:
           path: target/aarch64-linux-android/release/zerox1-node
           if-no-files-found: error
 
-  # ── Build zerox1-node as a static library for iOS (arm64 + sim) ───────────
-  build-ios:
-    name: Build iOS static library (${{ matrix.target }})
-    runs-on: macos-latest
-    strategy:
-      matrix:
-        target: [aarch64-apple-ios, aarch64-apple-ios-sim]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-registry-${{ runner.os }}-
-
-      - name: Build zerox1-node static library (${{ matrix.target }})
-        run: cargo build --release -p zerox1-node --target ${{ matrix.target }} --features zerox1-node/ios-ffi
-        env:
-          CARGO_TERM_COLOR: always
-
-      - name: Upload static library artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: libzerox1_node-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/libzerox1_node.a
-          if-no-files-found: error
+  # iOS static libraries (libzerox1_node.a) are built locally and embedded
+  # directly in the Xcode project — not distributed via GitHub Releases.
+  # Local build command:
+  #   cargo build --release -p zerox1-node --features zerox1-node/ios-ffi \
+  #     --target aarch64-apple-ios        # device
+  #   cargo build --release -p zerox1-node --features zerox1-node/ios-ffi \
+  #     --target aarch64-apple-ios-sim    # simulator
 
   # ── Build zerox1-mailbox (release artifact bundled into GitHub release) ──
   # Aggregator is built and deployed separately via deploy-aggregator.yml.

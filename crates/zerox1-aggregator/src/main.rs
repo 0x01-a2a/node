@@ -57,6 +57,24 @@ struct Config {
     #[arg(long, env = "AGGREGATOR_HOSTING_SECRET")]
     hosting_secret: Option<String>,
 
+    /// Path to the Apple Push Notification .p8 auth key file.
+    /// Required to send APNs silent pushes to sleeping iOS agents.
+    /// Download from Apple Developer Portal → Certificates → Keys.
+    #[arg(long, env = "APNS_KEY_PATH")]
+    apns_key_path: Option<std::path::PathBuf>,
+
+    /// Apple Team ID (10-char alphanumeric) — visible in Apple Developer Portal.
+    #[arg(long, env = "APNS_TEAM_ID")]
+    apns_team_id: Option<String>,
+
+    /// APNs Auth Key ID (10-char, shown next to the .p8 download in Apple Developer Portal).
+    #[arg(long, env = "APNS_KEY_ID")]
+    apns_key_id: Option<String>,
+
+    /// iOS app bundle ID used as the apns-topic header (e.g. "world.zerox1.node").
+    #[arg(long, env = "APNS_BUNDLE_ID", default_value = "world.zerox1.node")]
+    apns_bundle_id: String,
+
     /// Path to a directory for storing large media blobs.
     /// If absent, blob uploads are disabled.
     #[arg(long, env = "AGGREGATOR_BLOB_DIR")]
@@ -364,6 +382,38 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // ── APNs config ───────────────────────────────────────────────────────
+    let apns_config: Option<std::sync::Arc<api::ApnsConfig>> = match (
+        &config.apns_key_path,
+        &config.apns_team_id,
+        &config.apns_key_id,
+    ) {
+        (Some(key_path), Some(team_id), Some(key_id)) => {
+            match std::fs::read_to_string(key_path) {
+                Ok(key_pem) => {
+                    tracing::info!(
+                        "APNs push enabled: team={} key_id={} bundle={}",
+                        team_id, key_id, config.apns_bundle_id
+                    );
+                    Some(std::sync::Arc::new(api::ApnsConfig {
+                        team_id: team_id.clone(),
+                        key_id: key_id.clone(),
+                        key_pem,
+                        bundle_id: config.apns_bundle_id.clone(),
+                    }))
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to read APNs key file {:?}: {e} — APNs disabled", key_path);
+                    None
+                }
+            }
+        }
+        _ => {
+            tracing::info!("APNs push not configured (APNS_KEY_PATH/APNS_TEAM_ID/APNS_KEY_ID not set). iOS wake-push disabled.");
+            None
+        }
+    };
+
     let (activity_tx, _) = broadcast::channel::<ActivityEvent>(512);
     #[cfg(feature = "data-bounty")]
     let (campaign_tx, _) = broadcast::channel::<Campaign>(64);
@@ -500,6 +550,7 @@ async fn main() -> anyhow::Result<()> {
         bags_partner_config: config.bags_partner_config,
         sponsor_launches: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         admin_api_key: config.admin_api_key,
+        apns_config,
     };
 
     // Capital Flow indexer (GAP-02) moved to settlement/solana.
@@ -514,6 +565,8 @@ async fn main() -> anyhow::Result<()> {
         // FCM registration & push-receive (agent-authenticated via Ed25519)
         .route("/fcm/register", post(api::fcm_register))
         .route("/fcm/sleep", post(api::fcm_sleep))
+        // APNs registration for iOS wake pushes (agent-authenticated via Ed25519)
+        .route("/apns/register", post(api::apns_register))
         .route(
             "/agents/{agent_id}/pending",
             get(api::get_pending).post(api::post_pending),

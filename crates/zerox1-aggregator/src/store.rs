@@ -433,6 +433,10 @@ pub struct AgentReputation {
     /// Agent-posted highlight reel video URL. Optional — uploaded via POST /agents/{id}/reel/upload.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reel_url: Option<String>,
+    /// Whether this agent is a verified 01PL Pilot holder (≥10M tokens).
+    /// Set by the aggregator's background balance checker; None = unchecked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_pilot: Option<bool>,
 }
 
 fn default_trend() -> String {
@@ -542,6 +546,7 @@ impl AgentReputation {
             downpayment_bps: 0,
             price_range_usd: None,
             reel_url: None,
+            is_pilot: None,
         }
     }
 
@@ -1314,6 +1319,7 @@ impl Db {
                 downpayment_bps: 0,
                 price_range_usd: None,
                 reel_url: None,
+                is_pilot: None,
             })
         })?;
 
@@ -2330,6 +2336,9 @@ pub struct ReputationStore {
     /// FCM device tokens: agent_id (hex) → Firebase device token.
     /// In-memory only; not persisted to SQLite (tokens are re-registered on each app start).
     fcm_tokens: Arc<Mutex<HashMap<String, String>>>,
+    /// APNs device tokens: agent_id (hex) → APNs device token hex string.
+    /// In-memory only; re-registered on each iOS app start.
+    apns_tokens: Arc<Mutex<HashMap<String, String>>>,
     /// Set of agent_ids currently in sleep mode (app backgrounded / offline).
     sleep_states: Arc<Mutex<HashSet<String>>>,
     /// Messages held for sleeping agents: agent_id → queue of pending messages.
@@ -2355,6 +2364,7 @@ impl Default for ReputationStore {
             started_at: now_secs(),
             beacon_window: Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
             fcm_tokens: Arc::new(Mutex::new(HashMap::new())),
+            apns_tokens: Arc::new(Mutex::new(HashMap::new())),
             sleep_states: Arc::new(Mutex::new(HashSet::new())),
             pending_messages: Arc::new(Mutex::new(HashMap::new())),
             ownership_pending: Arc::new(Mutex::new(HashMap::new())),
@@ -2507,6 +2517,7 @@ impl ReputationStore {
             started_at: now_secs(),
             beacon_window: Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
             fcm_tokens: Arc::new(Mutex::new(HashMap::new())),
+            apns_tokens: Arc::new(Mutex::new(HashMap::new())),
             sleep_states: Arc::new(Mutex::new(HashSet::new())),
             pending_messages: Arc::new(Mutex::new(HashMap::new())),
             ownership_pending: Arc::new(Mutex::new(ownership_pending)),
@@ -2532,6 +2543,16 @@ impl ReputationStore {
     /// Store or update the FCM device token for an agent.
     pub fn store_fcm_token(&self, agent_id: String, token: String) {
         self.fcm_tokens.lock().unwrap().insert(agent_id, token);
+    }
+
+    /// Store or update the APNs device token for an iOS agent.
+    pub fn store_apns_token(&self, agent_id: String, token: String) {
+        self.apns_tokens.lock().unwrap().insert(agent_id, token);
+    }
+
+    /// Return the APNs device token for an agent, if registered.
+    pub fn get_apns_token(&self, agent_id: &str) -> Option<String> {
+        self.apns_tokens.lock().unwrap().get(agent_id).cloned()
     }
 
     /// Mark an agent as sleeping (true) or awake (false).

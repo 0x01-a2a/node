@@ -209,6 +209,23 @@ pub struct AppState {
     /// None = /admin/* routes are disabled (rejected with 403).
     /// Must be set explicitly — never falls back to api_keys.
     pub admin_api_key: Option<String>,
+    /// APNs push configuration for iOS wake notifications.
+    /// None = APNs push disabled (iOS agents still sleep/wake via ntfy on Android).
+    pub apns_config: Option<std::sync::Arc<ApnsConfig>>,
+}
+
+/// Configuration for Apple Push Notification service (APNs).
+/// Loaded from CLI args / env vars at startup.
+#[derive(Clone)]
+pub struct ApnsConfig {
+    /// Apple Team ID (10-char alphanumeric, visible in Apple Developer Portal).
+    pub team_id: String,
+    /// APNs Auth Key ID (10-char, from the .p8 key download page).
+    pub key_id: String,
+    /// PEM content of the .p8 EC private key downloaded from Apple Developer Portal.
+    pub key_pem: String,
+    /// App bundle ID, e.g. "world.zerox1.node". Used as the apns-topic header.
+    pub bundle_id: String,
 }
 
 /// Check if the request carries a valid API key.
@@ -1633,6 +1650,47 @@ pub async fn fcm_register(
     Ok(StatusCode::OK)
 }
 
+/// POST /apns/register
+///
+/// Register or update the APNs device token for an iOS agent.
+/// Called by the iOS app after node start — mirrors /fcm/register for Android.
+///
+/// Authentication: intentionally unauthenticated (same threat model as ntfy topics).
+/// The APNs token is a hardware-backed device token — only the physical device can
+/// obtain it. Worst-case attack: redirect wake pushes to another device (low value,
+/// no financial impact; actual message queues require signed reads via /agents/{id}/pending).
+pub async fn apns_register(
+    State(state): State<AppState>,
+    body_bytes: axum::body::Bytes,
+) -> Result<impl IntoResponse, StatusCode> {
+    if body_bytes.len() > 512 {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    let body_str = std::str::from_utf8(&body_bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    #[derive(serde::Deserialize)]
+    struct ApnsRegisterBody {
+        agent_id: String,
+        apns_token: String,
+    }
+    let body: ApnsRegisterBody =
+        serde_json::from_str(body_str).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    if !is_valid_agent_id(&body.agent_id) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    // Validate: APNs token is a 64-char hex string.
+    if body.apns_token.len() != 64 || !body.apns_token.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    state
+        .store
+        .store_apns_token(body.agent_id.clone(), body.apns_token);
+    tracing::debug!("APNs token registered for agent {}", body.agent_id);
+    Ok(StatusCode::OK)
+}
+
 /// POST /fcm/sleep
 ///
 /// Mark an agent as sleeping (offline) or awake.
@@ -1758,9 +1816,9 @@ pub async fn post_pending(
 
     state.store.push_pending(&agent_id, msg);
 
-    // Fire ntfy push if the agent is sleeping.
-    // Topic = agent_id hex; no pre-registration required.
+    // Fire wake pushes if the agent is sleeping.
     if state.store.is_sleeping(&agent_id) {
+        // ntfy for Android
         if let Some(ref ntfy_server) = state.ntfy_server {
             let server = ntfy_server.clone();
             let aid = agent_id.clone();
@@ -1770,6 +1828,19 @@ pub async fn post_pending(
             tokio::spawn(async move {
                 send_ntfy_push(&server, &aid, &from, &msgtype, &client).await;
             });
+        }
+        // APNs for iOS
+        if let Some(ref apns_cfg) = state.apns_config {
+            if let Some(device_token) = state.store.get_apns_token(&agent_id) {
+                let cfg = apns_cfg.clone();
+                let aid = agent_id.clone();
+                let from = body.from.clone();
+                let msgtype = body.msg_type.clone();
+                let client = state.http_client.clone();
+                tokio::spawn(async move {
+                    send_apns_push(&cfg, &device_token, &aid, &from, &msgtype, &client).await;
+                });
+            }
         }
     }
 
@@ -1926,6 +1997,87 @@ async fn send_ntfy_push(
         }
         Err(e) => {
             tracing::warn!("ntfy push error for agent {agent_id}: {e}");
+        }
+    }
+}
+
+/// Build a short-lived APNs provider JWT (valid ~60 min).
+///
+/// APNs requires ES256 signed with the Apple P-256 .p8 auth key.
+/// Header: { alg: ES256, kid: KEY_ID }
+/// Claims: { iss: TEAM_ID, iat: <unix_secs> }
+fn make_apns_jwt(config: &ApnsConfig) -> anyhow::Result<String> {
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+
+    #[derive(serde::Serialize)]
+    struct ApnsClaims {
+        iss: String,
+        iat: u64,
+    }
+
+    let header = Header {
+        alg: Algorithm::ES256,
+        kid: Some(config.key_id.clone()),
+        ..Default::default()
+    };
+    let claims = ApnsClaims {
+        iss: config.team_id.clone(),
+        iat: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    };
+    let key = EncodingKey::from_ec_pem(config.key_pem.as_bytes())?;
+    Ok(encode(&header, &claims, &key)?)
+}
+
+/// Fire an APNs silent push to wake a sleeping iOS node.
+///
+/// Uses the APNs HTTP/2 provider API with JWT auth (ES256 .p8 key).
+/// Sends a `content-available: 1` background notification so iOS wakes
+/// the app for background processing without displaying a banner.
+async fn send_apns_push(
+    config: &ApnsConfig,
+    device_token: &str,
+    agent_id: &str,
+    from: &str,
+    msg_type: &str,
+    client: &reqwest::Client,
+) {
+    let jwt = match make_apns_jwt(config) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("APNs JWT generation failed for agent {agent_id}: {e}");
+            return;
+        }
+    };
+
+    let url = format!("https://api.push.apple.com/3/device/{device_token}");
+    let body = serde_json::json!({
+        "aps": { "content-available": 1 },
+        "wake_type": msg_type,
+        "from": from,
+        "agent_id": agent_id,
+    });
+
+    match client
+        .post(&url)
+        .header("apns-topic", &config.bundle_id)
+        .header("apns-push-type", "background")
+        .header("apns-priority", "5")
+        .header("authorization", format!("bearer {jwt}"))
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            tracing::debug!("APNs push sent for agent {agent_id}");
+        }
+        Ok(resp) => {
+            tracing::warn!("APNs push HTTP {} for agent {agent_id}", resp.status());
+        }
+        Err(e) => {
+            tracing::warn!("APNs push error for agent {agent_id}: {e}");
         }
     }
 }

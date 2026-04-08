@@ -52,6 +52,7 @@ rand = "0.8"
 bs58 = "0.5"
 parking_lot = "0.12"
 bincode = { workspace = true }
+jsonwebtoken = "9"
 # zerox1-settlement-celo = { version = "0.1.0", optional = true }  # uncomment after publishing
 # zerox1-settlement-base = { version = "0.1.0", optional = true }  # uncomment after publishing
 # zerox1-settlement-sui  = { version = "0.1.0", optional = true }  # uncomment after publishing

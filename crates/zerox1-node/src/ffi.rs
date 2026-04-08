@@ -61,7 +61,10 @@ unsafe fn cstr_opt<'a>(ptr: *const c_char) -> Option<&'a str> {
 ///                    generates / loads from `data_dir/identity.key` if null).
 /// - `relay_addr`   — libp2p circuit-relay multiaddr (nullable).
 /// - `agent_name`   — human-readable display name (nullable → empty string).
-/// - `rpc_url`      — Solana RPC endpoint (nullable → mainnet default).
+/// - `rpc_url`        — Solana RPC endpoint (nullable → mainnet default).
+/// - `aggregator_url` — Reputation aggregator URL (nullable).
+///                      When set, the node registers sleep state + drains the
+///                      pending mailbox on startup (enables APNs wake flow).
 ///
 /// # Safety
 /// All non-null pointer arguments must point to valid NUL-terminated C strings
@@ -75,6 +78,7 @@ pub extern "C" fn zerox1_node_start(
     relay_addr: *const c_char,
     agent_name: *const c_char,
     rpc_url: *const c_char,
+    aggregator_url: *const c_char,
 ) -> i32 {
     // Already running — idempotent.
     if IS_RUNNING.load(Ordering::SeqCst) {
@@ -99,6 +103,7 @@ pub extern "C" fn zerox1_node_start(
     let rpc_url_str = unsafe { cstr_opt(rpc_url) }
         .unwrap_or("https://api.mainnet-beta.solana.com")
         .to_string();
+    let aggregator_url_str = unsafe { cstr_opt(aggregator_url) }.map(str::to_string);
 
     // ── Build tokio runtime ─────────────────────────────────────────────────
     let rt = match tokio::runtime::Builder::new_multi_thread()
@@ -153,6 +158,9 @@ pub extern "C" fn zerox1_node_start(
         // whose env vars we don't want to rely on in the FFI path).
         if let Some(secret) = api_secret_str {
             config.api_secret = Some(secret);
+        }
+        if let Some(agg_url) = aggregator_url_str {
+            config.aggregator_url = Some(agg_url);
         }
         config.keypair_path = PathBuf::from(&keypair_path_str);
 

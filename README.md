@@ -229,8 +229,14 @@ Mutating local endpoints require `Authorization: Bearer <token>` when `--api-sec
 | `GET  /mpp/protocol-fee/challenge` | Generate the aggregator protocol-fee challenge |
 | `POST /mpp/protocol-fee/verify` | Verify the protocol-fee payment proof |
 | `POST /sponsor/fee-share-config` | Aggregator sponsors Bags fee-share config tx on behalf of an agent (no SOL needed) |
+| `POST /apns/register` | Register an iOS APNs device token (agent_id → token mapping for push wake) |
+| `POST /fcm/sleep` | Report agent sleep state (signed by agent Ed25519 key); gates mailbox queuing + push |
+| `GET  /agents/:id/sleeping` | Check whether an agent is currently sleeping |
+| `GET  /agents/:id/pending` | Drain queued messages held while the agent was offline |
 
 Agent records include optional `country`, `city`, `latency` (HashMap of region → RTT ms), and `geo_consistent` fields populated by genesis nodes running `--node-region us-east|eu-west`.
+
+**iOS push wake** — when a mobile agent backgrounds, it calls `POST /fcm/sleep` (signed). Inbound messages are queued in the aggregator mailbox and a silent `content-available: 1` APNs push fires to wake the device. On foreground the node starts, calls `POST /fcm/sleep` (sleeping=false), then drains `GET /agents/:id/pending` — messages are re-injected into the live dispatch chain as if they arrived over the mesh. Configure the aggregator with `--apns-key-path`, `--apns-team-id`, `--apns-key-id`, and `--apns-bundle-id` (or via `.env.aggregator`).
 
 **Token swap whitelist** — `POST /trade/swap` only accepts these mints:
 

@@ -30,6 +30,8 @@ programs/workspace/package-lock.json
 *.json.bak
 my-phantom-key.key
 zerox1-identity.key
+# APNs auth key (Apple push notifications)
+AuthKey_*.p8
 
 # Deploy — generated secrets and runtime config
 deploy/gcp/.secrets

@@ -590,28 +590,33 @@ impl Zx01Node {
             tracing::info!("Geo registered: country={country}");
         }
 
-        // ── FCM registration (phone-as-node) ─────────────────────────────────
-        // If a Firebase device token is configured, register it with the
-        // aggregator and pull any messages that arrived while sleeping.
-        if let (Some(ref fcm_token), Some(ref agg_url)) =
-            (self.config.fcm_token.clone(), self.aggregator_url.clone())
-        {
+        // ── Push notary (phone-as-node) ───────────────────────────────────────
+        // When the aggregator URL is configured, mark this node as awake and
+        // drain any messages held while it was sleeping.  FCM token registration
+        // (Android) is gated on the token being present; the sleep/drain calls
+        // happen for both Android (FCM) and iOS (APNs) whenever aggregator_url
+        // is set.
+        if let Some(ref agg_url) = self.aggregator_url.clone() {
             let agent_id_hex = hex::encode(self.identity.agent_id);
-            // Register token.
-            if let Err(e) = push_notary::register_fcm_token(
-                agg_url,
-                &agent_id_hex,
-                fcm_token,
-                &self.identity.signing_key,
-                &self.http_client,
-            )
-            .await
-            {
-                tracing::warn!("FCM token registration failed: {e}");
-            } else {
-                tracing::info!("FCM token registered with aggregator.");
+
+            // Android: register FCM token if configured.
+            if let Some(ref fcm_token) = self.config.fcm_token.clone() {
+                if let Err(e) = push_notary::register_fcm_token(
+                    agg_url,
+                    &agent_id_hex,
+                    fcm_token,
+                    &self.identity.signing_key,
+                    &self.http_client,
+                )
+                .await
+                {
+                    tracing::warn!("FCM token registration failed: {e}");
+                } else {
+                    tracing::info!("FCM token registered with aggregator.");
+                }
             }
-            // Mark this node as awake.
+
+            // Mark this node as awake (both Android and iOS).
             if let Err(e) = push_notary::set_sleep_mode(
                 agg_url,
                 &agent_id_hex,
@@ -621,9 +626,10 @@ impl Zx01Node {
             )
             .await
             {
-                tracing::warn!("FCM wake notification failed: {e}");
+                tracing::warn!("Wake notification to aggregator failed: {e}");
             }
-            // Pull any messages held while sleeping.
+
+            // Drain any messages held while sleeping (both Android and iOS).
             match push_notary::pull_pending_messages(
                 agg_url,
                 &agent_id_hex,
@@ -639,6 +645,15 @@ impl Zx01Node {
                     );
                     for msg in &msgs {
                         tracing::info!("Pending [{}] from {} — {}", msg.msg_type, msg.from, msg.id);
+                        // Decode base64 CBOR payload and re-inject into the dispatch chain
+                        // so /ws/inbox subscribers and zeroclaw receive the queued message.
+                        match base64::engine::general_purpose::STANDARD.decode(&msg.payload) {
+                            Ok(cbor) => match Envelope::from_cbor(&cbor) {
+                                Ok(env) => self.api.push_inbound(&env, self.current_slot),
+                                Err(e) => tracing::warn!("Pending message CBOR decode failed ({}): {e}", msg.id),
+                            },
+                            Err(e) => tracing::warn!("Pending message base64 decode failed ({}): {e}", msg.id),
+                        }
                     }
                 }
                 Ok(_) => {}

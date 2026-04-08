@@ -57,6 +57,9 @@ fn test_state() -> AppState {
         sponsor_launches: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        apns_config: None,
+        admin_api_key: None,
+        reel_dir: None,
     }
 }
 

@@ -312,6 +312,12 @@ struct Config {
     #[arg(long, env = "SELF_PAY_FEE_WALLET")]
     self_pay_fee_wallet: Option<String>,
 
+    /// Comma-separated list of gift codes to ensure exist in the DB at startup.
+    /// Codes are inserted with INSERT OR IGNORE — safe to repeat across restarts.
+    /// Example: GIFT_CODE_SEED=01PILOTZCAA,BETA2024XYZ
+    #[arg(long, env = "GIFT_CODE_SEED")]
+    gift_code_seed: Option<String>,
+
     /// Development / local mode.
     /// When set, missing ingest_secret and empty api_keys are warnings rather than
     /// fatal errors. NEVER use this in internet-facing production deployments.
@@ -571,6 +577,15 @@ async fn main() -> anyhow::Result<()> {
         self_pay_fee_lamports: config.self_pay_fee_lamports,
         self_pay_fee_wallet: config.self_pay_fee_wallet,
     };
+
+    // Seed gift codes from config (idempotent — INSERT OR IGNORE).
+    if let Some(seed) = &config.gift_code_seed {
+        let codes: Vec<&str> = seed.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+        if !codes.is_empty() {
+            state.store.seed_gift_codes(&codes);
+            tracing::info!("[gift-codes] seeded {} code(s): {}", codes.len(), codes.join(", "));
+        }
+    }
 
     // Capital Flow indexer (GAP-02) moved to settlement/solana.
 

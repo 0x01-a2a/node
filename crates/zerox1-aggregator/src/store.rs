@@ -2855,6 +2855,20 @@ impl ReputationStore {
         false
     }
 
+    /// Insert specific codes verbatim (INSERT OR IGNORE — idempotent).
+    /// Used to seed operator-chosen codes like "01PILOTZCAA" at startup.
+    pub fn seed_gift_codes(&self, codes: &[&str]) {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            for code in codes {
+                let _ = conn.0.execute(
+                    "INSERT OR IGNORE INTO gift_codes (code) VALUES (?1)",
+                    rusqlite::params![code],
+                );
+            }
+        }
+    }
+
     /// Generate `count` random gift codes of the form XXXX-XXXX-XXXX and insert
     /// them into the DB. Returns the list of inserted codes.
     /// Codes use uppercase alphanumeric chars excluding 0/O/I/1 for readability.

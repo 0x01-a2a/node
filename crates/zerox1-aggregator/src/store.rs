@@ -1215,6 +1215,22 @@ CREATE TABLE IF NOT EXISTS agent_reels (
     posted_at  INTEGER NOT NULL
 );
 ",
+    // v21: Gift code gating for sponsored token launches.
+    // gift_codes: operator-managed one-time codes; used_by/used_at set on redemption.
+    // sponsor_launch_payments: records self-pay SOL txids to prevent double-spend.
+    "
+CREATE TABLE IF NOT EXISTS gift_codes (
+    code       TEXT    PRIMARY KEY,
+    used_by    TEXT,
+    used_at    INTEGER
+);
+CREATE TABLE IF NOT EXISTS sponsor_launch_payments (
+    txid       TEXT    PRIMARY KEY,
+    agent_id   TEXT    NOT NULL,
+    lamports   INTEGER NOT NULL,
+    used_at    INTEGER NOT NULL
+);
+",
 ];
 
 struct Db(rusqlite::Connection);
@@ -2794,6 +2810,60 @@ impl ReputationStore {
                     }
                 }
             }
+        }
+    }
+
+    /// Return true if the gift code exists in the DB and has not been used.
+    pub fn validate_gift_code(&self, code: &str) -> bool {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            let result: rusqlite::Result<Option<String>> = conn.0.query_row(
+                "SELECT used_by FROM gift_codes WHERE code = ?1",
+                rusqlite::params![code],
+                |row| row.get(0),
+            );
+            return matches!(result, Ok(None));
+        }
+        false
+    }
+
+    /// Mark a gift code as used by the given agent. Returns false if already used or not found.
+    pub fn consume_gift_code(&self, code: &str, agent_id: &str) -> bool {
+        let now = now_secs() as i64;
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            let n = conn.0.execute(
+                "UPDATE gift_codes SET used_by = ?1, used_at = ?2 WHERE code = ?3 AND used_by IS NULL",
+                rusqlite::params![agent_id, now, code],
+            ).unwrap_or(0);
+            return n > 0;
+        }
+        false
+    }
+
+    /// Return true if this payment txid has already been used (prevents double-spend).
+    pub fn payment_txid_used(&self, txid: &str) -> bool {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            let n: i64 = conn.0.query_row(
+                "SELECT COUNT(*) FROM sponsor_launch_payments WHERE txid = ?1",
+                rusqlite::params![txid],
+                |row| row.get(0),
+            ).unwrap_or(0);
+            return n > 0;
+        }
+        false
+    }
+
+    /// Record a self-pay txid to prevent future reuse.
+    pub fn record_launch_payment(&self, txid: &str, agent_id: &str, lamports: u64) {
+        let now = now_secs() as i64;
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            let _ = conn.0.execute(
+                "INSERT OR IGNORE INTO sponsor_launch_payments (txid, agent_id, lamports, used_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![txid, agent_id, lamports as i64, now],
+            );
         }
     }
 

@@ -209,6 +209,16 @@ pub struct AppState {
     /// None = /admin/* routes are disabled (rejected with 403).
     /// Must be set explicitly — never falls back to api_keys.
     pub admin_api_key: Option<String>,
+
+    // ── Gift-code gating for sponsored launches ───────────────────────────
+    /// When true, POST /sponsor/launch requires a valid gift code or a confirmed
+    /// self-pay SOL transaction. When false (default), every agent is sponsored.
+    pub gift_code_gating: bool,
+    /// SOL fee (in lamports) charged for self-pay launches when gating is enabled.
+    /// Default 20_000_000 (0.02 SOL). Set to 0 to disable self-pay path.
+    pub self_pay_fee_lamports: u64,
+    /// Base58 wallet address that receives self-pay SOL. None = self-pay disabled.
+    pub self_pay_fee_wallet: Option<String>,
     /// APNs push configuration for iOS wake notifications.
     /// None = APNs push disabled (iOS agents still sleep/wake via ntfy on Android).
     pub apns_config: Option<std::sync::Arc<ApnsConfig>>,
@@ -3723,6 +3733,122 @@ pub struct SponsorLaunchRequest {
     pub description: String,
     /// Optional: Base64-encoded image bytes (PNG/JPG, max 5 MB).
     pub image_b64: Option<String>,
+    /// Gift code provided by the user to get a sponsored (free) launch.
+    /// Required when gift_code_gating is enabled and no payment_txid is provided.
+    pub gift_code: Option<String>,
+    /// Base58-encoded Solana transaction signature of a SOL self-pay transfer.
+    /// Required when gift_code_gating is enabled and no gift_code is provided.
+    pub payment_txid: Option<String>,
+}
+
+/// GET /sponsor/launch-info — returns gating policy so the mobile app can
+/// decide whether to show the gift-code input or self-pay button.
+pub async fn sponsor_launch_info(State(state): State<AppState>) -> impl IntoResponse {
+    let self_pay_available = state.self_pay_fee_lamports > 0 && state.self_pay_fee_wallet.is_some();
+    Json(serde_json::json!({
+        "gated": state.gift_code_gating,
+        "self_pay_fee_lamports": state.self_pay_fee_lamports,
+        "fee_wallet": state.self_pay_fee_wallet,
+        "self_pay_available": self_pay_available,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct ValidateCodeRequest {
+    pub code: String,
+}
+
+/// POST /sponsor/validate-code — real-time gift code validation (no side effects).
+pub async fn validate_gift_code(
+    State(state): State<AppState>,
+    Json(req): Json<ValidateCodeRequest>,
+) -> impl IntoResponse {
+    let valid = state.store.validate_gift_code(req.code.trim());
+    Json(serde_json::json!({ "valid": valid }))
+}
+
+/// Verify a self-pay SOL transfer on-chain via Solana JSON-RPC.
+/// Returns Ok(true) if the tx is confirmed and includes a transfer of at least
+/// `required_lamports` to `fee_wallet`. Returns Ok(false) if the tx doesn't qualify.
+async fn verify_self_pay_tx(
+    txid: &str,
+    fee_wallet: &str,
+    required_lamports: u64,
+    rpc_url: &str,
+    client: &reqwest::Client,
+) -> anyhow::Result<bool> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTransaction",
+        "params": [
+            txid,
+            {
+                "encoding": "jsonParsed",
+                "commitment": "confirmed",
+                "maxSupportedTransactionVersion": 0
+            }
+        ]
+    });
+
+    let resp = client
+        .post(rpc_url)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await?;
+
+    let data: serde_json::Value = resp.json().await?;
+
+    if data.get("error").is_some() {
+        return Ok(false);
+    }
+
+    let result = &data["result"];
+    if result.is_null() {
+        return Ok(false); // not yet confirmed
+    }
+
+    // Look for a SystemProgram.transfer instruction to fee_wallet with enough lamports.
+    let instructions = result["transaction"]["message"]["instructions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    for ix in &instructions {
+        let program = ix["program"].as_str().unwrap_or("");
+        let ix_type = ix["parsed"]["type"].as_str().unwrap_or("");
+        let dest = ix["parsed"]["info"]["destination"].as_str().unwrap_or("");
+        let lamports = ix["parsed"]["info"]["lamports"].as_u64().unwrap_or(0);
+
+        if program == "system" && ix_type == "transfer" && dest == fee_wallet && lamports >= required_lamports {
+            return Ok(true);
+        }
+    }
+
+    // Also check inner instructions
+    let inner_ixs: Vec<serde_json::Value> = result["meta"]["innerInstructions"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item["instructions"].as_array().cloned())
+                .flatten()
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for ix in &inner_ixs {
+        let program = ix["program"].as_str().unwrap_or("");
+        let ix_type = ix["parsed"]["type"].as_str().unwrap_or("");
+        let dest = ix["parsed"]["info"]["destination"].as_str().unwrap_or("");
+        let lamports = ix["parsed"]["info"]["lamports"].as_u64().unwrap_or(0);
+
+        if program == "system" && ix_type == "transfer" && dest == fee_wallet && lamports >= required_lamports {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 /// POST /sponsor/launch
@@ -3784,6 +3910,97 @@ pub async fn sponsor_launch(
         }
         // Reserve the slot immediately (None = in-flight) to prevent concurrent duplicates.
         launched.insert(dedup_key.clone(), None);
+    }
+
+    // ── Gift-code / self-pay gating ───────────────────────────────────────
+    if state.gift_code_gating {
+        let gift_code = req.gift_code.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let payment_txid = req.payment_txid.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+        match (gift_code, payment_txid) {
+            (Some(code), _) => {
+                // Validate gift code exists and is unused.
+                if !state.store.validate_gift_code(code) {
+                    remove_sponsor_reservation(&state, &dedup_key);
+                    return (StatusCode::PAYMENT_REQUIRED, Json(json!({
+                        "error": "invalid or already used gift code",
+                        "require_payment": true,
+                        "self_pay_fee_lamports": state.self_pay_fee_lamports,
+                        "fee_wallet": state.self_pay_fee_wallet,
+                    }))).into_response();
+                }
+                // Mark consumed atomically — if it was raced and already used, reject.
+                let consumed = state.store.consume_gift_code(code, &dedup_key);
+                if !consumed {
+                    remove_sponsor_reservation(&state, &dedup_key);
+                    return (StatusCode::PAYMENT_REQUIRED, Json(json!({
+                        "error": "gift code already used",
+                        "require_payment": true,
+                        "self_pay_fee_lamports": state.self_pay_fee_lamports,
+                        "fee_wallet": state.self_pay_fee_wallet,
+                    }))).into_response();
+                }
+            },
+            (None, Some(txid)) => {
+                // Check txid not already used.
+                if state.store.payment_txid_used(txid) {
+                    remove_sponsor_reservation(&state, &dedup_key);
+                    return (StatusCode::PAYMENT_REQUIRED, Json(json!({
+                        "error": "payment transaction already used",
+                        "require_payment": true,
+                        "self_pay_fee_lamports": state.self_pay_fee_lamports,
+                        "fee_wallet": state.self_pay_fee_wallet,
+                    }))).into_response();
+                }
+                // Verify on-chain: right recipient + sufficient lamports.
+                let fee_wallet = match &state.self_pay_fee_wallet {
+                    Some(w) => w.clone(),
+                    None => {
+                        remove_sponsor_reservation(&state, &dedup_key);
+                        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({
+                            "error": "self-pay not configured on this aggregator"
+                        }))).into_response();
+                    }
+                };
+                match verify_self_pay_tx(
+                    txid,
+                    &fee_wallet,
+                    state.self_pay_fee_lamports,
+                    &state.sponsor_rpc_url,
+                    &state.http_client,
+                ).await {
+                    Ok(true) => {
+                        // Record the txid before proceeding to prevent reuse.
+                        state.store.record_launch_payment(txid, &dedup_key, state.self_pay_fee_lamports);
+                    },
+                    Ok(false) => {
+                        remove_sponsor_reservation(&state, &dedup_key);
+                        return (StatusCode::PAYMENT_REQUIRED, Json(json!({
+                            "error": "payment not verified: transaction not found or insufficient amount",
+                            "require_payment": true,
+                            "self_pay_fee_lamports": state.self_pay_fee_lamports,
+                            "fee_wallet": state.self_pay_fee_wallet,
+                        }))).into_response();
+                    },
+                    Err(e) => {
+                        remove_sponsor_reservation(&state, &dedup_key);
+                        tracing::warn!("self-pay RPC verification error: {e}");
+                        return (StatusCode::BAD_GATEWAY, Json(json!({
+                            "error": "RPC error verifying payment, please retry"
+                        }))).into_response();
+                    },
+                }
+            },
+            (None, None) => {
+                remove_sponsor_reservation(&state, &dedup_key);
+                return (StatusCode::PAYMENT_REQUIRED, Json(json!({
+                    "error": "gift code or payment required",
+                    "require_payment": true,
+                    "self_pay_fee_lamports": state.self_pay_fee_lamports,
+                    "fee_wallet": state.self_pay_fee_wallet,
+                }))).into_response();
+            },
+        }
     }
 
     let sponsor_pubkey = Pubkey::new_from_array(signing_key.verifying_key().to_bytes());

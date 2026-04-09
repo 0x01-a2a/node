@@ -296,6 +296,22 @@ struct Config {
     #[arg(long, env = "BAGS_PARTNER_CONFIG")]
     bags_partner_config: Option<String>,
 
+    /// Enable gift-code gating for sponsored launches.
+    /// When set, POST /sponsor/launch requires either a valid gift code or a
+    /// confirmed self-pay SOL transaction. Default: false (everyone sponsored).
+    #[arg(long, env = "GIFT_CODE_GATING", default_value_t = false)]
+    gift_code_gating: bool,
+
+    /// Self-pay SOL fee in lamports for users without a gift code.
+    /// Only used when GIFT_CODE_GATING is enabled.
+    #[arg(long, env = "SELF_PAY_FEE_LAMPORTS", default_value_t = 20_000_000)]
+    self_pay_fee_lamports: u64,
+
+    /// Base58 Solana wallet address that receives self-pay SOL transfers.
+    /// Required for the self-pay path when GIFT_CODE_GATING is enabled.
+    #[arg(long, env = "SELF_PAY_FEE_WALLET")]
+    self_pay_fee_wallet: Option<String>,
+
     /// Development / local mode.
     /// When set, missing ingest_secret and empty api_keys are warnings rather than
     /// fatal errors. NEVER use this in internet-facing production deployments.
@@ -551,6 +567,9 @@ async fn main() -> anyhow::Result<()> {
         sponsor_launches: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         admin_api_key: config.admin_api_key,
         apns_config,
+        gift_code_gating: config.gift_code_gating,
+        self_pay_fee_lamports: config.self_pay_fee_lamports,
+        self_pay_fee_wallet: config.self_pay_fee_wallet,
     };
 
     // Capital Flow indexer (GAP-02) moved to settlement/solana.
@@ -595,6 +614,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/agents", get(api::get_agents))
         // Sponsored token launch — no auth, rate-limited per agent pubkey
         .route("/sponsor/launch", post(api::sponsor_launch))
+        // Gift-code gating helpers — no auth, public
+        .route("/sponsor/launch-info", get(api::sponsor_launch_info))
+        .route("/sponsor/validate-code", post(api::validate_gift_code))
         // Sponsored fee-share config — called by local nodes to pay on-chain creation fees
         .route("/sponsor/fee-share-config", post(api::sponsor_fee_share_config))
         // Mobile app read endpoints — must be public (mobile has no API key)

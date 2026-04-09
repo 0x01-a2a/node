@@ -980,6 +980,11 @@ pub fn build_router(state: ApiState, cors_origins: Vec<String>) -> axum::Router 
         // Agent process management (skill hot-reload)
         .route("/agent/register-pid", post(agent_register_pid))
         .route("/agent/reload", post(agent_reload))
+        // Agent memory + persona (passive observation files)
+        .route("/agent/memory", get(agent_memory_read))
+        .route("/agent/memory/write", post(agent_memory_write))
+        .route("/agent/persona", get(agent_persona_read))
+        .route("/agent/persona/write", post(agent_persona_write))
         // Skill manager — safe Rust-side file operations (no shell injection)
         .route("/skill/list", get(skill_list_handler))
         .route("/skill/write", post(skill_write_handler))
@@ -6028,6 +6033,129 @@ macro_rules! skill_workspace {
             ).into_response(),
         }
     };
+}
+
+// ── Agent memory / persona endpoints ─────────────────────────────────────────
+
+/// Maximum size for MEMORY.md and PERSONA.md writes (32 KiB).
+const MAX_MEMORY_FILE_BYTES: usize = 32 * 1024;
+
+/// GET /agent/memory — read MEMORY.md from the skill workspace.
+async fn agent_memory_read(headers: HeaderMap, State(state): State<ApiState>) -> Response {
+    if let Some(resp) = require_read_or_master_access(&state, &headers) {
+        return resp;
+    }
+    let workspace = skill_workspace!(state);
+    let path = workspace.join("MEMORY.md");
+    match tokio::fs::read_to_string(&path).await {
+        Ok(content) => Json(serde_json::json!({ "content": content })).into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Json(serde_json::json!({ "content": "" })).into_response()
+        }
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "failed to read MEMORY.md" })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /agent/memory/write — overwrite MEMORY.md with new content.
+/// Body: `{ "content": "..." }`
+async fn agent_memory_write(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
+        return resp;
+    }
+    let workspace = skill_workspace!(state);
+    let content = match body.get("content").and_then(|v| v.as_str()) {
+        Some(c) => c.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "missing content field" })),
+            )
+                .into_response()
+        }
+    };
+    if content.len() > MAX_MEMORY_FILE_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({ "error": "content exceeds 32 KiB limit" })),
+        )
+            .into_response();
+    }
+    let path = workspace.join("MEMORY.md");
+    match tokio::fs::write(&path, &content).await {
+        Ok(_) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "failed to write MEMORY.md" })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /agent/persona — read PERSONA.md from the skill workspace.
+async fn agent_persona_read(headers: HeaderMap, State(state): State<ApiState>) -> Response {
+    if let Some(resp) = require_read_or_master_access(&state, &headers) {
+        return resp;
+    }
+    let workspace = skill_workspace!(state);
+    let path = workspace.join("PERSONA.md");
+    match tokio::fs::read_to_string(&path).await {
+        Ok(content) => Json(serde_json::json!({ "content": content })).into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Json(serde_json::json!({ "content": "" })).into_response()
+        }
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "failed to read PERSONA.md" })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /agent/persona/write — overwrite PERSONA.md with new content.
+/// Body: `{ "content": "..." }`
+async fn agent_persona_write(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
+        return resp;
+    }
+    let workspace = skill_workspace!(state);
+    let content = match body.get("content").and_then(|v| v.as_str()) {
+        Some(c) => c.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "missing content field" })),
+            )
+                .into_response()
+        }
+    };
+    if content.len() > MAX_MEMORY_FILE_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({ "error": "content exceeds 32 KiB limit" })),
+        )
+            .into_response();
+    }
+    let path = workspace.join("PERSONA.md");
+    match tokio::fs::write(&path, &content).await {
+        Ok(_) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "failed to write PERSONA.md" })),
+        )
+            .into_response(),
+    }
 }
 
 /// GET /skill/list — list installed skill names.

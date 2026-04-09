@@ -9,7 +9,7 @@ use zerox1_aggregator::store;
 use axum::{
     extract::DefaultBodyLimit,
     middleware,
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use clap::Parser;
@@ -721,6 +721,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/billing/revenue", get(api::get_admin_revenue))
         .route("/admin/billing/settlements/{id}/retry", post(api::post_admin_retry_settlement))
         .route("/admin/billing/accounts/{id}/skip-settlement", post(api::post_admin_set_skip_settlement))
+        .route("/admin/gift-codes", get(api::get_admin_gift_codes))
+        .route("/admin/gift-codes/generate", post(api::post_admin_generate_gift_codes))
+        .route("/admin/gift-codes/{code}", delete(api::delete_admin_gift_code))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             api::admin_key_middleware,

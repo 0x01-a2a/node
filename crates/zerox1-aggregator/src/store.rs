@@ -2855,6 +2855,90 @@ impl ReputationStore {
         false
     }
 
+    /// Generate `count` random gift codes of the form XXXX-XXXX-XXXX and insert
+    /// them into the DB. Returns the list of inserted codes.
+    /// Codes use uppercase alphanumeric chars excluding 0/O/I/1 for readability.
+    pub fn generate_gift_codes(&self, count: usize) -> Vec<String> {
+        use rand::Rng;
+        const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        let mut rng = rand::thread_rng();
+        let mut codes = Vec::with_capacity(count);
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            for _ in 0..count {
+                let mut seg = |n: usize| -> String {
+                    (0..n).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect()
+                };
+                let code = format!("{}-{}-{}", seg(4), seg(4), seg(4));
+                let ok = conn.0.execute(
+                    "INSERT OR IGNORE INTO gift_codes (code) VALUES (?1)",
+                    rusqlite::params![code],
+                ).unwrap_or(0);
+                if ok > 0 {
+                    codes.push(code);
+                }
+            }
+        }
+        codes
+    }
+
+    /// List gift codes with pagination. Returns (code, used_by, used_at) tuples.
+    /// Pass `used_filter` = Some(true/false) to filter by redemption status.
+    pub fn list_gift_codes(
+        &self,
+        limit: usize,
+        offset: usize,
+        used_filter: Option<bool>,
+    ) -> Vec<serde_json::Value> {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            let (sql, used_param): (&str, Option<bool>) = match used_filter {
+                Some(true)  => ("SELECT code, used_by, used_at FROM gift_codes WHERE used_by IS NOT NULL ORDER BY used_at DESC LIMIT ?1 OFFSET ?2", Some(true)),
+                Some(false) => ("SELECT code, used_by, used_at FROM gift_codes WHERE used_by IS NULL ORDER BY rowid DESC LIMIT ?1 OFFSET ?2", Some(false)),
+                None        => ("SELECT code, used_by, used_at FROM gift_codes ORDER BY rowid DESC LIMIT ?1 OFFSET ?2", None),
+            };
+            let _ = used_param; // used to select the query branch above
+            let mut stmt = match conn.0.prepare(sql) {
+                Ok(s) => s,
+                Err(_) => return vec![],
+            };
+            let rows = stmt.query_map(
+                rusqlite::params![limit as i64, offset as i64],
+                |row| {
+                    let code: String = row.get(0)?;
+                    let used_by: Option<String> = row.get(1)?;
+                    let used_at: Option<i64> = row.get(2)?;
+                    Ok((code, used_by, used_at))
+                },
+            );
+            if let Ok(rows) = rows {
+                return rows.filter_map(|r| r.ok()).map(|(code, used_by, used_at)| {
+                    serde_json::json!({
+                        "code": code,
+                        "used": used_by.is_some(),
+                        "used_by": used_by,
+                        "used_at": used_at,
+                    })
+                }).collect();
+            }
+        }
+        vec![]
+    }
+
+    /// Delete an unused gift code. Returns true if the code existed and was unused.
+    /// Does not delete already-redeemed codes to preserve the audit trail.
+    pub fn revoke_gift_code(&self, code: &str) -> bool {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            let n = conn.0.execute(
+                "DELETE FROM gift_codes WHERE code = ?1 AND used_by IS NULL",
+                rusqlite::params![code],
+            ).unwrap_or(0);
+            return n > 0;
+        }
+        false
+    }
+
     /// Record a self-pay txid to prevent future reuse.
     pub fn record_launch_payment(&self, txid: &str, agent_id: &str, lamports: u64) {
         let now = now_secs() as i64;

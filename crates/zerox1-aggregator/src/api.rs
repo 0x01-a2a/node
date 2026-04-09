@@ -3393,6 +3393,100 @@ pub async fn post_admin_retry_settlement(
     }
 }
 
+// ============================================================================
+// Admin gift-code endpoints
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct GenerateCodesRequest {
+    /// Number of codes to generate (1–500).
+    pub count: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListGiftCodesParams {
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+    /// "used" | "unused" — omit for all.
+    pub status: Option<String>,
+}
+
+/// GET /admin/gift-codes?limit=100&offset=0&status=unused
+///
+/// List gift codes. `status=unused` returns only redeemable codes;
+/// `status=used` returns only redeemed codes; omit for all.
+pub async fn get_admin_gift_codes(
+    State(state): State<AppState>,
+    Query(params): Query<ListGiftCodesParams>,
+) -> impl IntoResponse {
+    let limit  = params.limit.unwrap_or(100).min(500) as usize;
+    let offset = params.offset.unwrap_or(0) as usize;
+    let used_filter = match params.status.as_deref() {
+        Some("used")   => Some(true),
+        Some("unused") => Some(false),
+        _              => None,
+    };
+    let codes = state.store.list_gift_codes(limit, offset, used_filter);
+    Json(json!({
+        "codes":  codes,
+        "count":  codes.len(),
+        "limit":  limit,
+        "offset": offset,
+    }))
+    .into_response()
+}
+
+/// POST /admin/gift-codes/generate  { "count": 10 }
+///
+/// Generate up to 500 new random codes and return them. Codes are in the
+/// format XXXX-XXXX-XXXX using an unambiguous uppercase alphanumeric alphabet
+/// (no 0/O/I/1). Generated codes are immediately active in the DB.
+pub async fn post_admin_generate_gift_codes(
+    State(state): State<AppState>,
+    Json(body): Json<GenerateCodesRequest>,
+) -> impl IntoResponse {
+    let count = body.count.unwrap_or(10).clamp(1, 500);
+    let codes = state.store.generate_gift_codes(count);
+    Json(json!({
+        "ok":       true,
+        "generated": codes.len(),
+        "codes":     codes,
+    }))
+    .into_response()
+}
+
+/// DELETE /admin/gift-codes/{code}
+///
+/// Revoke an unused gift code. Returns 409 if the code has already been
+/// redeemed (to preserve the audit trail) and 404 if it does not exist.
+pub async fn delete_admin_gift_code(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+) -> impl IntoResponse {
+    let code = code.trim().to_uppercase();
+    // Check existence first so we can distinguish 404 vs 409.
+    let codes = state.store.list_gift_codes(1, 0, None);
+    // Use a direct validate check: validate_gift_code returns true only for unused codes.
+    let exists_unused = state.store.validate_gift_code(&code);
+    // If it doesn't validate as unused, check whether it exists at all.
+    let exists = exists_unused || codes.iter().any(|c| {
+        c.get("code").and_then(|v| v.as_str()) == Some(code.as_str())
+    });
+
+    if !exists {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "code not found"}))).into_response();
+    }
+    if !exists_unused {
+        return (StatusCode::CONFLICT, Json(json!({"error": "code already redeemed — cannot revoke"}))).into_response();
+    }
+    let ok = state.store.revoke_gift_code(&code);
+    if ok {
+        Json(json!({"ok": true, "revoked": code})).into_response()
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "revoke failed"}))).into_response()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PaginationParams {
     pub limit: Option<u64>,

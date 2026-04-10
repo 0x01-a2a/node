@@ -3833,6 +3833,10 @@ pub struct SponsorLaunchRequest {
     /// Base58-encoded Solana transaction signature of a SOL self-pay transfer.
     /// Required when gift_code_gating is enabled and no gift_code is provided.
     pub payment_txid: Option<String>,
+    /// Social-share proof fallback. When true, the user has shared a post about
+    /// the 01 protocol on social media. Bypasses code/payment gate.
+    /// Abuse is bounded by the per-agent dedup — one launch per agent ever.
+    pub social_proof: Option<bool>,
 }
 
 /// GET /sponsor/launch-info — returns gating policy so the mobile app can
@@ -3844,6 +3848,7 @@ pub async fn sponsor_launch_info(State(state): State<AppState>) -> impl IntoResp
         "self_pay_fee_lamports": state.self_pay_fee_lamports,
         "fee_wallet": state.self_pay_fee_wallet,
         "self_pay_available": self_pay_available,
+        "social_share_available": state.gift_code_gating,
     }))
 }
 
@@ -4086,13 +4091,21 @@ pub async fn sponsor_launch(
                 }
             },
             (None, None) => {
-                remove_sponsor_reservation(&state, &dedup_key);
-                return (StatusCode::PAYMENT_REQUIRED, Json(json!({
-                    "error": "gift code or payment required",
-                    "require_payment": true,
-                    "self_pay_fee_lamports": state.self_pay_fee_lamports,
-                    "fee_wallet": state.self_pay_fee_wallet,
-                }))).into_response();
+                // Social-share proof: user claims to have shared on social media.
+                // Bounded by per-agent dedup — one launch per agent ever.
+                if req.social_proof == Some(true) {
+                    tracing::info!("sponsor_launch: social-proof bypass for agent {}", &dedup_key[..8]);
+                    // Fall through to launch.
+                } else {
+                    remove_sponsor_reservation(&state, &dedup_key);
+                    return (StatusCode::PAYMENT_REQUIRED, Json(json!({
+                        "error": "gift code or payment required",
+                        "require_payment": true,
+                        "self_pay_fee_lamports": state.self_pay_fee_lamports,
+                        "fee_wallet": state.self_pay_fee_wallet,
+                        "social_share_available": true,
+                    }))).into_response();
+                }
             },
         }
     }

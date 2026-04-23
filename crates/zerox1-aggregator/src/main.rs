@@ -1,6 +1,7 @@
 use zerox1_aggregator::api;
 #[cfg(any(feature = "celo-settlement", feature = "base-settlement", feature = "sui-settlement"))]
 use zerox1_aggregator::billing;
+use zerox1_aggregator::llm_proxy;
 #[allow(unused_imports)]
 use zerox1_aggregator::mpp;
 use zerox1_aggregator::registry_8004;
@@ -110,6 +111,22 @@ struct Config {
     #[cfg(feature = "data-bounty")]
     #[arg(long, env = "AGGREGATOR_OPERATOR_SECRET")]
     operator_secret: Option<String>,
+
+    // ── Emergency relay (Twilio SMS) ──────────────────────────────────────
+
+    /// Twilio Account SID for emergency SMS relay.
+    /// When absent, /emergency/relay returns 501.
+    #[arg(long, env = "TWILIO_ACCOUNT_SID")]
+    twilio_account_sid: Option<String>,
+
+    /// Twilio Auth Token for emergency SMS relay.
+    #[arg(long, env = "TWILIO_AUTH_TOKEN")]
+    twilio_auth_token: Option<String>,
+
+    /// Twilio sender phone number (E.164) for emergency SMS.
+    /// Example: +15005550006
+    #[arg(long, env = "TWILIO_FROM_NUMBER")]
+    twilio_from_number: Option<String>,
 
     // ── Celo settlement ───────────────────────────────────────────────────
 
@@ -296,6 +313,11 @@ struct Config {
     #[arg(long, env = "BAGS_PARTNER_CONFIG")]
     bags_partner_config: Option<String>,
 
+    /// SOL to spend on an initial buy for each sponsored launch (lamports).
+    /// Default: 100_000_000 (0.1 SOL). Set to 0 to disable.
+    #[arg(long, env = "SPONSOR_INITIAL_BUY_LAMPORTS", default_value_t = 100_000_000)]
+    sponsor_initial_buy_lamports: u64,
+
     /// Enable gift-code gating for sponsored launches.
     /// When set, POST /sponsor/launch requires either a valid gift code or a
     /// confirmed self-pay SOL transaction. Default: false (everyone sponsored).
@@ -329,6 +351,16 @@ struct Config {
     /// Set via AGGREGATOR_ADMIN_KEY; keep separate from general api_keys.
     #[arg(long, env = "AGGREGATOR_ADMIN_KEY")]
     admin_api_key: Option<String>,
+
+    /// Gemini API key for the LLM proxy (POST /llm/chat).
+    /// When absent, the proxy returns 503 Service Unavailable.
+    #[arg(long, env = "GEMINI_API_KEY")]
+    gemini_api_key: Option<String>,
+
+    /// Daily token budget for free-tier agents (no 01PL holding).
+    /// Default: 100_000. Set to 0 to disable free tier entirely.
+    #[arg(long, env = "LLM_PROXY_FREE_DAILY_TOKENS", default_value_t = 100_000)]
+    llm_proxy_free_daily_tokens: u64,
 }
 
 #[tokio::main]
@@ -572,10 +604,20 @@ async fn main() -> anyhow::Result<()> {
         bags_partner_config: config.bags_partner_config,
         sponsor_launches: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         admin_api_key: config.admin_api_key,
+        sponsor_initial_buy_lamports: config.sponsor_initial_buy_lamports,
         apns_config,
         gift_code_gating: config.gift_code_gating,
         self_pay_fee_lamports: config.self_pay_fee_lamports,
         self_pay_fee_wallet: config.self_pay_fee_wallet,
+        twilio_account_sid: config.twilio_account_sid,
+        twilio_auth_token: config.twilio_auth_token,
+        twilio_from_number: config.twilio_from_number,
+        emergency_rate_limit: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        gemini_api_key: config.gemini_api_key,
+        llm_proxy_free_daily_tokens: config.llm_proxy_free_daily_tokens,
+        pl_cache: zerox1_aggregator::llm_proxy::PlCache::new(),
     };
 
     // Seed gift codes from config (idempotent — INSERT OR IGNORE).
@@ -593,6 +635,15 @@ async fn main() -> anyhow::Result<()> {
     let public_routes = Router::new()
         .route("/health", get(api::health))
         .route("/version", get(api::get_version))
+        // LLM proxy — agent-authenticated via agent_id in body, 01PL-gated tier
+        // Body capped at 128 KiB — enough for ~200 short messages; rejects prompt-stuffing.
+        .route(
+            "/llm/chat",
+            post(llm_proxy::post_llm_chat)
+                .layer(DefaultBodyLimit::max(128 * 1024)),
+        )
+        // Emergency relay — agent-authenticated via agent_id in body, rate-limited
+        .route("/emergency/relay", post(api::post_emergency_relay))
         // Internal push endpoints — use their own secrets
         .route("/ingest/envelope", post(api::ingest_envelope))
         .route("/hosting/register", post(api::post_hosting_register))

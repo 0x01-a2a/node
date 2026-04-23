@@ -60,6 +60,15 @@ fn test_state() -> AppState {
         apns_config: None,
         admin_api_key: None,
         reel_dir: None,
+        gift_code_gating: false,
+        self_pay_fee_lamports: 0,
+        self_pay_fee_wallet: None,
+        twilio_account_sid: None,
+        twilio_auth_token: None,
+        twilio_from_number: None,
+        emergency_rate_limit: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     }
 }
 

@@ -210,6 +210,11 @@ pub struct AppState {
     /// Must be set explicitly — never falls back to api_keys.
     pub admin_api_key: Option<String>,
 
+    /// SOL to spend on an initial buy at launch (lamports). 0 = no initial buy.
+    /// The sponsor wallet buys this amount from the bonding curve immediately
+    /// after the launch tx confirms, seeding liquidity and taking a position.
+    pub sponsor_initial_buy_lamports: u64,
+
     // ── Gift-code gating for sponsored launches ───────────────────────────
     /// When true, POST /sponsor/launch requires a valid gift code or a confirmed
     /// self-pay SOL transaction. When false (default), every agent is sponsored.
@@ -222,6 +227,25 @@ pub struct AppState {
     /// APNs push configuration for iOS wake notifications.
     /// None = APNs push disabled (iOS agents still sleep/wake via ntfy on Android).
     pub apns_config: Option<std::sync::Arc<ApnsConfig>>,
+
+    // ── Emergency relay (Twilio SMS) ──────────────────────────────────────
+    /// Twilio Account SID — required to send SMS alerts.
+    pub twilio_account_sid: Option<String>,
+    /// Twilio Auth Token — required to send SMS alerts.
+    pub twilio_auth_token: Option<String>,
+    /// Twilio sender phone number (E.164 format, e.g. "+15005550006").
+    pub twilio_from_number: Option<String>,
+    /// Rate limit: agent_id → last relay timestamp.
+    /// Prevents an agent from flooding contacts (max 1 relay per hour per agent).
+    pub emergency_rate_limit: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+
+    // ── LLM proxy (POST /llm/chat) ────────────────────────────────────────
+    /// Gemini API key for the LLM proxy. None = proxy disabled (returns 503).
+    pub gemini_api_key: Option<String>,
+    /// Max tokens per day for free-tier agents (no 01PL). Default 100_000.
+    pub llm_proxy_free_daily_tokens: u64,
+    /// In-memory 01PL eligibility cache (5-minute TTL per wallet).
+    pub pl_cache: crate::llm_proxy::PlCache,
 }
 
 /// Configuration for Apple Push Notification service (APNs).
@@ -4282,13 +4306,15 @@ pub async fn sponsor_launch(
     }
 
     // ── Step 3: create-launch-transaction ────────────────────────────────
-    // No initial buy — sponsor only covers the base launch cost.
-    let launch_body = json!({
+    let mut launch_body = json!({
         "ipfs": ipfs_uri,
         "tokenMint": token_mint,
         "wallet": sponsor_pubkey_str,
         "configKey": config_key,
     });
+    if state.sponsor_initial_buy_lamports > 0 {
+        launch_body["initialBuyLamports"] = state.sponsor_initial_buy_lamports.into();
+    }
 
     let launch_resp = client
         .post(format!("{BAGS_API_BASE}/token-launch/create-launch-transaction"))
@@ -4869,6 +4895,159 @@ pub fn build_router(state: AppState) -> axum::Router {
                 ]),
         )
         .with_state(state)
+}
+
+// ── Emergency relay ──────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub struct PostEmergencyRelayBody {
+    pub agent_id: String,
+    pub message: String,
+    pub contacts: Vec<EmergencyContact>,
+    pub location: Option<serde_json::Value>,
+    pub battery: Option<serde_json::Value>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub struct EmergencyContact {
+    pub name: String,
+    pub phone: String,
+}
+
+pub async fn post_emergency_relay(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    raw_body: axum::body::Bytes,
+) -> impl axum::response::IntoResponse {
+    use std::time::{Duration, Instant};
+
+    // Parse body from raw bytes — we keep the raw bytes for signature
+    // verification so we sign exactly what the client serialised, avoiding
+    // any JSON key-order divergence between the bridge and serde.
+    let body: PostEmergencyRelayBody = match serde_json::from_slice(&raw_body) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid JSON body"}))),
+    };
+
+    // Validate agent_id is a 64-char hex string (32-byte Ed25519 public key).
+    if body.agent_id.len() != 64 || !body.agent_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "agent_id must be 64-char hex"})),
+        );
+    }
+
+    // Require a valid Ed25519 signature over the raw request body.
+    // The bridge signs with the agent's identity key before posting.
+    // Header: X-Agent-Signature: <hex-encoded 64-byte signature>
+    let sig_hex = headers
+        .get("X-Agent-Signature")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if sig_hex.is_empty() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "X-Agent-Signature header required"})),
+        );
+    }
+    // Verify against the original raw bytes — not a re-serialised form.
+    if verify_request_signature(&body.agent_id, sig_hex, &raw_body).is_err() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "signature verification failed"})),
+        );
+    }
+
+    // Check Twilio is configured
+    let (sid, token, from) = match (
+        state.twilio_account_sid.as_deref(),
+        state.twilio_auth_token.as_deref(),
+        state.twilio_from_number.as_deref(),
+    ) {
+        (Some(s), Some(t), Some(f)) => (s.to_string(), t.to_string(), f.to_string()),
+        _ => {
+            return (
+                StatusCode::NOT_IMPLEMENTED,
+                Json(serde_json::json!({"error": "emergency SMS not configured"})),
+            );
+        }
+    };
+
+    // Rate limit: 1 relay per agent per hour.
+    // Evict expired entries on each insert to bound memory growth.
+    {
+        let mut rl = state.emergency_rate_limit.lock().unwrap();
+        if let Some(last) = rl.get(&body.agent_id) {
+            if last.elapsed() < Duration::from_secs(3600) {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({"error": "rate limited — max 1 relay per hour"})),
+                );
+            }
+        }
+        // Evict all expired entries before inserting the new one.
+        rl.retain(|_, ts| ts.elapsed() < Duration::from_secs(3600));
+        rl.insert(body.agent_id.clone(), Instant::now());
+    }
+
+    // Build SMS body
+    let mut sms_parts = vec![format!("EMERGENCY from agent {}: {}", &body.agent_id[..8.min(body.agent_id.len())], body.message)];
+    if let Some(loc) = &body.location {
+        if let (Some(lat), Some(lon)) = (loc.get("lat").and_then(|v| v.as_f64()), loc.get("lon").and_then(|v| v.as_f64())) {
+            sms_parts.push(format!("Location: https://maps.google.com/?q={:.5},{:.5}", lat, lon));
+        }
+    }
+    if let Some(batt) = &body.battery {
+        if let Some(pct) = batt.get("level").and_then(|v| v.as_f64()) {
+            sms_parts.push(format!("Battery: {:.0}%", pct * 100.0));
+        }
+    }
+    let sms_body = sms_parts.join(" | ");
+
+    // Send SMS to each contact via Twilio
+    let client = reqwest::Client::new();
+    let twilio_url = format!(
+        "https://api.twilio.com/2010-04-01/Accounts/{}/Messages.json",
+        sid
+    );
+    let mut notified = 0u32;
+    for contact in &body.contacts {
+        let phone = contact.phone.trim();
+        if phone.is_empty() {
+            continue;
+        }
+        let params = [
+            ("To", phone),
+            ("From", from.as_str()),
+            ("Body", sms_body.as_str()),
+        ];
+        match client
+            .post(&twilio_url)
+            .basic_auth(&sid, Some(&token))
+            .form(&params)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                notified += 1;
+            }
+            Ok(resp) => {
+                tracing::warn!(
+                    "Twilio SMS to {} failed: {}",
+                    phone,
+                    resp.status()
+                );
+            }
+            Err(e) => {
+                tracing::warn!("Twilio SMS to {} error: {}", phone, e);
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"ok": true, "notified": notified})),
+    )
 }
 
 #[cfg(test)]

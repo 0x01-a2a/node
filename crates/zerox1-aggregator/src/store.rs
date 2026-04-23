@@ -1231,6 +1231,15 @@ CREATE TABLE IF NOT EXISTS sponsor_launch_payments (
     used_at    INTEGER NOT NULL
 );
 ",
+// v21: LLM proxy usage tracking
+"
+CREATE TABLE IF NOT EXISTS llm_usage (
+    agent_id   TEXT    NOT NULL,
+    date       INTEGER NOT NULL,
+    tokens     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (agent_id, date)
+);
+",
 ];
 
 struct Db(rusqlite::Connection);
@@ -5488,6 +5497,34 @@ impl ReputationStore {
             // No DB configured — allow all (in-memory mode).
             true
         }
+    }
+    /// Returns tokens used today (UTC day = unix_secs/86400) by this agent.
+    pub fn llm_today_tokens(&self, agent_id: &str) -> u64 {
+        let db = self.db.lock().unwrap();
+        let Some(ref conn) = *db else { return 0 };
+        let day = (now_secs() / 86400) as i64;
+        conn.0.query_row(
+            "SELECT COALESCE(tokens, 0) FROM llm_usage WHERE agent_id = ?1 AND date = ?2",
+            rusqlite::params![agent_id, day],
+            |row| row.get::<_, i64>(0),
+        ).unwrap_or(0) as u64
+    }
+
+    /// Add `tokens` to today's usage counter for this agent. Returns new total.
+    pub fn llm_add_usage(&self, agent_id: &str, tokens: u64) -> u64 {
+        let db = self.db.lock().unwrap();
+        let Some(ref conn) = *db else { return 0 };
+        let day = (now_secs() / 86400) as i64;
+        let _ = conn.0.execute(
+            "INSERT INTO llm_usage (agent_id, date, tokens) VALUES (?1, ?2, ?3)
+             ON CONFLICT(agent_id, date) DO UPDATE SET tokens = tokens + excluded.tokens",
+            rusqlite::params![agent_id, day, tokens as i64],
+        );
+        conn.0.query_row(
+            "SELECT tokens FROM llm_usage WHERE agent_id = ?1 AND date = ?2",
+            rusqlite::params![agent_id, day],
+            |row| row.get::<_, i64>(0),
+        ).unwrap_or(0) as u64
     }
 } // end impl ReputationStore
 

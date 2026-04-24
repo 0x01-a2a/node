@@ -41,9 +41,6 @@ const PRESENCE_THRESHOLD: u64 = 5_000_000_000;
 /// How long to cache a wallet's eligibility result.
 const CACHE_TTL: Duration = Duration::from_secs(300);
 
-/// Maximum number of wallets accepted per request (hot + cold is at most 2; 5 is generous).
-const MAX_WALLETS: usize = 5;
-
 /// Maximum number of messages in a single request.
 const MAX_MESSAGES: usize = 200;
 
@@ -79,10 +76,6 @@ impl PlCache {
 pub struct LlmChatRequest {
     /// Hex-encoded agent Ed25519 pubkey — used for usage tracking.
     pub agent_id: String,
-    /// Solana wallet addresses to check for 01PL holding (hot and/or cold).
-    /// If empty or absent, the agent is treated as free-tier.
-    #[serde(default)]
-    pub wallets: Vec<String>,
     /// OpenAI-compatible messages array.
     pub messages: Vec<Value>,
     /// Optional max tokens cap.
@@ -149,7 +142,7 @@ async fn check_eligible(
     }
 
     // Fetch wallets not yet in cache.
-    let to_fetch: Vec<&String> = wallets.iter().filter(|w| cache.get(w).is_none()).collect();
+    let to_fetch: Vec<&str> = wallets.iter().map(String::as_str).filter(|w| cache.get(w).is_none()).collect();
 
     let mut combined: u64 = 0;
     for wallet in &to_fetch {
@@ -158,12 +151,10 @@ async fn check_eligible(
 
     let eligible = combined >= PRESENCE_THRESHOLD;
 
-    // Cache each wallet individually (same result — combined balance).
     for wallet in &to_fetch {
         cache.set(wallet, eligible);
     }
-    // Also cache wallets that had a cached false — their balance hasn't changed yet.
-    for wallet in wallets.iter().filter(|w| cache.get(w) == Some(false)) {
+    for wallet in wallets.iter().map(String::as_str).filter(|w| cache.get(w) == Some(false)) {
         cache.set(wallet, eligible);
     }
 
@@ -198,15 +189,6 @@ pub async fn post_llm_chat(
             .into_response();
     }
 
-    // ── Validate wallets ──────────────────────────────────────────────────
-    if req.wallets.len() > MAX_WALLETS {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("too many wallets (max {MAX_WALLETS})")})),
-        )
-            .into_response();
-    }
-
     // ── Validate messages ─────────────────────────────────────────────────
     if req.messages.is_empty() {
         return (
@@ -223,8 +205,23 @@ pub async fn post_llm_chat(
             .into_response();
     }
 
-    // ── Tier check ────────────────────────────────────────────────────────
-    let eligible = check_eligible(&state.http_client, &state.pl_cache, &req.wallets).await;
+    // ── 01 Pilot gate: agent must have a launched Bags token ─────────────
+    let has_token = state
+        .store
+        .get(&agent_id)
+        .and_then(|rep| rep.token_address)
+        .is_some();
+    if !has_token {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "LLM proxy requires a launched agent token (01 Pilot only)"})),
+        )
+            .into_response();
+    }
+
+    // ── Tier check — look up wallets registered by this agent ────────────
+    let registered_wallets = state.store.get_agent_wallets(&agent_id);
+    let eligible = check_eligible(&state.http_client, &state.pl_cache, &registered_wallets).await;
 
     if !eligible {
         let used = state.store.llm_today_tokens(&agent_id);

@@ -5050,6 +5050,99 @@ pub async fn post_emergency_relay(
     )
 }
 
+// ── Wallet ownership registration (POST /wallets/register) ───────────────────
+//
+// The agent submits a Solana wallet address and a signature of their agent_id
+// bytes produced by that wallet's Ed25519 key. The aggregator verifies the
+// signature and stores the binding. Subsequent LLM proxy requests use the
+// stored wallets — no signature needed per chat request.
+
+#[derive(serde::Deserialize)]
+pub struct RegisterWalletRequest {
+    /// Hex-encoded agent Ed25519 pubkey.
+    pub agent_id: String,
+    /// Base58-encoded Solana wallet address.
+    pub wallet_address: String,
+    /// Base64-encoded Ed25519 signature of the agent's 32-byte pubkey,
+    /// produced by the wallet's private key.
+    pub signature: String,
+}
+
+pub async fn post_register_wallet(
+    State(state): State<AppState>,
+    Json(req): Json<RegisterWalletRequest>,
+) -> impl axum::response::IntoResponse {
+    use base64::Engine as _;
+    use ed25519_dalek::{Verifier, VerifyingKey, Signature};
+
+    // Validate and decode agent_id.
+    let agent_id = req.agent_id.trim().to_lowercase();
+    let agent_pubkey_bytes: [u8; 32] = match hex::decode(&agent_id)
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+    {
+        Some(b) => b,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "agent_id must be a 64-char hex string"})),
+            ).into_response();
+        }
+    };
+
+    // Decode wallet address (base58 → 32-byte Ed25519 pubkey).
+    let addr_bytes: [u8; 32] = match bs58::decode(&req.wallet_address)
+        .into_vec()
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+    {
+        Some(b) => b,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "wallet_address must be a valid base58 Solana address"})),
+            ).into_response();
+        }
+    };
+
+    // Decode signature (base64 → 64 bytes).
+    let sig_bytes: [u8; 64] = match base64::engine::general_purpose::STANDARD
+        .decode(&req.signature)
+        .ok()
+        .and_then(|b| <[u8; 64]>::try_from(b).ok())
+    {
+        Some(b) => b,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "signature must be base64-encoded (64 bytes)"})),
+            ).into_response();
+        }
+    };
+
+    // Verify: wallet signed the agent's pubkey bytes.
+    let vk = match VerifyingKey::from_bytes(&addr_bytes) {
+        Ok(k) => k,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "wallet_address is not a valid Ed25519 public key"})),
+            ).into_response();
+        }
+    };
+    let sig = Signature::from_bytes(&sig_bytes);
+    if vk.verify(&agent_pubkey_bytes, &sig).is_err() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "signature verification failed"})),
+        ).into_response();
+    }
+
+    state.store.register_agent_wallet(&agent_id, &req.wallet_address);
+
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

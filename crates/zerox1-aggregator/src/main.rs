@@ -642,6 +642,8 @@ async fn main() -> anyhow::Result<()> {
             post(llm_proxy::post_llm_chat)
                 .layer(DefaultBodyLimit::max(128 * 1024)),
         )
+        // Wallet ownership registration — sign once, no wallet proof needed per chat request.
+        .route("/wallets/register", post(api::post_register_wallet))
         // Emergency relay — agent-authenticated via agent_id in body, rate-limited
         .route("/emergency/relay", post(api::post_emergency_relay))
         // Internal push endpoints — use their own secrets

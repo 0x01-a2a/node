@@ -1240,6 +1240,15 @@ CREATE TABLE IF NOT EXISTS llm_usage (
     PRIMARY KEY (agent_id, date)
 );
 ",
+    // v22: Verified wallet ownership registry for LLM proxy tier checks.
+    "
+CREATE TABLE IF NOT EXISTS agent_wallets (
+    agent_id       TEXT NOT NULL,
+    wallet_address TEXT NOT NULL,
+    registered_at  INTEGER NOT NULL,
+    PRIMARY KEY (agent_id, wallet_address)
+);
+",
 ];
 
 struct Db(rusqlite::Connection);
@@ -5525,6 +5534,33 @@ impl ReputationStore {
             rusqlite::params![agent_id, day],
             |row| row.get::<_, i64>(0),
         ).unwrap_or(0) as u64
+    }
+    /// Store a verified wallet → agent binding. Idempotent.
+    pub fn register_agent_wallet(&self, agent_id: &str, wallet_address: &str) {
+        let db = self.db.lock().unwrap();
+        let Some(ref conn) = *db else { return };
+        let _ = conn.0.execute(
+            "INSERT OR IGNORE INTO agent_wallets (agent_id, wallet_address, registered_at)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![agent_id, wallet_address, now_secs() as i64],
+        );
+    }
+
+    /// Return all verified wallet addresses for an agent.
+    pub fn get_agent_wallets(&self, agent_id: &str) -> Vec<String> {
+        let db = self.db.lock().unwrap();
+        let Some(ref conn) = *db else { return vec![] };
+        let mut stmt = match conn.0.prepare(
+            "SELECT wallet_address FROM agent_wallets WHERE agent_id = ?1",
+        ) {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+        let result: Vec<String> = match stmt.query_map(rusqlite::params![agent_id], |row| row.get::<_, String>(0)) {
+            Ok(rows) => rows.flatten().collect(),
+            Err(_) => vec![],
+        };
+        result
     }
 } // end impl ReputationStore
 

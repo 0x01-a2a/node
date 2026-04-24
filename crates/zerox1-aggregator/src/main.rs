@@ -358,8 +358,8 @@ struct Config {
     gemini_api_key: Option<String>,
 
     /// Daily token budget for free-tier agents (no 01PL holding).
-    /// Default: 500_000. Set to 0 to disable free tier entirely.
-    #[arg(long, env = "LLM_PROXY_FREE_DAILY_TOKENS", default_value_t = 500_000)]
+    /// Default: 100_000. Set to 0 to disable free tier entirely.
+    #[arg(long, env = "LLM_PROXY_FREE_DAILY_TOKENS", default_value_t = 100_000)]
     llm_proxy_free_daily_tokens: u64,
 }
 

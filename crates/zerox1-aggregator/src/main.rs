@@ -361,6 +361,12 @@ struct Config {
     /// Default: 100_000. Set to 0 to disable free tier entirely.
     #[arg(long, env = "LLM_PROXY_FREE_DAILY_TOKENS", default_value_t = 100_000)]
     llm_proxy_free_daily_tokens: u64,
+
+    /// Hard global daily token budget across ALL agents (circuit breaker).
+    /// Free-tier requests are blocked once this is hit; 01PL-eligible agents bypass it.
+    /// Default: 50_000_000 (~$7.50/day at Gemini 3 Flash pricing).
+    #[arg(long, env = "LLM_GLOBAL_DAILY_BUDGET", default_value_t = 50_000_000)]
+    llm_global_daily_budget: u64,
 }
 
 #[tokio::main]
@@ -617,6 +623,8 @@ async fn main() -> anyhow::Result<()> {
         )),
         gemini_api_key: config.gemini_api_key,
         llm_proxy_free_daily_tokens: config.llm_proxy_free_daily_tokens,
+        llm_global_daily_budget: config.llm_global_daily_budget,
+        token_fees_cache: zerox1_aggregator::llm_proxy::TokenFeesCache::new(),
         pl_cache: zerox1_aggregator::llm_proxy::PlCache::new(),
     };
 

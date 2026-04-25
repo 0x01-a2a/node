@@ -244,8 +244,14 @@ pub struct AppState {
     pub gemini_api_key: Option<String>,
     /// Max tokens per day for free-tier agents (no 01PL). Default 100_000.
     pub llm_proxy_free_daily_tokens: u64,
+    /// Hard global daily token budget across ALL agents (circuit breaker).
+    /// When hit, all free-tier requests are rejected until the next UTC day.
+    /// 01PL-eligible agents are unaffected. Default 50_000_000 (~$7.50/day).
+    pub llm_global_daily_budget: u64,
     /// In-memory 01PL eligibility cache (5-minute TTL per wallet).
     pub pl_cache: crate::llm_proxy::PlCache,
+    /// In-memory Bags.fm lifetime fees cache (1-hour TTL per mint).
+    pub token_fees_cache: crate::llm_proxy::TokenFeesCache,
 }
 
 /// Configuration for Apple Push Notification service (APNs).

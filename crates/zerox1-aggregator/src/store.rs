@@ -5519,6 +5519,18 @@ impl ReputationStore {
         ).unwrap_or(0) as u64
     }
 
+    /// Returns total tokens used today across ALL agents (global circuit breaker check).
+    pub fn llm_global_today_tokens(&self) -> u64 {
+        let db = self.db.lock().unwrap();
+        let Some(ref conn) = *db else { return 0 };
+        let day = (now_secs() / 86400) as i64;
+        conn.0.query_row(
+            "SELECT COALESCE(SUM(tokens), 0) FROM llm_usage WHERE date = ?1",
+            rusqlite::params![day],
+            |row| row.get::<_, i64>(0),
+        ).unwrap_or(0) as u64
+    }
+
     /// Add `tokens` to today's usage counter for this agent. Returns new total.
     pub fn llm_add_usage(&self, agent_id: &str, tokens: u64) -> u64 {
         let db = self.db.lock().unwrap();

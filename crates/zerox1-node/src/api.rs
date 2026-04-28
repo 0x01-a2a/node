@@ -495,6 +495,9 @@ pub struct ApiInner {
     pub node_signing_key: Arc<SigningKey>,
     /// Shared HTTP client for registry RPC calls.
     pub(crate) http_client: reqwest::Client,
+    /// Optional aggregator URL for LLM proxy forwarding (/chat/completions → aggregator /llm/chat).
+    /// Set when --aggregator-url is configured; used by zeroclaw "default" provider.
+    pub(crate) llm_proxy_url: Option<String>,
     /// Optional aggregator URL for reporting Bags claim events.
     #[cfg(feature = "bags")]
     pub(crate) aggregator_url: Option<String>,
@@ -615,6 +618,7 @@ impl ApiState {
         #[cfg(feature = "trade")] jupiter_fee_account: Option<String>,
         #[cfg(feature = "trade")] launchlab_share_fee_wallet: Option<String>,
         http_client: reqwest::Client,
+        llm_proxy_url: Option<String>,
         #[cfg(feature = "bags")] aggregator_url: Option<String>,
         #[cfg(feature = "bags")] aggregator_secret: Option<String>,
         registry_8004_collection: Option<String>,
@@ -697,6 +701,7 @@ impl ApiState {
             pending_swaps: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             node_signing_key,
             http_client,
+            llm_proxy_url,
             #[cfg(feature = "bags")]
             aggregator_url,
             #[cfg(feature = "bags")]
@@ -993,7 +998,10 @@ pub fn build_router(state: ApiState, cors_origins: Vec<String>) -> axum::Router 
         // Task audit log
         .route("/tasks/log", post(task_log_insert).get(task_log_list))
         .route("/tasks/log/{id}/shared", patch(task_log_mark_shared))
-        .route("/tasks/log/{id}", delete(task_log_delete));
+        .route("/tasks/log/{id}", delete(task_log_delete))
+        // LLM proxy relay — forwards to aggregator /llm/chat with agent_id injected.
+        // Used by zeroclaw "default" provider (custom:http://127.0.0.1:9090).
+        .route("/chat/completions", post(chat_completions_relay));
 
     #[cfg(feature = "trade")]
     let router = router
@@ -5994,7 +6002,7 @@ async fn agent_reload(headers: HeaderMap, State(state): State<ApiState>) -> Resp
 /// Validate a skill name: lowercase alphanumeric + hyphens + underscores,
 /// no path separators, no leading hyphens, 1–64 chars.
 const RESERVED_SKILL_NAMES: &[&str] = &[
-    "zerox1-mesh", "bags", "trade", "launchlab", "cpmm",
+    "bags", "trade", "launchlab", "cpmm",
     "health", "skill_manager", "web", "phone-ui",
 ];
 
@@ -6607,6 +6615,67 @@ async fn task_log_delete(
             Json(serde_json::json!({"error": format!("{e}")})),
         )
             .into_response(),
+    }
+}
+
+// ── LLM proxy relay ───────────────────────────────────────────────────────────
+//
+// Zeroclaw with `default_provider = "custom:http://127.0.0.1:9090"` calls
+// `POST http://127.0.0.1:9090/chat/completions` with a standard OpenAI-compat
+// body.  This handler injects the node's agent_id and forwards to the
+// aggregator's `/llm/chat` endpoint, which gates access by Bags.fm token
+// trading history and 01PL balance.
+//
+// Authentication: loopback-only (bound to 127.0.0.1); no secret needed because
+// only zeroclaw running on this device can reach port 9090 from localhost.
+
+async fn chat_completions_relay(
+    State(state): State<ApiState>,
+    Json(mut body): Json<serde_json::Value>,
+) -> Response {
+    let Some(base) = state.0.llm_proxy_url.as_deref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "LLM proxy not configured — set aggregator URL to enable default provider"})),
+        )
+            .into_response();
+    };
+
+    // Inject this node's agent_id so the aggregator can gate access.
+    let agent_id = hex::encode(state.0.self_agent);
+    body["agent_id"] = serde_json::json!(agent_id);
+
+    let url = format!("{}/llm/chat", base.trim_end_matches('/'));
+    match state
+        .0
+        .http_client
+        .post(&url)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+    {
+        Ok(r) => {
+            let status = r.status();
+            let resp_body: serde_json::Value = r
+                .json()
+                .await
+                .unwrap_or_else(|_| serde_json::json!({"error": "upstream response invalid"}));
+            (
+                StatusCode::from_u16(status.as_u16())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(resp_body),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::warn!("chat_completions_relay: aggregator request failed: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": "upstream request failed"})),
+            )
+                .into_response()
+        }
     }
 }
 

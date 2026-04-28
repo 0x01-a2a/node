@@ -163,6 +163,22 @@ pub extern "C" fn zerox1_node_start(
             config.aggregator_url = Some(agg_url);
         }
         config.keypair_path = PathBuf::from(&keypair_path_str);
+        // Skill workspace: iOS stores zeroclaw files under <data_dir>/zeroclaw/workspace
+        // (matching zeroclawWorkspaceDir in NodeService.swift). Android passes --skill-workspace
+        // directly via CLI args, so this is an iOS-only default.
+        // Prefer <data_dir>/zeroclaw/workspace; fall back to <data_dir>/workspace if it exists
+        // (future-proofing for layout changes).
+        if config.skill_workspace.is_none() {
+            let ios_workspace = PathBuf::from(format!("{}/zeroclaw/workspace", data_dir_str));
+            let android_workspace = PathBuf::from(format!("{}/workspace", data_dir_str));
+            let workspace = if android_workspace.exists() {
+                android_workspace
+            } else {
+                ios_workspace
+            };
+            let _ = std::fs::create_dir_all(&workspace);
+            config.skill_workspace = Some(workspace);
+        }
 
         // -- Resolve / generate identity ------------------------------------
         let identity = if let Some(ref b58) = identity_key_str {

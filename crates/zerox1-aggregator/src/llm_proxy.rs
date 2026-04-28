@@ -70,6 +70,12 @@ const MAX_MESSAGES: usize = 200;
 #[derive(Clone)]
 pub struct PlCache(pub Arc<Mutex<HashMap<String, (bool, Instant)>>>);
 
+impl Default for PlCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PlCache {
     pub fn new() -> Self {
         Self(Arc::new(Mutex::new(HashMap::new())))
@@ -97,6 +103,12 @@ impl PlCache {
 /// Value is the derived daily LLM token allowance, or 0 if no trading history.
 #[derive(Clone)]
 pub struct TokenFeesCache(pub Arc<Mutex<HashMap<String, (u64, Instant)>>>);
+
+impl Default for TokenFeesCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl TokenFeesCache {
     pub fn new() -> Self {
@@ -334,7 +346,7 @@ pub async fn post_llm_chat(
     };
 
     // ── 01PL eligibility — checked before fees gate ───────────────────────
-    // Holders of ≥ 5,000 01PL bypass the trading-history requirement and all
+    // Holders of ≥ 500,000 01PL bypass the trading-history requirement and all
     // daily caps. Their token holding is the signal of platform commitment.
     let registered_wallets = state.store.get_agent_wallets(&agent_id);
     let eligible = check_eligible(&state.http_client, &state.pl_cache, &registered_wallets).await;
@@ -372,7 +384,7 @@ pub async fn post_llm_chat(
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({
-                    "error": "global daily LLM budget reached — try again tomorrow or hold 5000 01PL for unlimited access",
+                    "error": "global daily LLM budget reached — try again tomorrow or hold 500,000 01PL for unlimited access",
                     "resets": "UTC midnight",
                 })),
             )
@@ -389,7 +401,7 @@ pub async fn post_llm_chat(
                     "used": used,
                     "limit": fee_allowance,
                     "hint": "more trading volume on your token increases your daily allowance",
-                    "upgrade": "hold 5000 01PL for unlimited access",
+                    "upgrade": "hold 500,000 01PL for unlimited access",
                 })),
             )
                 .into_response();

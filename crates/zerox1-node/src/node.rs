@@ -367,6 +367,7 @@ impl Zx01Node {
             #[cfg(feature = "trade")]
             config.launchlab_share_fee_wallet.clone(),
             http_client.clone(),
+            config.aggregator_url.clone(),
             #[cfg(feature = "bags")]
             config.aggregator_url.clone(),
             #[cfg(feature = "bags")]

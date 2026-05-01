@@ -2471,7 +2471,7 @@ impl Zx01Node {
                 .iter()
                 .map(|(k, ts)| (*k, ts.elapsed()))
                 .collect();
-            by_age.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+            by_age.sort_unstable_by_key(|b| std::cmp::Reverse(b.1));
             for (k, _) in by_age.into_iter().take(over) {
                 self.reg8004_failures.remove(&k);
             }

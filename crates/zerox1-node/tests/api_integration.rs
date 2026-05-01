@@ -9,13 +9,12 @@ use axum::{
 use http_body_util::BodyExt;
 use rand::rngs::OsRng;
 use serde_json::Value;
-use std::{collections::HashSet, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 use tower::ServiceExt;
 use zerox1_node::api::{build_router, ApiState};
 
 fn make_state() -> ApiState {
     let signing_key = Arc::new(ed25519_dalek::SigningKey::generate(&mut OsRng));
-    let exempt_agents = Arc::new(std::sync::RwLock::new(HashSet::new()));
 
     let (state, _outbound_rx, _hosted_outbound_rx, _sub_topic_rx) = ApiState::new(
         [0u8; 32],
@@ -26,11 +25,13 @@ fn make_state() -> ApiState {
         "http://localhost:1".to_string(),
         "http://localhost:1".to_string(),
         reqwest::Client::new(),
+        #[cfg(feature = "pilot")]
         None,           // llm_proxy_url
         None,           // registry_8004_collection
         signing_key,
         None,           // kora
-        exempt_agents,
+        #[cfg(feature = "pilot")]
+        Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())), // exempt_agents
         PathBuf::from("/tmp/test-exempt-api"),
         None,           // skill_workspace
         None,           // mpp

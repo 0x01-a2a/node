@@ -19,30 +19,40 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(feature = "pilot")]
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::Deserialize;
-use serde_json::{json, Value};
+#[cfg(feature = "pilot")]
+use serde_json::json;
+use serde_json::Value;
 
+#[cfg(feature = "pilot")]
 use crate::api::AppState;
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
+#[cfg(feature = "pilot")]
 const GEMINI_COMPAT_URL: &str =
     "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
 
 /// Model used for all proxy requests — not configurable by callers.
+#[cfg(feature = "pilot")]
 const GEMINI_MODEL: &str = "gemini-3-flash-preview";
 
 /// Solana mainnet RPC endpoint for 01PL balance checks.
+#[cfg(feature = "pilot")]
 const SOL_RPC: &str = "https://api.mainnet-beta.solana.com";
 
 /// 01PL token mint on Solana mainnet.
+#[cfg(feature = "pilot")]
 const PILOT_TOKEN_MINT: &str = "2MchUMEvadoTbSvC4b1uLAmEhv8Yz8ngwEt24q21BAGS";
 
 /// Minimum 01PL balance for uncapped access (500 000 tokens × 10^6 decimals).
+#[cfg(feature = "pilot")]
 const PRESENCE_THRESHOLD: u64 = 500_000_000_000;
 
 /// How long to cache a wallet's 01PL eligibility result.
+#[cfg(feature = "pilot")]
 const CACHE_TTL: Duration = Duration::from_secs(300);
 
 /// How long to cache a token's lifetime fees result.
@@ -63,6 +73,7 @@ const MIN_DERIVED_DAILY_TOKENS: u64 = 1_000;
 const LAMPORTS_PER_DAILY_TOKEN: u64 = 100;
 
 /// Maximum number of messages in a single request.
+#[cfg(feature = "pilot")]
 const MAX_MESSAGES: usize = 200;
 
 // ── In-memory 01PL eligibility cache ──────────────────────────────────────
@@ -81,6 +92,7 @@ impl PlCache {
         Self(Arc::new(Mutex::new(HashMap::new())))
     }
 
+    #[cfg(feature = "pilot")]
     fn get(&self, wallet: &str) -> Option<bool> {
         let map = self.0.lock().unwrap();
         if let Some((eligible, ts)) = map.get(wallet) {
@@ -91,6 +103,7 @@ impl PlCache {
         None
     }
 
+    #[cfg(feature = "pilot")]
     fn set(&self, wallet: &str, eligible: bool) {
         let mut map = self.0.lock().unwrap();
         map.insert(wallet.to_string(), (eligible, Instant::now()));
@@ -215,6 +228,7 @@ pub struct LlmChatRequest {
 
 // ── 01PL eligibility check ────────────────────────────────────────────────
 
+#[cfg(feature = "pilot")]
 async fn fetch_token_balance(
     client: &reqwest::Client,
     wallet: &str,
@@ -256,6 +270,7 @@ async fn fetch_token_balance(
     total
 }
 
+#[cfg(feature = "pilot")]
 async fn check_eligible(
     client: &reqwest::Client,
     cache: &PlCache,

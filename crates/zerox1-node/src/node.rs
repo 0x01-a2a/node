@@ -367,6 +367,7 @@ impl Zx01Node {
             #[cfg(feature = "trade")]
             config.launchlab_share_fee_wallet.clone(),
             http_client.clone(),
+            #[cfg(feature = "pilot")]
             config.aggregator_url.clone(),
             #[cfg(feature = "bags")]
             config.aggregator_url.clone(),
@@ -375,6 +376,7 @@ impl Zx01Node {
             config.registry_8004_collection.clone(),
             std::sync::Arc::new(identity.signing_key.clone()),
             kora.clone(),
+            #[cfg(feature = "pilot")]
             std::sync::Arc::clone(&exempt_agents),
             exempt_persist_path,
             #[cfg(feature = "bags")]
@@ -410,7 +412,7 @@ impl Zx01Node {
 
         // Load portfolio history from disk
         let portfolio_path = config.log_dir.join("portfolio_history.json");
-        let _ = api.load_portfolio_history(portfolio_path).await;
+        let _: Result<_, _> = api.load_portfolio_history(portfolio_path).await;
 
         let batch = BatchAccumulator::new(epoch, 0);
         let logger = EnvelopeLogger::new(log_dir, epoch);

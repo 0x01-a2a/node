@@ -28,11 +28,13 @@
 //!   POST /registry/8004/register-submit   — Inject owner sig + broadcast to Solana
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     net::SocketAddr,
     path::PathBuf,
     sync::Arc,
 };
+#[cfg(feature = "pilot")]
+use std::collections::HashSet;
 
 use axum::{
     extract::{
@@ -295,10 +297,12 @@ pub struct InboundEnvelope {
 // ============================================================================
 
 /// Hard cap on concurrent hosted sessions to prevent memory DoS.
+#[cfg(feature = "pilot")]
 const MAX_HOSTED_SESSIONS: usize = 10_000;
 /// Sessions older than this are evicted and their tokens rejected.
 const SESSION_TTL_SECS: u64 = 7 * 24 * 3600;
 /// Maximum outbound sends per 60-second window per session.
+#[cfg(feature = "pilot")]
 const MAX_SENDS_PER_MINUTE: u32 = 60;
 /// Maximum API `/envelopes/send` requests per 60-second window.
 const MAX_API_SENDS_PER_MINUTE: u32 = 120;
@@ -479,6 +483,7 @@ pub struct ApiInner {
     /// Global rate limit window for `/envelopes/send`.
     send_rate_limit: Mutex<RateLimitWindow>,
     /// Global rate limit window for `/hosted/register`.
+    #[cfg(feature = "pilot")]
     hosted_register_rate_limit: Mutex<RateLimitWindow>,
     /// Global rate limit window for `/registry/8004/register-prepare`.
     registry_prepare_rate_limit: Mutex<RateLimitWindow>,
@@ -497,6 +502,7 @@ pub struct ApiInner {
     pub(crate) http_client: reqwest::Client,
     /// Optional aggregator URL for LLM proxy forwarding (/chat/completions → aggregator /llm/chat).
     /// Set when --aggregator-url is configured; used by zeroclaw "default" provider.
+    #[cfg(feature = "pilot")]
     pub(crate) llm_proxy_url: Option<String>,
     /// Optional aggregator URL for reporting Bags claim events.
     #[cfg(feature = "bags")]
@@ -536,8 +542,10 @@ pub struct ApiInner {
     current_slot: core::sync::atomic::AtomicU64,
     /// Agent IDs exempt from stake/lease/registration checks.
     /// Shared with Node so either side can read it; admin API writes via POST/DELETE /admin/exempt.
+    #[cfg(feature = "pilot")]
     exempt_agents: Arc<std::sync::RwLock<HashSet<[u8; 32]>>>,
     /// Path to persist exempt_agents across restarts (log_dir/exempt_agents.json).
+    /// Also used as a log_dir anchor by agent_profile_read/write.
     exempt_persist_path: PathBuf,
 
     // Portfolio state
@@ -559,6 +567,7 @@ pub struct ApiInner {
     /// Rate limit for POST /identity/sign — max 60 signs per minute.
     sign_rate_limit: Mutex<RateLimitWindow>,
     /// Rate limit for POST /agent/reload — max 3 reloads per minute.
+    #[cfg(feature = "pilot")]
     agent_reload_rate_limit: Mutex<RateLimitWindow>,
     /// Daily budget for Kora gas sponsorship — 100 uses per 24-hour window.
     #[allow(dead_code)]
@@ -618,13 +627,13 @@ impl ApiState {
         #[cfg(feature = "trade")] jupiter_fee_account: Option<String>,
         #[cfg(feature = "trade")] launchlab_share_fee_wallet: Option<String>,
         http_client: reqwest::Client,
-        llm_proxy_url: Option<String>,
+        #[cfg(feature = "pilot")] llm_proxy_url: Option<String>,
         #[cfg(feature = "bags")] aggregator_url: Option<String>,
         #[cfg(feature = "bags")] aggregator_secret: Option<String>,
         registry_8004_collection: Option<String>,
         node_signing_key: Arc<SigningKey>,
         kora: Option<KoraClient>,
-        exempt_agents: Arc<std::sync::RwLock<HashSet<[u8; 32]>>>,
+        #[cfg(feature = "pilot")] exempt_agents: Arc<std::sync::RwLock<HashSet<[u8; 32]>>>,
         exempt_persist_path: PathBuf,
         #[cfg(feature = "bags")] bags_config: Option<Arc<crate::bags::BagsConfig>>,
         #[cfg(feature = "bags")] bags_launch: Option<Arc<crate::bags::BagsLaunchClient>>,
@@ -673,6 +682,7 @@ impl ApiState {
                 window_start: now_secs(),
                 count: 0,
             }),
+            #[cfg(feature = "pilot")]
             hosted_register_rate_limit: Mutex::new(RateLimitWindow {
                 window_start: now_secs(),
                 count: 0,
@@ -701,6 +711,7 @@ impl ApiState {
             pending_swaps: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             node_signing_key,
             http_client,
+            #[cfg(feature = "pilot")]
             llm_proxy_url,
             #[cfg(feature = "bags")]
             aggregator_url,
@@ -711,6 +722,7 @@ impl ApiState {
             kora,
             registry_8004_collection,
             current_slot: core::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "pilot")]
             exempt_agents,
             exempt_persist_path,
             portfolio_history: RwLock::new(PortfolioHistory::default()),
@@ -724,6 +736,7 @@ impl ApiState {
                 window_start: now_secs(),
                 count: 0,
             }),
+            #[cfg(feature = "pilot")]
             agent_reload_rate_limit: Mutex::new(RateLimitWindow {
                 window_start: now_secs(),
                 count: 0,
@@ -4061,6 +4074,7 @@ struct MppVerifyRequest {
 ///
 /// Returns `None` if access is allowed (gate disabled or agent has paid).
 /// Returns `Some(Response)` with HTTP 402 if payment is required.
+#[cfg(feature = "pilot")]
 async fn check_mpp_gate(agent_id_hex: &str, state: &ApiInner) -> Option<Response> {
     let mpp = match &state.mpp {
         Some(m) if m.enabled => m,
@@ -4491,6 +4505,7 @@ async fn wallet_send_handler(
 // Changes are persisted to log_dir/exempt_agents.json and survive node restarts.
 // ============================================================================
 
+#[cfg(feature = "pilot")]
 fn save_exempt_agents(path: &std::path::Path, set: &HashSet<[u8; 32]>) {
     let ids: Vec<String> = set.iter().map(hex::encode).collect();
     match serde_json::to_string(&ids) {
@@ -4504,6 +4519,7 @@ fn save_exempt_agents(path: &std::path::Path, set: &HashSet<[u8; 32]>) {
 }
 
 /// GET /admin/exempt — list all currently exempt agent IDs.
+#[cfg(feature = "pilot")]
 async fn admin_exempt_list(headers: HeaderMap, State(state): State<ApiState>) -> Response {
     if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
         return resp;
@@ -4515,6 +4531,7 @@ async fn admin_exempt_list(headers: HeaderMap, State(state): State<ApiState>) ->
 
 /// POST /admin/exempt — add an agent ID to the exempt set.
 /// Body: `{ "agent_id": "<64-hex-char-id>" }`
+#[cfg(feature = "pilot")]
 async fn admin_exempt_add(
     headers: HeaderMap,
     State(state): State<ApiState>,
@@ -4560,6 +4577,7 @@ async fn admin_exempt_add(
 }
 
 /// DELETE /admin/exempt/{agent_id} — remove an agent ID from the exempt set.
+#[cfg(feature = "pilot")]
 async fn admin_exempt_remove(
     headers: HeaderMap,
     Path(agent_id): Path<String>,
@@ -5879,8 +5897,10 @@ async fn bags_dexscreener_list_handler(
 // Agent process management — skill hot-reload
 // ============================================================================
 
+#[cfg(feature = "pilot")]
 const MAX_AGENT_RELOAD_PER_MINUTE: u32 = 3;
 
+#[cfg(feature = "pilot")]
 #[derive(Deserialize)]
 struct RegisterPidRequest {
     pid: u32,
@@ -5888,7 +5908,7 @@ struct RegisterPidRequest {
 
 /// Return the real UID of `pid` by reading /proc/{pid}/status.
 /// Returns `None` if the file cannot be read or parsed.
-#[cfg(unix)]
+#[cfg(all(feature = "pilot", unix))]
 fn proc_uid(pid: u32) -> Option<u32> {
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     for line in status.lines() {

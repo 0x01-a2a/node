@@ -13,14 +13,15 @@ use tokio::sync::broadcast;
 use crate::registry_8004::Registry8004Client;
 use crate::store::{
     ActivityEvent, AgentProfile, AgentRegistryEntry, CapabilityMatch, DisputeRecord,
-    HostingNode, IngestEvent, NetworkStats, OwnerStatus, PendingMessage, ReputationStore,
+    HostingNode, IngestEvent, NetworkStats, OwnerStatus, ReputationStore,
 };
+#[cfg(feature = "pilot")]
+use crate::store::PendingMessage;
 #[cfg(feature = "data-bounty")]
 use crate::store::Campaign;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tiny_keccak::{Hasher, Keccak};
 
 
@@ -845,6 +846,7 @@ pub async fn get_agent_profile(
 // Operator onboarding profile
 // ============================================================================
 
+#[cfg(feature = "pilot")]
 #[derive(Deserialize)]
 pub struct OnboardingPayload {
     #[serde(default)]
@@ -1218,6 +1220,7 @@ pub async fn get_pending(
 /// notification is fired immediately to wake the app.
 /// Requirement: Validate that the sender (body.from) matches the signature (HIGH-9).
 /// Maximum payload size for POST /agents/{agent_id}/pending (64 KiB).
+#[cfg(feature = "pilot")]
 const MAX_PENDING_PAYLOAD_BYTES: usize = 64 * 1024;
 
 #[cfg(feature = "pilot")]
@@ -1459,6 +1462,7 @@ async fn send_ntfy_push(
 /// APNs requires ES256 signed with the Apple P-256 .p8 auth key.
 /// Header: { alg: ES256, kid: KEY_ID }
 /// Claims: { iss: TEAM_ID, iat: <unix_secs> }
+#[cfg(feature = "pilot")]
 fn make_apns_jwt(config: &ApnsConfig) -> anyhow::Result<String> {
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 

@@ -1,6 +1,7 @@
 use zerox1_aggregator::api;
 #[cfg(any(feature = "celo-settlement", feature = "base-settlement", feature = "sui-settlement"))]
 use zerox1_aggregator::billing;
+#[cfg(feature = "pilot")]
 use zerox1_aggregator::llm_proxy;
 #[allow(unused_imports)]
 use zerox1_aggregator::mpp;
@@ -443,6 +444,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── APNs config ───────────────────────────────────────────────────────
+    #[cfg(feature = "pilot")]
     let apns_config: Option<std::sync::Arc<api::ApnsConfig>> = match (
         &config.apns_key_path,
         &config.apns_team_id,

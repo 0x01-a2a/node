@@ -1249,6 +1249,16 @@ CREATE TABLE IF NOT EXISTS agent_wallets (
     PRIMARY KEY (agent_id, wallet_address)
 );
 ",
+    // v23: Operator onboarding profile answers.
+    "
+CREATE TABLE IF NOT EXISTS agent_onboarding (
+    agent_id   TEXT    PRIMARY KEY,
+    motivation TEXT    NOT NULL DEFAULT '',
+    use_cases  TEXT    NOT NULL DEFAULT '[]',
+    referral   TEXT    NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+);
+",
 ];
 
 struct Db(rusqlite::Connection);
@@ -1594,14 +1604,26 @@ impl Db {
         rows.collect()
     }
 
-    /// Get all registered agents from BEACON tracking.
-    fn get_registry(&self) -> rusqlite::Result<Vec<AgentRegistryEntry>> {
+    /// Get registered agents from BEACON tracking.
+    ///
+    /// `active_only`: when true (default), returns only agents seen within the
+    /// last 48 hours so callers see a live view of the network. Pass false to
+    /// include all historical entries (admin / analytics).
+    fn get_registry(&self, active_only: bool) -> rusqlite::Result<Vec<AgentRegistryEntry>> {
+        let cutoff = if active_only {
+            // 48 hours — two missed beacons at 30s each would be far fewer; this
+            // gives enough tolerance for agents that go offline briefly overnight.
+            crate::store::now_secs().saturating_sub(48 * 3600)
+        } else {
+            0
+        };
         let mut stmt = self.0.prepare(
             "SELECT agent_id, name, first_seen, last_seen
              FROM agent_registry
+             WHERE last_seen >= ?1
              ORDER BY last_seen DESC",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(rusqlite::params![cutoff as i64], |row| {
             Ok(AgentRegistryEntry {
                 agent_id: row.get(0)?,
                 name: row.get(1)?,
@@ -2466,7 +2488,7 @@ impl ReputationStore {
             .load_all()
             .map_err(|e| anyhow::anyhow!("SQLite load failed: {e}"))?;
 
-        if let Ok(registry) = db.get_registry() {
+        if let Ok(registry) = db.get_registry(false) {
             for entry in registry {
                 let rep = agents.entry(entry.agent_id.clone()).or_insert_with(|| {
                     let mut r = AgentReputation::new(entry.agent_id);
@@ -4688,10 +4710,11 @@ impl ReputationStore {
         vec![]
     }
     /// Query the agent registry built from BEACON events.
-    pub fn get_registry(&self) -> Vec<AgentRegistryEntry> {
+    /// `active_only`: true returns only agents seen in the last 48 hours.
+    pub fn get_registry(&self, active_only: bool) -> Vec<AgentRegistryEntry> {
         let db = self.db.lock().unwrap();
         if let Some(ref conn) = *db {
-            match conn.get_registry() {
+            match conn.get_registry(active_only) {
                 Ok(rows) => return rows,
                 Err(e) => tracing::warn!("get_registry failed: {e}"),
             }
@@ -5573,6 +5596,30 @@ impl ReputationStore {
             Err(_) => vec![],
         };
         result
+    }
+    /// Upsert operator onboarding profile answers.
+    pub fn upsert_onboarding(
+        &self,
+        agent_id: &str,
+        motivation: &str,
+        use_cases: &[String],
+        referral: &str,
+    ) -> rusqlite::Result<()> {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            let use_cases_json = serde_json::to_string(use_cases).unwrap_or_else(|_| "[]".into());
+            let now = now_secs() as i64;
+            conn.0.execute(
+                "INSERT INTO agent_onboarding (agent_id, motivation, use_cases, referral, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(agent_id) DO UPDATE SET
+                     motivation = excluded.motivation,
+                     use_cases  = excluded.use_cases,
+                     referral   = excluded.referral",
+                rusqlite::params![agent_id, motivation, use_cases_json, referral, now],
+            )?;
+        }
+        Ok(())
     }
 } // end impl ReputationStore
 

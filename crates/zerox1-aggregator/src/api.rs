@@ -23,79 +23,6 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tiny_keccak::{Hasher, Keccak};
 
-const SKR_MINT: &str = "SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3";
-const SKR_MIN_ACCESS: f64 = 5_000.0;
-const SKR_REWARD_POOL: u64 = 10_000;
-const ELIGIBLE_TRADE_PROGRAMS: &[&str] = &[
-    "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4", // Jupiter Swap
-    "routeUGWgWzqBWFcrCfv8tritsqukccJPu3q5GPP3xS", // Raydium AMM routing
-    "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj", // Raydium LaunchLab
-    "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxYB5qKP1C", // Raydium CPMM
-    "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK", // Raydium CLMM
-    "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8", // Raydium legacy AMM v4
-];
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct SkrLeagueEntry {
-    pub rank: u32,
-    pub wallet: String,
-    pub label: String,
-    pub earn_rate_pct: f64,
-    pub bags_fee_score: f64,
-    pub points: u32,
-    pub trade_count: u32,
-    pub active_days: u32,
-    pub skr_balance: f64,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct SkrLeagueWalletView {
-    pub wallet: Option<String>,
-    pub skr_balance: f64,
-    pub has_access: bool,
-    pub rank: Option<u32>,
-    pub earn_rate_pct: f64,
-    pub bags_fee_score: f64,
-    pub points: u32,
-    pub trade_count: u32,
-    pub active_days: u32,
-    pub access_message: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct SkrLeagueResponse {
-    pub title: String,
-    pub season: String,
-    pub ends_at: u64,
-    pub min_skr: f64,
-    pub reward_pool_skr: u64,
-    pub scoring: Vec<String>,
-    pub rewards: Vec<String>,
-    pub wallet: SkrLeagueWalletView,
-    pub leaderboard: Vec<SkrLeagueEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SkrLeagueQuery {
-    pub wallet: Option<String>,
-    pub limit: Option<usize>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SkrLeagueCache {
-    pub computed_at: Instant,
-    pub season: String,
-    pub ends_at: u64,
-    pub rows: Vec<SkrLeagueEntry>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct BagsClaimReport {
-    pub agent_id: String,
-    pub amount_sol: f64,
-    pub _claimed_txs: u32,
-    pub timestamp: u64,
-}
 
 // ============================================================================
 // App state
@@ -113,6 +40,7 @@ pub struct AppState {
     /// ntfy server base URL for sending wake pushes to sleeping agents.
     /// Default: `https://ntfy.sh`. Set via --ntfy-server / NTFY_SERVER env var.
     /// The topic is derived from the agent_id hex — no registration needed.
+    #[cfg(feature = "pilot")]
     pub ntfy_server: Option<String>,
     /// Shared HTTP client for ntfy push calls.
     pub http_client: reqwest::Client,
@@ -179,13 +107,6 @@ pub struct AppState {
     pub identity_cache: std::sync::Arc<
         std::sync::Mutex<std::collections::HashMap<[u8; 32], (bool, std::time::Instant)>>,
     >,
-    /// Cached SKR league snapshot to avoid expensive chain scans on every refresh.
-    pub skr_league_cache: std::sync::Arc<std::sync::Mutex<Option<SkrLeagueCache>>>,
-    /// Season -> owner wallet -> claimed Bags fee total (SOL).
-    pub bags_claims: std::sync::Arc<
-        std::sync::Mutex<std::collections::HashMap<String, std::collections::HashMap<String, f64>>>,
-    >,
-
     // ── Sponsored token launch ────────────────────────────────────────────
     /// Ed25519 signing key for the sponsor wallet that pays Bags.fm launch fees.
     /// None = feature disabled; POST /sponsor/launch returns 503.
@@ -226,31 +147,31 @@ pub struct AppState {
     pub self_pay_fee_wallet: Option<String>,
     /// APNs push configuration for iOS wake notifications.
     /// None = APNs push disabled (iOS agents still sleep/wake via ntfy on Android).
+    #[cfg(feature = "pilot")]
     pub apns_config: Option<std::sync::Arc<ApnsConfig>>,
 
     // ── Emergency relay (Twilio SMS) ──────────────────────────────────────
-    /// Twilio Account SID — required to send SMS alerts.
+    #[cfg(feature = "pilot")]
     pub twilio_account_sid: Option<String>,
-    /// Twilio Auth Token — required to send SMS alerts.
+    #[cfg(feature = "pilot")]
     pub twilio_auth_token: Option<String>,
-    /// Twilio sender phone number (E.164 format, e.g. "+15005550006").
+    #[cfg(feature = "pilot")]
     pub twilio_from_number: Option<String>,
-    /// Rate limit: agent_id → last relay timestamp.
-    /// Prevents an agent from flooding contacts (max 1 relay per hour per agent).
+    #[cfg(feature = "pilot")]
     pub emergency_rate_limit: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    #[cfg(feature = "pilot")]
+    pub onboarding_rate_limit: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
 
     // ── LLM proxy (POST /llm/chat) ────────────────────────────────────────
-    /// Gemini API key for the LLM proxy. None = proxy disabled (returns 503).
+    #[cfg(feature = "pilot")]
     pub gemini_api_key: Option<String>,
-    /// Max tokens per day for free-tier agents (no 01PL). Default 100_000.
+    #[cfg(feature = "pilot")]
     pub llm_proxy_free_daily_tokens: u64,
-    /// Hard global daily token budget across ALL agents (circuit breaker).
-    /// When hit, all free-tier requests are rejected until the next UTC day.
-    /// 01PL-eligible agents are unaffected. Default 50_000_000 (~$7.50/day).
+    #[cfg(feature = "pilot")]
     pub llm_global_daily_budget: u64,
-    /// In-memory 01PL eligibility cache (5-minute TTL per wallet).
+    #[cfg(feature = "pilot")]
     pub pl_cache: crate::llm_proxy::PlCache,
-    /// In-memory Bags.fm lifetime fees cache (1-hour TTL per mint).
+    #[cfg(feature = "pilot")]
     pub token_fees_cache: crate::llm_proxy::TokenFeesCache,
 }
 
@@ -380,16 +301,16 @@ fn is_valid_agent_id(id: &str) -> bool {
 // ============================================================================
 
 fn ct_eq(a: &str, b: &str) -> bool {
-    // Compare in constant time — no early return on length mismatch to prevent
-    // timing side-channels that would reveal secret length.
+    // Compare in constant time — no early return on length mismatch.
+    // Use usize accumulator so length XOR never truncates (u8 would wrap at 256).
     let a = a.as_bytes();
     let b = b.as_bytes();
     let len = a.len().max(b.len());
-    let mut diff: u8 = (a.len() ^ b.len()) as u8;
+    let mut diff: usize = a.len() ^ b.len();
     for i in 0..len {
         let x = a.get(i).copied().unwrap_or(0);
         let y = b.get(i).copied().unwrap_or(0);
-        diff |= x ^ y;
+        diff |= (x ^ y) as usize;
     }
     diff == 0
 }
@@ -431,587 +352,11 @@ pub async fn get_network_stats(State(state): State<AppState>) -> impl IntoRespon
     Json(stats)
 }
 
-const SOLANA_RPCS: &[&str] = &[
-    "https://api.mainnet-beta.solana.com",
-    "https://rpc.ankr.com/solana",
-    "https://solana-rpc.publicnode.com",
-];
-
-async fn solana_rpc(
-    http: &reqwest::Client,
-    body: &serde_json::Value,
-) -> anyhow::Result<serde_json::Value> {
-    for rpc in SOLANA_RPCS {
-        let resp = http.post(*rpc).json(body).send().await;
-        let Ok(resp) = resp else { continue };
-        if !resp.status().is_success() {
-            continue;
-        }
-        let Ok(json) = resp.json::<serde_json::Value>().await else {
-            continue;
-        };
-        if json.get("error").is_none() {
-            return Ok(json);
-        }
-    }
-
-    anyhow::bail!("all Solana RPCs failed")
-}
-
-async fn fetch_skr_accounts(
-    http: &reqwest::Client,
-    wallet: &str,
-) -> anyhow::Result<Vec<(String, f64)>> {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getTokenAccountsByOwner",
-        "params": [
-            wallet,
-            { "mint": SKR_MINT },
-            { "encoding": "jsonParsed" }
-        ]
-    });
-
-    let json = solana_rpc(http, &body).await?;
-    let Some(accounts) = json
-        .get("result")
-        .and_then(|r| r.get("value"))
-        .and_then(|v| v.as_array())
-    else {
-        anyhow::bail!("missing token accounts");
-    };
-
-    Ok(accounts
-        .iter()
-        .filter_map(|row| {
-            let account = row.get("pubkey").and_then(|v| v.as_str())?;
-            let amount = row
-                .get("account")
-                .and_then(|v| v.get("data"))
-                .and_then(|v| v.get("parsed"))
-                .and_then(|v| v.get("info"))
-                .and_then(|v| v.get("tokenAmount"))
-                .and_then(|v| v.get("uiAmount"))
-                .and_then(|v| v.as_f64())?;
-            Some((account.to_string(), amount))
-        })
-        .collect())
-}
-
-async fn fetch_skr_balance(http: &reqwest::Client, wallet: &str) -> anyhow::Result<f64> {
-    Ok(fetch_skr_accounts(http, wallet)
-        .await?
-        .into_iter()
-        .map(|(_, amount)| amount)
-        .sum())
-}
-
-async fn fetch_signatures_for_address(
-    http: &reqwest::Client,
-    address: &str,
-    until_ts: u64,
-) -> anyhow::Result<Vec<(String, u64)>> {
-    let mut before: Option<String> = None;
-    let mut out = Vec::new();
-
-    loop {
-        let mut config = serde_json::json!({ "limit": 100 });
-        if let Some(sig) = before.as_ref() {
-            config["before"] = serde_json::Value::String(sig.clone());
-        }
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getSignaturesForAddress",
-            "params": [address, config]
-        });
-        let json = solana_rpc(http, &body).await?;
-        let Some(rows) = json.get("result").and_then(|v| v.as_array()) else {
-            break;
-        };
-        if rows.is_empty() {
-            break;
-        }
-
-        let mut hit_old = false;
-        for row in rows {
-            let sig = row
-                .get("signature")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let ts = row.get("blockTime").and_then(|v| v.as_u64()).unwrap_or(0);
-            if ts > 0 && ts < until_ts {
-                hit_old = true;
-                break;
-            }
-            if !sig.is_empty() {
-                out.push((sig, ts));
-            }
-        }
-        if hit_old {
-            break;
-        }
-        before = rows
-            .last()
-            .and_then(|row| row.get("signature"))
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        if before.is_none() || out.len() >= 500 {
-            break;
-        }
-    }
-
-    Ok(out)
-}
-
-async fn fetch_parsed_transaction(
-    http: &reqwest::Client,
-    signature: &str,
-) -> anyhow::Result<serde_json::Value> {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getTransaction",
-        "params": [
-            signature,
-            {
-                "encoding": "jsonParsed",
-                "maxSupportedTransactionVersion": 0
-            }
-        ]
-    });
-    solana_rpc(http, &body).await
-}
-
-fn season_label_from_timestamp(ts: u64) -> String {
-    let season_number = (ts / (30 * 24 * 3600)) + 1;
-    format!("Season {}", season_number)
-}
-
-fn bags_claim_score(state: &AppState, season: &str, wallet: &str) -> f64 {
-    state
-        .bags_claims
-        .lock()
-        .unwrap()
-        .get(season)
-        .and_then(|season_map| season_map.get(wallet))
-        .copied()
-        .unwrap_or(0.0)
-}
-
-fn month_window(now: SystemTime) -> (String, u64, u64) {
-    const SEASON_SECS: u64 = 30 * 24 * 3600;
-    let now_ts = now
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let start_ts = now_ts - (now_ts % SEASON_SECS);
-    let end_ts = start_ts + SEASON_SECS;
-    let season_number = (start_ts / SEASON_SECS) + 1;
-    (format!("Season {}", season_number), start_ts, end_ts)
-}
-
-async fn compute_wallet_league_entry(
-    state: &AppState,
-    wallet: &str,
-) -> anyhow::Result<Option<SkrLeagueEntry>> {
-    #[derive(Clone)]
-    struct LeagueTx {
-        ts: u64,
-        sig: String,
-        pre: f64,
-        post: f64,
-    }
-
-    let (season, start_ts, _end_ts) = month_window(SystemTime::now());
-    let balance = fetch_skr_balance(&state.http_client, wallet).await?;
-    let bags_fee_score = bags_claim_score(state, &season, wallet);
-
-    let mut signatures: HashMap<String, u64> = HashMap::new();
-    for (account, _) in fetch_skr_accounts(&state.http_client, wallet).await? {
-        for (sig, ts) in fetch_signatures_for_address(&state.http_client, &account, start_ts).await?
-        {
-            signatures.entry(sig).or_insert(ts);
-        }
-    }
-
-    let mut active_days: HashMap<String, u32> = HashMap::new();
-    let mut eligible: HashSet<String> = HashSet::new();
-    let mut league_txs: Vec<LeagueTx> = Vec::new();
-
-    for (sig, ts) in signatures {
-        if ts < start_ts {
-            continue;
-        }
-        let tx = match fetch_parsed_transaction(&state.http_client, &sig).await {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let touched_program = tx
-            .get("result")
-            .and_then(|v| v.get("transaction"))
-            .and_then(|v| v.get("message"))
-            .and_then(|v| v.get("accountKeys"))
-            .and_then(|v| v.as_array())
-            .map(|keys| {
-                keys.iter().any(|row| {
-                    let key = row
-                        .get("pubkey")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| row.as_str())
-                        .unwrap_or_default();
-                    ELIGIBLE_TRADE_PROGRAMS
-                        .iter()
-                        .any(|program| key.eq_ignore_ascii_case(program))
-                })
-            })
-            .unwrap_or(false);
-        if !touched_program {
-            continue;
-        }
-
-        let changed = ["preTokenBalances", "postTokenBalances"].into_iter().any(|field| {
-            tx.get("result")
-                .and_then(|v| v.get("meta"))
-                .and_then(|v| v.get(field))
-                .and_then(|v| v.as_array())
-                .map(|balances| {
-                    balances.iter().any(|row| {
-                        row.get("mint")
-                            .and_then(|v| v.as_str())
-                            .map(|mint| mint == SKR_MINT)
-                            .unwrap_or(false)
-                            && row
-                                .get("owner")
-                                .and_then(|v| v.as_str())
-                                .map(|owner| owner.eq_ignore_ascii_case(wallet))
-                                .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false)
-        });
-        if !changed {
-            continue;
-        }
-        eligible.insert(sig.clone());
-        let day = (ts / 86_400).to_string();
-        *active_days.entry(day).or_insert(0) += 1;
-        let pre = tx
-            .get("result")
-            .and_then(|v| v.get("meta"))
-            .and_then(|v| v.get("preTokenBalances"))
-            .and_then(|v| v.as_array())
-            .map(|balances| {
-                balances
-                    .iter()
-                    .filter(|row| {
-                        row.get("mint")
-                            .and_then(|v| v.as_str())
-                            .map(|mint| mint == SKR_MINT)
-                            .unwrap_or(false)
-                            && row
-                                .get("owner")
-                                .and_then(|v| v.as_str())
-                                .map(|owner| owner.eq_ignore_ascii_case(wallet))
-                                .unwrap_or(false)
-                    })
-                    .map(|row| {
-                        row.get("uiTokenAmount")
-                            .and_then(|v| v.get("uiAmount"))
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(0.0)
-                    })
-                    .sum::<f64>()
-            })
-            .unwrap_or(0.0);
-        let post = tx
-            .get("result")
-            .and_then(|v| v.get("meta"))
-            .and_then(|v| v.get("postTokenBalances"))
-            .and_then(|v| v.as_array())
-            .map(|balances| {
-                balances
-                    .iter()
-                    .filter(|row| {
-                        row.get("mint")
-                            .and_then(|v| v.as_str())
-                            .map(|mint| mint == SKR_MINT)
-                            .unwrap_or(false)
-                            && row
-                                .get("owner")
-                                .and_then(|v| v.as_str())
-                                .map(|owner| owner.eq_ignore_ascii_case(wallet))
-                                .unwrap_or(false)
-                    })
-                    .map(|row| {
-                        row.get("uiTokenAmount")
-                            .and_then(|v| v.get("uiAmount"))
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(0.0)
-                    })
-                    .sum::<f64>()
-            })
-            .unwrap_or(0.0);
-        league_txs.push(LeagueTx { ts, sig, pre, post });
-    }
-
-    league_txs.sort_by(|a, b| a.ts.cmp(&b.ts).then(a.sig.cmp(&b.sig)));
-
-    let points = active_days.values().fold(0u32, |acc, trades| {
-        let daily = 25 + (*trades * 10);
-        acc + daily.min(100)
-    });
-    let opening_balance = league_txs
-        .first()
-        .map(|tx| tx.pre)
-        .filter(|v| *v > 0.0)
-        .unwrap_or(balance.max(SKR_MIN_ACCESS)); // floor prevents near-zero denominator from inflating earn rate for wallets with minimal history
-    let closing_balance = league_txs.last().map(|tx| tx.post).unwrap_or(balance);
-    let earn_rate_pct = if opening_balance > 0.0 {
-        (((closing_balance - opening_balance) / opening_balance) * 10000.0).round() / 100.0
-    } else {
-        0.0
-    };
-    let label = state
-        .store
-        .get_agents_by_owner(wallet)
-        .into_iter()
-        .find(|a| !a.name.is_empty())
-        .map(|a| a.name)
-        .unwrap_or_else(|| format!("Owner {}", &wallet[..6.min(wallet.len())]));
-    Ok(Some(SkrLeagueEntry {
-        rank: 0,
-        wallet: wallet.to_string(),
-        label,
-        earn_rate_pct,
-        bags_fee_score,
-        points,
-        trade_count: eligible.len() as u32,
-        active_days: active_days.len() as u32,
-        skr_balance: (balance * 100.0).round() / 100.0,
-    }))
-}
-
-async fn load_or_compute_league(
-    state: &AppState,
-    limit: usize,
-) -> anyhow::Result<(String, u64, Vec<SkrLeagueEntry>)> {
-    let (season, _start_ts, ends_at) = month_window(SystemTime::now());
-    if let Some(cache) = state.skr_league_cache.lock().unwrap().clone() {
-        if cache.season == season && cache.computed_at.elapsed() < Duration::from_secs(300) {
-            return Ok((cache.season, cache.ends_at, cache.rows.into_iter().take(limit).collect()));
-        }
-    }
-
-    let owner_wallets = state.store.list_owner_wallets();
-    let mut rows = Vec::new();
-    for wallet in owner_wallets {
-        match compute_wallet_league_entry(state, &wallet).await {
-            Ok(Some(entry)) => rows.push(entry),
-            Ok(None) => {}
-            Err(_) => {}
-        }
-    }
-
-    rows.sort_by(|a, b| {
-        b.earn_rate_pct
-            .partial_cmp(&a.earn_rate_pct)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(
-                b.bags_fee_score
-                    .partial_cmp(&a.bags_fee_score)
-                    .unwrap_or(std::cmp::Ordering::Equal),
-            )
-            .then(b.points.cmp(&a.points))
-            .then(b.active_days.cmp(&a.active_days))
-            .then(b.trade_count.cmp(&a.trade_count))
-            .then(
-                b.skr_balance
-                    .partial_cmp(&a.skr_balance)
-                    .unwrap_or(std::cmp::Ordering::Equal),
-            )
-    });
-    for (idx, row) in rows.iter_mut().enumerate() {
-        row.rank = (idx + 1) as u32;
-    }
-
-    *state.skr_league_cache.lock().unwrap() = Some(SkrLeagueCache {
-        computed_at: Instant::now(),
-        season: season.clone(),
-        ends_at,
-        rows: rows.clone(),
-    });
-
-    Ok((season, ends_at, rows.into_iter().take(limit).collect()))
-}
-
-/// GET /league/current[?wallet=<base58>&limit=25]
-///
-/// Earnings League:
-/// - Public leaderboard — no minimum SKR balance required.
-/// - Ranks known owner wallets by seasonal fee earn rate (SOL income from swaps).
-/// - Points are derived from monthly on-chain SKR activity.
-/// - Rewards are informational; payout bookkeeping can be layered on later.
-pub async fn get_skr_league(
-    State(state): State<AppState>,
-    Query(params): Query<SkrLeagueQuery>,
-) -> impl IntoResponse {
-    let limit = params.limit.unwrap_or(25).clamp(1, 100);
-    let (season, ends_at, leaderboard) = match load_or_compute_league(&state, limit).await {
-        Ok(v) => v,
-        Err(_) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "error": "league unavailable" })),
-            )
-                .into_response();
-        }
-    };
-
-    let mut wallet_view = SkrLeagueWalletView {
-        wallet: params.wallet.clone(),
-        skr_balance: 0.0,
-        has_access: true,
-        rank: None,
-        earn_rate_pct: 0.0,
-        bags_fee_score: 0.0,
-        points: 0,
-        trade_count: 0,
-        active_days: 0,
-        access_message: "Link a wallet in You → Wallet to see your rank.".to_string(),
-    };
-
-    if let Some(wallet) = params.wallet.as_deref() {
-        let cached_entry = {
-            state
-                .skr_league_cache
-                .lock()
-                .unwrap()
-                .as_ref()
-                .and_then(|cache| {
-                    cache
-                        .rows
-                        .iter()
-                        .find(|entry| entry.wallet.eq_ignore_ascii_case(wallet))
-                        .cloned()
-                })
-        };
-        if let Some(entry) = cached_entry {
-            wallet_view.rank = Some(entry.rank);
-            wallet_view.earn_rate_pct = entry.earn_rate_pct;
-            wallet_view.bags_fee_score = entry.bags_fee_score;
-            wallet_view.points = entry.points;
-            wallet_view.trade_count = entry.trade_count;
-            wallet_view.active_days = entry.active_days;
-            wallet_view.access_message = format!(
-                "{:+.2}% swap earn rate and {:.4} SOL in claimed Bags fees this season across {} eligible trade{} on {} active day{}.",
-                wallet_view.earn_rate_pct,
-                wallet_view.bags_fee_score,
-                wallet_view.trade_count,
-                if wallet_view.trade_count == 1 { "" } else { "s" },
-                wallet_view.active_days,
-                if wallet_view.active_days == 1 { "" } else { "s" },
-            );
-        } else if let Ok(Some(entry)) = compute_wallet_league_entry(&state, wallet).await {
-            // rank stays None — compute_wallet_league_entry does not scan the full leaderboard
-            wallet_view.earn_rate_pct = entry.earn_rate_pct;
-            wallet_view.bags_fee_score = entry.bags_fee_score;
-            wallet_view.points = entry.points;
-            wallet_view.trade_count = entry.trade_count;
-            wallet_view.active_days = entry.active_days;
-            wallet_view.access_message = format!(
-                "{:+.2}% swap earn rate this season across {} eligible trade{}.",
-                wallet_view.earn_rate_pct,
-                wallet_view.trade_count,
-                if wallet_view.trade_count == 1 { "" } else { "s" },
-            );
-        } else {
-            wallet_view.access_message =
-                "Your agent hasn't completed any eligible trades this season yet.".to_string();
-        }
-    }
-
-    let response = SkrLeagueResponse {
-        title: "Earnings League".to_string(),
-        season,
-        ends_at,
-        min_skr: 0.0,
-        reward_pool_skr: SKR_REWARD_POOL,
-        scoring: vec![
-            "Ranked by seasonal fee earn rate — SOL income from swaps your agent executed".to_string(),
-            "Eligible activity: Jupiter, Raydium, and Bags swaps only".to_string(),
-            "Earn rate = fee income ÷ total volume traded this season".to_string(),
-            "Bags launch fees count as tiebreaker after earn rate".to_string(),
-        ],
-        rewards: vec![
-            "1st: 1,500 SKR".to_string(),
-            "2nd: 1,000 SKR".to_string(),
-            "3rd: 700 SKR".to_string(),
-            "Top 10: premium league badge + future bonus pool access".to_string(),
-        ],
-        wallet: wallet_view,
-        leaderboard,
-    };
-
-    Json(response).into_response()
-}
-
-pub async fn post_bags_claim(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(report): Json<BagsClaimReport>,
-) -> impl IntoResponse {
-    if let Some(ref secret) = state.ingest_secret {
-        let provided = headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "))
-            .unwrap_or("");
-        if !ct_eq(provided, secret.as_str()) {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({ "error": "unauthorized" })),
-            )
-                .into_response();
-        }
-    }
-
-    if report.amount_sol <= 0.0 || report.agent_id.is_empty() {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({ "error": "invalid report" })),
-        )
-            .into_response();
-    }
-
-    let owner = match state.store.get_owner(&report.agent_id) {
-        OwnerStatus::Claimed(rec) => rec.owner,
-        _ => {
-            return Json(json!({ "status": "ignored" })).into_response();
-        }
-    };
-
-    let season = season_label_from_timestamp(report.timestamp);
-    let mut claims = state.bags_claims.lock().unwrap();
-    let season_map = claims.entry(season).or_default();
-    *season_map.entry(owner).or_insert(0.0) += report.amount_sol;
-    *state.skr_league_cache.lock().unwrap() = None;
-
-    Json(json!({ "status": "ok" })).into_response()
-}
-
-// ============================================================================
-// Ingest
-// ============================================================================
-
 pub async fn ingest_envelope(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(event): Json<IngestEvent>,
 ) -> impl IntoResponse {
-    // Authenticate ingest requests when a secret is configured.
     if let Some(ref secret) = state.ingest_secret {
         let provided = headers
             .get(axum::http::header::AUTHORIZATION)
@@ -1132,8 +477,18 @@ pub async fn get_agents(
 // Agent Registry (BEACON tracking)
 // ============================================================================
 
-pub async fn get_registry(State(state): State<AppState>) -> impl IntoResponse {
-    Json(state.store.get_registry())
+#[derive(Deserialize)]
+pub struct RegistryParams {
+    /// Pass `?all=true` to include agents not seen in the last 48 hours.
+    #[serde(default)]
+    all: bool,
+}
+
+pub async fn get_registry(
+    State(state): State<AppState>,
+    Query(params): Query<RegistryParams>,
+) -> impl IntoResponse {
+    Json(state.store.get_registry(!params.all))
 }
 
 // ============================================================================
@@ -1487,6 +842,57 @@ pub async fn get_agent_profile(
 }
 
 // ============================================================================
+// Operator onboarding profile
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct OnboardingPayload {
+    #[serde(default)]
+    motivation: String,
+    #[serde(default)]
+    use_cases: Vec<String>,
+    #[serde(default)]
+    referral: String,
+}
+
+/// POST /agents/{agent_id}/onboarding
+/// Unauthenticated (profile answers are non-sensitive), but rate-limited to
+/// 1 write per agent per hour to prevent DB spam.
+#[cfg(feature = "pilot")]
+pub async fn post_agent_onboarding(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(body): Json<OnboardingPayload>,
+) -> impl IntoResponse {
+    if !is_valid_agent_id(&agent_id) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid agent_id" }))).into_response();
+    }
+    {
+        use std::time::Duration;
+        let mut rl = state.onboarding_rate_limit.lock().unwrap();
+        if let Some(last) = rl.get(&agent_id) {
+            if last.elapsed() < Duration::from_secs(3600) {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({ "error": "rate limited — max 1 onboarding write per hour" })),
+                ).into_response();
+            }
+        }
+        rl.retain(|_, ts| ts.elapsed() < Duration::from_secs(3600));
+        rl.insert(agent_id.clone(), std::time::Instant::now());
+    }
+    let motivation = body.motivation.chars().take(64).collect::<String>();
+    let use_cases: Vec<String> = body.use_cases.into_iter()
+        .take(10)
+        .map(|s| s.chars().take(32).collect())
+        .collect();
+    let referral = body.referral.chars().take(64).collect::<String>();
+
+    let _ = state.store.upsert_onboarding(&agent_id, &motivation, &use_cases, &referral);
+    Json(json!({ "ok": true })).into_response()
+}
+
+// ============================================================================
 // Agent search by name
 // ============================================================================
 
@@ -1664,6 +1070,7 @@ pub async fn post_agent_token(
 /// Register or update the FCM device token for an agent.
 /// Called by a mobile node on startup to enable push-wake behaviour.
 /// Requirement: Must be signed by the agent (HIGH-7).
+#[cfg(feature = "pilot")]
 pub async fn fcm_register(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -1699,6 +1106,7 @@ pub async fn fcm_register(
 /// The APNs token is a hardware-backed device token — only the physical device can
 /// obtain it. Worst-case attack: redirect wake pushes to another device (low value,
 /// no financial impact; actual message queues require signed reads via /agents/{id}/pending).
+#[cfg(feature = "pilot")]
 pub async fn apns_register(
     State(state): State<AppState>,
     body_bytes: axum::body::Bytes,
@@ -1736,6 +1144,7 @@ pub async fn apns_register(
 /// Mark an agent as sleeping (offline) or awake.
 /// Called by a mobile node before backgrounding and on wakeup.
 /// Requirement: Must be signed by the agent (HIGH-7).
+#[cfg(feature = "pilot")]
 pub async fn fcm_sleep(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -1767,6 +1176,7 @@ pub async fn fcm_sleep(
 ///
 /// Returns whether the agent is currently in sleep mode.
 /// Senders check this before posting a pending message.
+#[cfg(feature = "pilot")]
 pub async fn get_sleep_status(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
@@ -1780,6 +1190,7 @@ pub async fn get_sleep_status(
 /// The queue is cleared on retrieval — messages are delivered exactly once.
 /// Returns 200 with an empty array when there are no pending messages.
 /// Requirement: Only the agent (pubkey) can drain its own queue (HIGH-8).
+#[cfg(feature = "pilot")]
 pub async fn get_pending(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
@@ -1809,6 +1220,7 @@ pub async fn get_pending(
 /// Maximum payload size for POST /agents/{agent_id}/pending (64 KiB).
 const MAX_PENDING_PAYLOAD_BYTES: usize = 64 * 1024;
 
+#[cfg(feature = "pilot")]
 pub async fn post_pending(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
@@ -2004,6 +1416,7 @@ pub async fn ws_activity(
 /// Topic = agent_id hex (same value the aggregator already knows; no
 /// pre-registration needed).  The phone polls `GET {ntfy_server}/{topic}/json`
 /// or uses the ntfy Android SDK/app to subscribe.
+#[cfg(feature = "pilot")]
 async fn send_ntfy_push(
     ntfy_server: &str,
     agent_id: &str,
@@ -2076,6 +1489,7 @@ fn make_apns_jwt(config: &ApnsConfig) -> anyhow::Result<String> {
 /// Uses the APNs HTTP/2 provider API with JWT auth (ES256 .p8 key).
 /// Sends a `content-available: 1` background notification so iOS wakes
 /// the app for background processing without displaying a banner.
+#[cfg(feature = "pilot")]
 async fn send_apns_push(
     config: &ApnsConfig,
     device_token: &str,
@@ -3065,7 +2479,7 @@ pub async fn get_billing_balance(
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
-            .map(|key| state.api_keys.iter().any(|k| k == key))
+            .map(|key| state.api_keys.iter().any(|k| ct_eq(k.as_str(), key)))
             .unwrap_or(false)
     } else {
         true // dev mode: no API keys configured
@@ -3260,7 +2674,7 @@ pub async fn get_billing_transactions(
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
-            .map(|key| state.api_keys.iter().any(|k| k == key))
+            .map(|key| state.api_keys.iter().any(|k| ct_eq(k.as_str(), key)))
             .unwrap_or(false)
     } else {
         true
@@ -3337,6 +2751,7 @@ pub async fn get_billing_estimate(
 // ============================================================================
 
 /// GET /admin/billing/accounts?limit=50&offset=0
+#[cfg(feature = "pilot")]
 pub async fn get_admin_billing_accounts(
     State(state): State<AppState>,
     Query(params): Query<PaginationParams>,
@@ -3353,6 +2768,7 @@ pub async fn get_admin_billing_accounts(
 }
 
 /// GET /admin/billing/settlements?limit=50&offset=0&status=pending
+#[cfg(feature = "pilot")]
 pub async fn get_admin_settlements(
     State(state): State<AppState>,
     Query(params): Query<SettlementListParams>,
@@ -3369,6 +2785,7 @@ pub async fn get_admin_settlements(
 }
 
 /// GET /admin/billing/revenue
+#[cfg(feature = "pilot")]
 pub async fn get_admin_revenue(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
@@ -3382,6 +2799,7 @@ pub async fn get_admin_revenue(
 /// When enabled, withdrawals and VERDICTs bypass Circle CCTP.
 /// The operator is responsible for executing the actual USDC transfer off-band
 /// (e.g. direct Solana SPL transfer, invoice, or wire).
+#[cfg(feature = "pilot")]
 pub async fn post_admin_set_skip_settlement(
     State(state): State<AppState>,
     Path(account_id): Path<String>,
@@ -3407,6 +2825,7 @@ pub async fn post_admin_set_skip_settlement(
 }
 
 /// POST /admin/billing/settlements/{id}/retry — retry a failed settlement
+#[cfg(feature = "pilot")]
 pub async fn post_admin_retry_settlement(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -4813,17 +4232,12 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/version", get(get_version))
         .route("/ingest/envelope",   post(ingest_envelope))
         .route("/hosting/register",  post(post_hosting_register))
-        .route("/fcm/register",      post(fcm_register))
-        .route("/fcm/sleep",         post(fcm_sleep))
-        .route("/agents/{agent_id}/pending",       get(get_pending).post(post_pending))
         .route("/agents/{agent_id}/propose-owner", post(post_propose_owner))
         .route("/agents/{agent_id}/claim-owner",   post(post_claim_owner))
         .route("/agents/{agent_id}/token",         post(post_agent_token))
         .route("/agents/{agent_id}/owner",         get(get_agent_owner))
         .route("/agents/by-owner/{wallet}",        get(get_agents_by_owner))
         .route("/stats/network",  get(get_network_stats))
-        .route("/league/current", get(get_skr_league))
-        .route("/league/bags-claim", post(post_bags_claim))
         .route("/agents",             get(get_agents))
         .route("/sponsor/launch",     post(sponsor_launch))
         .route("/sponsor/fee-share-config", post(sponsor_fee_share_config))
@@ -4848,6 +4262,14 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/billing/set-payout", post(post_billing_set_payout))
         .route("/billing/transactions/{account_id}", get(get_billing_transactions))
         .route("/billing/estimate-settlement", get(get_billing_estimate));
+
+    #[cfg(feature = "pilot")]
+    let public_routes = public_routes
+        .route("/fcm/register",  post(fcm_register))
+        .route("/fcm/sleep",     post(fcm_sleep))
+        .route("/apns/register", post(apns_register))
+        .route("/agents/{agent_id}/pending", get(get_pending).post(post_pending))
+        .route("/emergency/relay", post(post_emergency_relay));
 
     #[cfg(feature = "data-bounty")]
     let public_routes = public_routes
@@ -4876,30 +4298,59 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/interactions/by/{agent_id}", get(get_interactions_by))
         .route("/disputes/{agent_id}",        get(get_disputes))
         .route("/registry",                   get(get_registry))
-        .route("/agents/{agent_id}/sleeping", get(get_sleep_status))
         .route("/blobs", post(post_blob).layer(DefaultBodyLimit::max(10 * 1024 * 1024)))
+        .route_layer(middleware::from_fn_with_state(state.clone(), api_key_middleware));
+
+    #[cfg(feature = "pilot")]
+    let gated_routes = gated_routes
+        .route("/agents/{agent_id}/sleeping", get(get_sleep_status))
         .route("/admin/billing/accounts",     get(get_admin_billing_accounts))
         .route("/admin/billing/settlements",  get(get_admin_settlements))
         .route("/admin/billing/revenue",      get(get_admin_revenue))
         .route("/admin/billing/settlements/{id}/retry",          post(post_admin_retry_settlement))
-        .route("/admin/billing/accounts/{id}/skip-settlement",   post(post_admin_set_skip_settlement))
-        .route_layer(middleware::from_fn_with_state(state.clone(), api_key_middleware));
+        .route("/admin/billing/accounts/{id}/skip-settlement",   post(post_admin_set_skip_settlement));
+
+    // CORS: allow the dashboard origin plus any localhost/127.x origin for
+    // local development. Agents call the aggregator server-to-server (no CORS),
+    // so this only affects browser-based dashboard traffic.
+    let cors = {
+        use axum::http::HeaderValue;
+        use tower_http::cors::AllowOrigin;
+        let allowed: Vec<HeaderValue> = [
+            "https://dashboard.0x01.world",
+            "https://0x01.world",
+            "https://api.0x01.world",
+        ]
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::predicate(move |origin: &HeaderValue, _| {
+                // Always allow any http(s)://localhost or http(s)://127. origin.
+                let s = origin.to_str().unwrap_or("");
+                if s.starts_with("http://localhost")
+                    || s.starts_with("https://localhost")
+                    || s.starts_with("http://127.")
+                    || s.starts_with("https://127.")
+                {
+                    return true;
+                }
+                allowed.iter().any(|a| a == origin)
+            }))
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::OPTIONS,
+            ])
+            .allow_headers([
+                axum::http::header::AUTHORIZATION,
+                axum::http::header::CONTENT_TYPE,
+            ])
+    };
 
     public_routes
         .merge(gated_routes)
-        .layer(
-            CorsLayer::new()
-                .allow_origin(tower_http::cors::Any)
-                .allow_methods([
-                    axum::http::Method::GET,
-                    axum::http::Method::POST,
-                    axum::http::Method::OPTIONS,
-                ])
-                .allow_headers([
-                    axum::http::header::AUTHORIZATION,
-                    axum::http::header::CONTENT_TYPE,
-                ]),
-        )
+        .layer(cors)
         .with_state(state)
 }
 
@@ -4920,6 +4371,7 @@ pub struct EmergencyContact {
     pub phone: String,
 }
 
+#[cfg(feature = "pilot")]
 pub async fn post_emergency_relay(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -5010,16 +4462,21 @@ pub async fn post_emergency_relay(
     }
     let sms_body = sms_parts.join(" | ");
 
-    // Send SMS to each contact via Twilio
+    // Send SMS to each contact via Twilio (cap at 10 to prevent abuse).
     let client = reqwest::Client::new();
     let twilio_url = format!(
         "https://api.twilio.com/2010-04-01/Accounts/{}/Messages.json",
         sid
     );
     let mut notified = 0u32;
-    for contact in &body.contacts {
+    for contact in body.contacts.iter().take(10) {
         let phone = contact.phone.trim();
-        if phone.is_empty() {
+        // Require E.164 format: + followed by 7–15 digits.
+        let valid_e164 = phone.starts_with('+')
+            && phone.len() >= 8
+            && phone.len() <= 16
+            && phone[1..].chars().all(|c| c.is_ascii_digit());
+        if !valid_e164 {
             continue;
         }
         let params = [

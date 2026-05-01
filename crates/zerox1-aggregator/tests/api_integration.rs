@@ -25,6 +25,7 @@ fn test_state() -> AppState {
         store,
         ingest_secret: None,
         hosting_secret: None,
+        #[cfg(feature = "pilot")]
         ntfy_server: None,
         http_client,
         activity_tx,
@@ -44,31 +45,47 @@ fn test_state() -> AppState {
         identity_cache: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
-        skr_league_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
-        bags_claims: std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashMap::new(),
-        )),
         sponsor_signing_key: None,
         bags_api_key: None,
         sponsor_rpc_url: "https://api.mainnet-beta.solana.com".to_string(),
         sponsor_default_image_url: None,
         bags_partner_wallet: None,
         bags_partner_config: None,
+        sponsor_initial_buy_lamports: 0,
         sponsor_launches: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        #[cfg(feature = "pilot")]
         apns_config: None,
         admin_api_key: None,
         reel_dir: None,
         gift_code_gating: false,
         self_pay_fee_lamports: 0,
         self_pay_fee_wallet: None,
+        #[cfg(feature = "pilot")]
         twilio_account_sid: None,
+        #[cfg(feature = "pilot")]
         twilio_auth_token: None,
+        #[cfg(feature = "pilot")]
         twilio_from_number: None,
+        #[cfg(feature = "pilot")]
         emergency_rate_limit: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        #[cfg(feature = "pilot")]
+        onboarding_rate_limit: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        #[cfg(feature = "pilot")]
+        gemini_api_key: None,
+        #[cfg(feature = "pilot")]
+        llm_proxy_free_daily_tokens: 100_000,
+        #[cfg(feature = "pilot")]
+        llm_global_daily_budget: 50_000_000,
+        #[cfg(feature = "pilot")]
+        pl_cache: zerox1_aggregator::llm_proxy::PlCache::default(),
+        #[cfg(feature = "pilot")]
+        token_fees_cache: zerox1_aggregator::llm_proxy::TokenFeesCache::default(),
     }
 }
 
@@ -245,26 +262,6 @@ async fn network_stats_has_agent_count() {
     );
 }
 
-// ── SKR League ────────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn league_current_returns_ok() {
-    let res = app()
-        .oneshot(
-            Request::builder()
-                .uri("/league/current")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    // May return 200 (empty league) or 503 (RPC unavailable) — both valid for empty state
-    assert!(
-        res.status() == StatusCode::OK || res.status() == StatusCode::SERVICE_UNAVAILABLE,
-        "unexpected status: {}",
-        res.status()
-    );
-}
 
 // ── Ingest auth ───────────────────────────────────────────────────────────────
 

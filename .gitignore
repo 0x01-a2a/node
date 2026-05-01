@@ -33,6 +33,9 @@ zerox1-identity.key
 # APNs auth key (Apple push notifications)
 AuthKey_*.p8
 
+# Internal docs — not for public repo
+METADAO_PROPOSAL.md
+
 # Deploy — generated secrets and runtime config
 deploy/gcp/.secrets
 deploy/gcp/*.secrets

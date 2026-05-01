@@ -507,6 +507,40 @@ impl Zx01Node {
                         addr,
                         self.config.api_cors_origins.clone(),
                     ));
+
+                    // Print dashboard connect URL so the user can open it with one click.
+                    let agent_hex = hex::encode(self.identity.agent_id);
+
+                    // Resolve the URL the dashboard will use to reach this node.
+                    // - loopback / unspecified (127.0.0.1 or 0.0.0.0): use localhost so
+                    //   the browser can call it directly (mixed-content exemption for localhost).
+                    // - explicit public IP/domain: use as-is so the Next.js proxy can reach it.
+                    let effective_host = if addr.ip().is_loopback() || addr.ip().is_unspecified() {
+                        format!("localhost:{}", addr.port())
+                    } else {
+                        addr.to_string()
+                    };
+                    let node_url = format!("http://{effective_host}");
+
+                    if let Some(ref secret) = self.config.api_secret {
+                        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+                        let payload = format!("{}|{}", node_url, secret);
+                        let encoded = URL_SAFE_NO_PAD.encode(payload.as_bytes());
+                        let connect_url = format!(
+                            "https://dashboard.0x01.world/connect?c={encoded}"
+                        );
+                        tracing::info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                        tracing::info!("  Agent:     {}...{}", &agent_hex[..8], &agent_hex[agent_hex.len()-8..]);
+                        tracing::info!("  Dashboard: {connect_url}");
+                        if addr.ip().is_unspecified() {
+                            tracing::info!("  (Cloud/VPS: replace 'localhost' in the URL with your public IP or domain)");
+                        }
+                        tracing::info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    } else {
+                        tracing::info!(
+                            "API running at {node_url} — set ZX01_API_SECRET for dashboard access"
+                        );
+                    }
                 }
                 Err(e) => tracing::warn!("Invalid --api-addr '{addr_str}': {e}"),
             }
@@ -980,6 +1014,11 @@ impl Zx01Node {
             SwarmEvent::ConnectionClosed { peer_id, .. } => {
                 tracing::debug!("Disconnected from {peer_id}");
                 self.last_ping_push.remove(&peer_id);
+                // Clear the peer_id from the agent entry so bilateral routing
+                // doesn't target this dead connection when the peer reconnects
+                // with a new PeerId (e.g. after NAT change). Nonce/key data is
+                // preserved — only the routing handle is cleared.
+                self.peer_states.clear_peer_id(&peer_id);
             }
             SwarmEvent::Behaviour(behaviour_event) => {
                 self.handle_behaviour_event(swarm, behaviour_event).await;
@@ -2292,20 +2331,18 @@ impl Zx01Node {
                     "slot":     self.current_slot,
                 }));
             }
-            Err(e) if e.to_string().contains("InsufficientPeers") => {
-                // No mesh peers yet — queue exactly one BEACON so it fires the
-                // moment the first peer subscribes.  Deduplicate: if one is
-                // already queued from a previous tick, replace it with the fresh
-                // (higher-nonce) envelope so peers always see the latest state.
+            Err(e) => {
+                // Queue one BEACON regardless of the error type (InsufficientPeers,
+                // encoding failure, etc.) so it retries the moment the mesh recovers.
+                // Deduplicate: replace any existing queued BEACON with the fresher one.
                 self.pending_broadcasts
                     .retain(|e| e.msg_type != MsgType::Beacon);
                 if self.pending_broadcasts.len() < MAX_PENDING_BROADCASTS {
-                    tracing::debug!("No mesh peers — queuing BEACON for flush");
+                    tracing::debug!("BEACON publish failed ({e}) — queuing for retry");
                     self.pending_broadcasts.push(env);
+                } else {
+                    tracing::warn!("BEACON publish failed and pending queue full: {e}");
                 }
-            }
-            Err(e) => {
-                tracing::warn!("BEACON publish failed: {e}");
             }
         }
     }

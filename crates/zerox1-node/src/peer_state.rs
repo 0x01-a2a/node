@@ -70,7 +70,13 @@ impl PeerStateMap {
 
     fn entry(&mut self, agent_id: [u8; 32]) -> &mut PeerEntry {
         if !self.by_agent_id.contains_key(&agent_id) && self.by_agent_id.len() >= MAX_PEERS {
-            let evict_key = self.by_agent_id.keys().next().copied();
+            // Evict the least-recently-active agent (lowest last_active_epoch).
+            // Falls back to arbitrary eviction only if all epochs are equal (first boot).
+            let evict_key = self
+                .by_agent_id
+                .iter()
+                .min_by_key(|(_, e)| e.last_active_epoch)
+                .map(|(k, _)| *k);
             if let Some(evict_key) = evict_key {
                 if let Some(entry) = self.by_agent_id.remove(&evict_key) {
                     if let Some(pid) = entry.peer_id {
@@ -147,6 +153,23 @@ impl PeerStateMap {
 
     pub fn peer_id_for_agent(&self, agent_id: &[u8; 32]) -> Option<PeerId> {
         self.by_agent_id.get(agent_id)?.peer_id
+    }
+
+    /// Called on ConnectionClosed — clears the peer_id routing handle for the
+    /// disconnected peer so bilateral messages don't target a dead connection.
+    /// Nonce, epoch, and key data are preserved for replay protection and
+    /// re-identification when the peer reconnects.
+    pub fn clear_peer_id(&mut self, peer_id: &PeerId) {
+        if let Some(&agent_id) = self.peer_to_agent.get(peer_id) {
+            if let Some(entry) = self.by_agent_id.get_mut(&agent_id) {
+                // Only clear if this is still the current peer_id for that agent
+                // (guard against a reconnect that already updated the mapping).
+                if entry.peer_id.as_ref() == Some(peer_id) {
+                    entry.peer_id = None;
+                }
+            }
+        }
+        self.peer_to_agent.remove(peer_id);
     }
 
     #[allow(dead_code)]

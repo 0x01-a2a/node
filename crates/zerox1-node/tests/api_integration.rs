@@ -26,6 +26,7 @@ fn make_state() -> ApiState {
         "http://localhost:1".to_string(),
         "http://localhost:1".to_string(),
         reqwest::Client::new(),
+        None,           // llm_proxy_url
         None,           // registry_8004_collection
         signing_key,
         None,           // kora

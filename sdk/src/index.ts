@@ -30,6 +30,16 @@ export interface Zerox1AgentConfig {
   logDir?: string
   /** Additional bootstrap peer multiaddrs. */
   bootstrap?: string[]
+  /**
+   * Operator profile answers for onboarding.
+   * If provided, written to profile.json on first start without any prompting.
+   * Agents should supply this; humans will be prompted interactively if omitted and stdin is a TTY.
+   */
+  profile?: {
+    motivation?: string
+    use_cases?: string[]
+    referral?: string
+  }
 }
 
 export type MsgType =
@@ -491,6 +501,91 @@ function encodeFeedbackCbor(
 // Binary resolution
 // ============================================================================
 
+// ============================================================================
+// Onboarding profile
+// ============================================================================
+
+const ONBOARDING_MOTIVATIONS = [
+  '1) Building an AI agent or product',
+  '2) Running a node to earn',
+  '3) Researching AI or decentralised networks',
+  '4) Trading / DeFi automation',
+  '5) Evaluating for an organisation',
+  '6) Just exploring',
+]
+
+const ONBOARDING_USE_CASES = [
+  '1) Data & research tasks',
+  '2) Code & development',
+  '3) Writing & content',
+  '4) Trading & DeFi',
+  '5) General assistant',
+  '6) Something else',
+]
+
+const MOTIVATION_MAP: Record<string, string> = {
+  '1': 'builder', '2': 'operator', '3': 'researcher',
+  '4': 'trader',  '5': 'enterprise', '6': 'curious',
+}
+
+const USE_CASE_MAP: Record<string, string> = {
+  '1': 'data', '2': 'code', '3': 'writing',
+  '4': 'trading', '5': 'assistant', '6': 'other',
+}
+
+async function promptOnboarding(logDir: string): Promise<{
+  motivation: string; use_cases: string[]; referral: string
+} | null> {
+  const profilePath = path.join(logDir, 'profile.json')
+  if (fs.existsSync(profilePath)) return null   // already done
+  if (!process.stdin.isTTY) return null          // non-interactive — skip
+
+  const readline = await import('readline')
+  const rl = readline.createInterface({ input: process.stdin, output: process.stderr })
+  const ask = (q: string): Promise<string> =>
+    new Promise(resolve => rl.question(q, ans => resolve(ans.trim())))
+
+  try {
+    process.stderr.write('\n[zerox1] Quick setup — 3 questions (press Enter to skip any)\n\n')
+
+    process.stderr.write('What brings you to 0x01?\n')
+    ONBOARDING_MOTIVATIONS.forEach(m => process.stderr.write(`  ${m}\n`))
+    const mAns = await ask('Enter number: ')
+    const motivation = MOTIVATION_MAP[mAns] ?? ''
+
+    process.stderr.write('\nWhat will your agent mainly do? (comma-separated numbers, e.g. 1,3)\n')
+    ONBOARDING_USE_CASES.forEach(u => process.stderr.write(`  ${u}\n`))
+    const uAns = await ask('Enter numbers: ')
+    const use_cases = uAns.split(',').map(s => USE_CASE_MAP[s.trim()]).filter(Boolean) as string[]
+
+    const referral = await ask('\nHow did you find 0x01? (optional, freeform): ')
+
+    const profile = { motivation, use_cases, referral }
+    try { fs.writeFileSync(profilePath, JSON.stringify(profile, null, 2)) } catch { /* best effort */ }
+    process.stderr.write('\n')
+    return profile
+  } finally {
+    rl.close()
+  }
+}
+
+function defaultDataDir(): string {
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? '.'
+  return path.join(home, '.zerox1')
+}
+
+function buildConnectUrl(logDir: string, apiAddr: string): string {
+  try {
+    const token = fs.readFileSync(path.join(logDir, 'dashboard_token'), 'utf8').trim()
+    if (!token) return 'https://dashboard.0x01.world'
+    const host = apiAddr.replace('0.0.0.0', 'localhost').replace('127.0.0.1', 'localhost')
+    const payload = Buffer.from(`http://${host}|${token}`).toString('base64url')
+    return `https://dashboard.0x01.world/connect?c=${payload}`
+  } catch {
+    return 'https://dashboard.0x01.world'
+  }
+}
+
 function getBinaryPath(): string {
   const platform = process.platform // 'win32' | 'darwin' | 'linux'
   const arch = process.arch     // 'x64' | 'arm64'
@@ -580,6 +675,73 @@ export class Zerox1Agent {
     const agent = new Zerox1Agent()
     agent._config = config
     return agent
+  }
+
+  /**
+   * Install zerox1-node as a persistent system service (systemd on Linux,
+   * launchd on macOS, Windows Service on Windows) so the node survives
+   * reboots and restarts automatically on crash — without the agent process
+   * needing to stay alive.
+   *
+   * Call this once during an agent's first-run bootstrap. The service
+   * runs exactly the same flags as `start()` would use.
+   *
+   * Returns the one-click dashboard connect URL once the service is up.
+   *
+   * @param config  - Same config object used to construct the agent.
+   * @param options - `system`: install as a system-wide service (requires root).
+   */
+  static async installService(
+    config: Zerox1AgentConfig,
+    options: { system?: boolean } = {},
+  ): Promise<{ dashboardUrl: string }> {
+    const keypairPath  = resolveKeypairPath(config.keypair)
+    const binaryPath   = getBinaryPath()
+    const logDir       = config.logDir ?? defaultDataDir()
+
+    const args: string[] = [
+      'install-service',
+      '--keypair-path', keypairPath,
+      '--api-addr', '127.0.0.1:9090',
+      '--agent-name', config.name ?? '',
+      '--log-dir', logDir,
+      '--api-cors-origins', 'https://dashboard.0x01.world',
+    ]
+    if (config.satiMint)  args.push('--sati-mint', config.satiMint)
+    if (config.rpcUrl)    args.push('--rpc-url', config.rpcUrl)
+    for (const b of config.bootstrap ?? []) args.push('--bootstrap', b)
+    if (options.system)   args.push('--system')
+
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn(binaryPath, args, { stdio: ['ignore', 'inherit', 'inherit'] })
+      proc.on('close', code => code === 0 ? resolve() : reject(new Error(`install-service exited with code ${code}`)))
+      proc.on('error', reject)
+    })
+
+    // Read the persisted token to return the connect URL.
+    const dashboardUrl = buildConnectUrl(logDir, '127.0.0.1:9090')
+    return { dashboardUrl }
+  }
+
+  /**
+   * Remove the system service installed by `installService()`.
+   * Stops the running service and removes the unit/plist/service entry.
+   *
+   * @param options - `system`: remove the system-wide service (requires root).
+   */
+  static async uninstallService(
+    options: { system?: boolean; logDir?: string } = {},
+  ): Promise<void> {
+    const binaryPath = getBinaryPath()
+    const args = ['uninstall-service']
+    if (options.logDir)  args.push('--log-dir', options.logDir)
+    if (options.system)  args.push('--system')
+
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn(binaryPath, args, { stdio: ['ignore', 'inherit', 'inherit'] })
+      proc.on('close', code => code === 0 ? resolve() : reject(new Error(`uninstall-service exited with code ${code}`)))
+      proc.on('error', reject)
+    })
   }
 
   /**
@@ -684,22 +846,24 @@ export class Zerox1Agent {
    * Start the node, wait for it to be ready, connect the inbox stream.
    * Safe to await — resolves once the agent is live on the mesh.
    */
-  async start(): Promise<void> {
+  async start(): Promise<{ dashboardUrl: string }> {
     this.port = await getFreePort()
     this.nodeUrl = `http://127.0.0.1:${this.port}`
 
     const keypairPath = resolveKeypairPath(this._config.keypair)
     const binaryPath = getBinaryPath()
+    const logDir = this._config.logDir ?? process.cwd()
 
     const args: string[] = [
       '--keypair-path', keypairPath,
       '--api-addr', `127.0.0.1:${this.port}`,
       '--agent-name', this._config.name ?? '',
+      '--log-dir', logDir,
+      '--api-cors-origins', 'https://dashboard.0x01.world',
     ]
 
     if (this._config.satiMint) args.push('--sati-mint', this._config.satiMint)
     if (this._config.rpcUrl) args.push('--rpc-url', this._config.rpcUrl)
-    if (this._config.logDir) args.push('--log-dir', this._config.logDir)
     for (const b of this._config.bootstrap ?? []) {
       args.push('--bootstrap', b)
     }
@@ -733,11 +897,55 @@ export class Zerox1Agent {
         `   This agent is unregistered and will be dropped by production nodes.\n\n`
       )
     }
+
+    // Onboarding: write profile from config (agent path) or prompt interactively (human path).
+    let onboardingProfile: typeof this._config.profile | null = null
+    if (this._config.profile) {
+      const profilePath = path.join(logDir, 'profile.json')
+      if (!fs.existsSync(profilePath)) {
+        try { fs.writeFileSync(profilePath, JSON.stringify(this._config.profile, null, 2)) } catch { /* best effort */ }
+        onboardingProfile = this._config.profile
+      }
+    } else {
+      onboardingProfile = await promptOnboarding(logDir).catch(() => null)
+    }
+    if (onboardingProfile) {
+      this._reportOnboarding(onboardingProfile).catch(() => {})
+    }
+
+    // Build the dashboard connect URL from the auto-generated token.
+    const dashboardUrl = this._buildDashboardUrl(logDir)
+    process.stderr.write(
+      `\n[zerox1] Dashboard: ${dashboardUrl}\n` +
+      `[zerox1] Open that URL in your browser to manage this agent.\n\n`
+    )
+    return { dashboardUrl }
+  }
+
+  /** Fire-and-forget: POST onboarding answers to the aggregator for product analytics. */
+  private async _reportOnboarding(profile: NonNullable<Zerox1AgentConfig['profile']>): Promise<void> {
+    try {
+      const identity = await fetch(`${this.nodeUrl}/identity`, { signal: AbortSignal.timeout(4000) })
+      if (!identity.ok) return
+      const { agent_id } = await identity.json() as { agent_id?: string }
+      if (!agent_id) return
+      await fetch(`https://api.0x01.world/agents/${agent_id}/onboarding`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(profile),
+        signal: AbortSignal.timeout(6000),
+      })
+    } catch { /* never block the agent */ }
+  }
+
+  /** Read the persisted dashboard token and return a one-click connect URL. */
+  private _buildDashboardUrl(logDir: string): string {
+    return buildConnectUrl(logDir, `127.0.0.1:${this.port}`)
   }
 
   /** Fetch /version from the aggregator and warn if this SDK is outdated. */
   private async _checkVersion(): Promise<void> {
-    const AGGREGATOR = 'https://aggregator.0x01.world'
+    const AGGREGATOR = 'https://api.0x01.world'
     const CURRENT = require('../package.json').version
     try {
       const res = await fetch(`${AGGREGATOR}/version`, { signal: AbortSignal.timeout(4_000) })

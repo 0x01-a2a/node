@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 
 [features]
+# pilot — 01 Pilot mobile app: push notifications (FCM/APNs), sleep/wake mailbox,
+# LLM proxy, emergency SMS relay. Off by default for standalone node deployments.
+pilot = []
 # DataBounty campaign marketplace — IMU/GPS/audio/camera data collection.
 # Only meaningful when the aggregator serves mobile nodes; off by default
 # so server-only deployments don't expose unfinished endpoints.

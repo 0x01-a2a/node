@@ -60,6 +60,9 @@ default = []
 ios-ffi = []
 trade = []
 bags  = ["trade"]
+# pilot — 01 Pilot mobile app: hosted-agent sessions, ZeroClaw process management,
+# LLM relay. Implies bags (economy + Bags.fm integration).
+pilot = ["bags"]
 settlement = []
 
 [dev-dependencies]

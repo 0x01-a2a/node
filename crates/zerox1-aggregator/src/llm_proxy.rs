@@ -292,6 +292,7 @@ async fn check_eligible(
 
 // ── Handler ───────────────────────────────────────────────────────────────
 
+#[cfg(feature = "pilot")]
 pub async fn post_llm_chat(
     State(state): State<AppState>,
     Json(req): Json<LlmChatRequest>,

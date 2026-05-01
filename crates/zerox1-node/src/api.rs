@@ -946,14 +946,6 @@ pub fn build_router(state: ApiState, cors_origins: Vec<String>) -> axum::Router 
         .route("/negotiate/propose", post(negotiate_propose))
         .route("/negotiate/counter", post(negotiate_counter))
         .route("/negotiate/accept", post(negotiate_accept))
-        // Hosted-agent API
-        .route("/hosted/ping", get(hosted_ping))
-        .route("/hosted/register", post(hosted_register))
-        .route("/hosted/send", post(hosted_send))
-        .route("/hosted/negotiate/propose", post(hosted_negotiate_propose))
-        .route("/hosted/negotiate/counter", post(hosted_negotiate_counter))
-        .route("/hosted/negotiate/accept", post(hosted_negotiate_accept))
-        .route("/ws/hosted/inbox", get(ws_hosted_inbox_handler))
         // Named-topic BROADCAST subscriptions
         .route("/topics/{slug}/broadcast", post(topic_broadcast))
         .route("/ws/topics", get(ws_topics_handler))
@@ -976,20 +968,12 @@ pub fn build_router(state: ApiState, cors_origins: Vec<String>) -> axum::Router 
         // MPP — Machine Payment Protocol daily gate
         .route("/mpp/challenge", get(mpp_challenge))
         .route("/mpp/verify", post(mpp_verify))
-        // Admin — exempt agent management (loopback only; requires api_secret)
-        .route(
-            "/admin/exempt",
-            get(admin_exempt_list).post(admin_exempt_add),
-        )
-        .route("/admin/exempt/{agent_id}", delete(admin_exempt_remove))
-        // Agent process management (skill hot-reload)
-        .route("/agent/register-pid", post(agent_register_pid))
-        .route("/agent/reload", post(agent_reload))
         // Agent memory + persona (passive observation files)
         .route("/agent/memory", get(agent_memory_read))
         .route("/agent/memory/write", post(agent_memory_write))
         .route("/agent/persona", get(agent_persona_read))
         .route("/agent/persona/write", post(agent_persona_write))
+        .route("/agent/profile", get(agent_profile_read).post(agent_profile_write))
         // Skill manager — safe Rust-side file operations (no shell injection)
         .route("/skill/list", get(skill_list_handler))
         .route("/skill/write", post(skill_write_handler))
@@ -998,9 +982,25 @@ pub fn build_router(state: ApiState, cors_origins: Vec<String>) -> axum::Router 
         // Task audit log
         .route("/tasks/log", post(task_log_insert).get(task_log_list))
         .route("/tasks/log/{id}/shared", patch(task_log_mark_shared))
-        .route("/tasks/log/{id}", delete(task_log_delete))
-        // LLM proxy relay — forwards to aggregator /llm/chat with agent_id injected.
-        // Used by zeroclaw "default" provider (custom:http://127.0.0.1:9090).
+        .route("/tasks/log/{id}", delete(task_log_delete));
+
+    #[cfg(feature = "pilot")]
+    let router = router
+        // Admin — exempt agent management (loopback only; requires api_secret)
+        .route("/admin/exempt", get(admin_exempt_list).post(admin_exempt_add))
+        .route("/admin/exempt/{agent_id}", delete(admin_exempt_remove))
+        // Hosted-agent API
+        .route("/hosted/ping", get(hosted_ping))
+        .route("/hosted/register", post(hosted_register))
+        .route("/hosted/send", post(hosted_send))
+        .route("/hosted/negotiate/propose", post(hosted_negotiate_propose))
+        .route("/hosted/negotiate/counter", post(hosted_negotiate_counter))
+        .route("/hosted/negotiate/accept", post(hosted_negotiate_accept))
+        .route("/ws/hosted/inbox", get(ws_hosted_inbox_handler))
+        // ZeroClaw process management
+        .route("/agent/register-pid", post(agent_register_pid))
+        .route("/agent/reload", post(agent_reload))
+        // LLM relay — forwards to aggregator /llm/chat with agent_id injected
         .route("/chat/completions", post(chat_completions_relay));
 
     #[cfg(feature = "trade")]
@@ -1080,15 +1080,17 @@ pub fn build_router(state: ApiState, cors_origins: Vec<String>) -> axum::Router 
 
     router
         .layer({
-            let origins: Vec<axum::http::HeaderValue> = if cors_origins.is_empty() {
-                // Default: loopback only (zeroclaw, React Native WebView).
-                vec![
-                    "http://127.0.0.1".parse().expect("valid CORS origin"),
-                    "http://localhost".parse().expect("valid CORS origin"),
-                ]
-            } else {
-                cors_origins.iter().filter_map(|o| o.parse().ok()).collect()
-            };
+            // Always include loopback origins so zeroclaw and React Native WebView
+            // continue to work even when additional origins are added.
+            let mut origins: Vec<axum::http::HeaderValue> = vec![
+                "http://127.0.0.1".parse().expect("valid CORS origin"),
+                "http://localhost".parse().expect("valid CORS origin"),
+            ];
+            for o in &cors_origins {
+                if let Ok(v) = o.parse() {
+                    origins.push(v);
+                }
+            }
             tower_http::cors::CorsLayer::new()
                 .allow_origin(origins)
                 .allow_methods([
@@ -2155,6 +2157,7 @@ async fn negotiate_accept(
 // ============================================================================
 
 /// GET /hosted/ping — no auth. Returns immediately; used by mobile for RTT probing.
+#[cfg(feature = "pilot")]
 async fn hosted_ping() -> impl IntoResponse {
     Json(serde_json::json!({ "ok": true }))
 }
@@ -2163,6 +2166,7 @@ async fn hosted_ping() -> impl IntoResponse {
 ///
 /// Generates a fresh ed25519 sub-keypair for the hosted agent.
 /// Returns `{ "agent_id": "<hex64>", "token": "<hex64>" }`.
+#[cfg(feature = "pilot")]
 async fn hosted_register(State(state): State<ApiState>) -> impl IntoResponse {
     if state.0.api_secret.is_none() {
         return (
@@ -2230,6 +2234,7 @@ async fn hosted_register(State(state): State<ApiState>) -> impl IntoResponse {
 ///
 /// Signs an envelope using the session sub-keypair and forwards it to the
 /// node loop for gossipsub broadcast.
+#[cfg(feature = "pilot")]
 async fn hosted_send(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -2418,6 +2423,7 @@ async fn hosted_send(
 }
 
 /// POST /hosted/negotiate/propose — `Authorization: Bearer <token>`.
+#[cfg(feature = "pilot")]
 async fn hosted_negotiate_propose(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -2461,6 +2467,12 @@ async fn hosted_negotiate_propose(
             (hex::encode(b), b)
         }
     };
+    if req.message.len() > zerox1_protocol::constants::MAX_MESSAGE_SIZE {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({ "error": "message exceeds maximum size" })),
+        );
+    }
     let amount = req.amount_usdc_micro.unwrap_or(0);
     let max_rounds = req.max_rounds.unwrap_or(2);
     let mut hosted_propose_extra = serde_json::json!({
@@ -2535,6 +2547,7 @@ async fn hosted_negotiate_propose(
 }
 
 /// POST /hosted/negotiate/counter — `Authorization: Bearer <token>`.
+#[cfg(feature = "pilot")]
 async fn hosted_negotiate_counter(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -2549,6 +2562,12 @@ async fn hosted_negotiate_counter(
             )
         }
     };
+    if req.message.as_deref().map_or(false, |m| m.len() > zerox1_protocol::constants::MAX_MESSAGE_SIZE) {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({ "error": "message exceeds maximum size" })),
+        );
+    }
     let max_rounds = req.max_rounds.unwrap_or(2);
     if req.round == 0 || req.round > max_rounds {
         return (
@@ -2645,6 +2664,7 @@ async fn hosted_negotiate_counter(
 }
 
 /// POST /hosted/negotiate/accept — `Authorization: Bearer <token>`.
+#[cfg(feature = "pilot")]
 async fn hosted_negotiate_accept(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -2659,6 +2679,12 @@ async fn hosted_negotiate_accept(
             )
         }
     };
+    if req.message.as_deref().map_or(false, |m| m.len() > zerox1_protocol::constants::MAX_MESSAGE_SIZE) {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({ "error": "message exceeds maximum size" })),
+        );
+    }
     let recipient: [u8; 32] = match hex::decode(&req.recipient)
         .ok()
         .and_then(|b| b.try_into().ok())
@@ -2755,6 +2781,7 @@ async fn hosted_negotiate_accept(
 /// Token is resolved with the following priority:
 ///   1. `Authorization: Bearer <token>` header (preferred — never logged)
 ///   2. `?token=<hex>` query param (deprecated — visible in server logs)
+#[cfg(feature = "pilot")]
 async fn ws_hosted_inbox_handler(
     ws: WebSocketUpgrade,
     headers: HeaderMap,
@@ -2799,6 +2826,7 @@ async fn ws_hosted_inbox_handler(
         .into_response()
 }
 
+#[cfg(feature = "pilot")]
 async fn ws_hosted_inbox_task(mut socket: WebSocket, state: ApiState, token: String) {
     // Resolve session to get agent_id for filtering; reject expired tokens.
     let agent_id_hex = {
@@ -2882,17 +2910,16 @@ fn parse_msg_type(s: &str) -> Option<MsgType> {
 }
 
 fn ct_eq(a: &str, b: &str) -> bool {
-    // Use u8 accumulator (matches aggregator's implementation).
-    // usize would allow compiler optimisations that can leak timing info on
-    // 64-bit targets — a u8 forces byte-granularity constant-time behaviour.
+    // Compare in constant time — no early return on length mismatch.
+    // Use usize accumulator so length XOR never truncates (u8 would wrap at 256).
     let a = a.as_bytes();
     let b = b.as_bytes();
     let len = a.len().max(b.len());
-    let mut diff: u8 = (a.len() ^ b.len()) as u8;
+    let mut diff: usize = a.len() ^ b.len();
     for i in 0..len {
         let x = a.get(i).copied().unwrap_or(0);
         let y = b.get(i).copied().unwrap_or(0);
-        diff |= x ^ y;
+        diff |= (x ^ y) as usize;
     }
     diff == 0
 }
@@ -5878,6 +5905,7 @@ fn proc_uid(pid: u32) -> Option<u32> {
 /// Requires auth (same as other mutating endpoints). Validates that the given
 /// PID belongs to a user-space process owned by the same UID as the node to
 /// prevent an attacker from registering arbitrary system PIDs.
+#[cfg(feature = "pilot")]
 async fn agent_register_pid(
     headers: HeaderMap,
     State(state): State<ApiState>,
@@ -5930,6 +5958,7 @@ async fn agent_register_pid(
 /// Sends SIGTERM to the registered zeroclaw PID. NodeService's restart loop
 /// automatically re-launches zeroclaw, which re-reads all SKILL.toml files.
 /// Rate-limited to 3 reloads per minute to prevent DoS via reload loop.
+#[cfg(feature = "pilot")]
 async fn agent_reload(headers: HeaderMap, State(state): State<ApiState>) -> Response {
     if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
         return resp;
@@ -6163,6 +6192,65 @@ async fn agent_persona_write(
             Json(serde_json::json!({ "error": "failed to write PERSONA.md" })),
         )
             .into_response(),
+    }
+}
+
+/// GET /agent/profile — read operator onboarding profile (profile.json in log_dir).
+async fn agent_profile_read(headers: HeaderMap, State(state): State<ApiState>) -> Response {
+    if let Some(resp) = require_read_or_master_access(&state, &headers) {
+        return resp;
+    }
+    let log_dir = match state.0.exempt_persist_path.parent() {
+        Some(p) => p.to_path_buf(),
+        None => return Json(serde_json::json!({})).into_response(),
+    };
+    let path = log_dir.join("profile.json");
+    match tokio::fs::read_to_string(&path).await {
+        Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
+            Ok(v)  => Json(v).into_response(),
+            Err(_) => Json(serde_json::json!({})).into_response(),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Json(serde_json::json!({})).into_response()
+        }
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "failed to read profile" })),
+        ).into_response(),
+    }
+}
+
+/// POST /agent/profile — write operator onboarding profile (profile.json in log_dir).
+/// Body: `{ "motivation": "...", "use_cases": [...], "referral": "..." }`
+async fn agent_profile_write(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
+        return resp;
+    }
+    let log_dir = match state.0.exempt_persist_path.parent() {
+        Some(p) => p.to_path_buf(),
+        None => return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "log_dir unavailable" })),
+        ).into_response(),
+    };
+    let path = log_dir.join("profile.json");
+    let content = serde_json::to_string_pretty(&body).unwrap_or_default();
+    if content.len() > 4096 {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({ "error": "profile exceeds 4 KB limit" })),
+        ).into_response();
+    }
+    match tokio::fs::write(&path, content).await {
+        Ok(_)  => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "failed to write profile" })),
+        ).into_response(),
     }
 }
 
@@ -6629,6 +6717,7 @@ async fn task_log_delete(
 // Authentication: loopback-only (bound to 127.0.0.1); no secret needed because
 // only zeroclaw running on this device can reach port 9090 from localhost.
 
+#[cfg(feature = "pilot")]
 async fn chat_completions_relay(
     State(state): State<ApiState>,
     Json(mut body): Json<serde_json::Value>,

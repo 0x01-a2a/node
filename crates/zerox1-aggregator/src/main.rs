@@ -568,6 +568,7 @@ async fn main() -> anyhow::Result<()> {
         hosting_secret: config.hosting_secret,
         blob_dir: config.blob_dir,
         reel_dir: config.reel_dir,
+        #[cfg(feature = "pilot")]
         ntfy_server: config.ntfy_server,
         http_client,
         activity_tx,
@@ -600,8 +601,6 @@ async fn main() -> anyhow::Result<()> {
         identity_cache: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
-        skr_league_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
-        bags_claims: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         sponsor_signing_key,
         bags_api_key: config.bags_api_key,
         sponsor_rpc_url: config.sponsor_rpc_url,
@@ -611,20 +610,34 @@ async fn main() -> anyhow::Result<()> {
         sponsor_launches: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         admin_api_key: config.admin_api_key,
         sponsor_initial_buy_lamports: config.sponsor_initial_buy_lamports,
+        #[cfg(feature = "pilot")]
         apns_config,
         gift_code_gating: config.gift_code_gating,
         self_pay_fee_lamports: config.self_pay_fee_lamports,
         self_pay_fee_wallet: config.self_pay_fee_wallet,
+        #[cfg(feature = "pilot")]
         twilio_account_sid: config.twilio_account_sid,
+        #[cfg(feature = "pilot")]
         twilio_auth_token: config.twilio_auth_token,
+        #[cfg(feature = "pilot")]
         twilio_from_number: config.twilio_from_number,
+        #[cfg(feature = "pilot")]
         emergency_rate_limit: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        #[cfg(feature = "pilot")]
+        onboarding_rate_limit: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        #[cfg(feature = "pilot")]
         gemini_api_key: config.gemini_api_key,
+        #[cfg(feature = "pilot")]
         llm_proxy_free_daily_tokens: config.llm_proxy_free_daily_tokens,
+        #[cfg(feature = "pilot")]
         llm_global_daily_budget: config.llm_global_daily_budget,
+        #[cfg(feature = "pilot")]
         token_fees_cache: zerox1_aggregator::llm_proxy::TokenFeesCache::new(),
+        #[cfg(feature = "pilot")]
         pl_cache: zerox1_aggregator::llm_proxy::PlCache::new(),
     };
 
@@ -643,29 +656,11 @@ async fn main() -> anyhow::Result<()> {
     let public_routes = Router::new()
         .route("/health", get(api::health))
         .route("/version", get(api::get_version))
-        // LLM proxy — agent-authenticated via agent_id in body, 01PL-gated tier
-        // Body capped at 128 KiB — enough for ~200 short messages; rejects prompt-stuffing.
-        .route(
-            "/llm/chat",
-            post(llm_proxy::post_llm_chat)
-                .layer(DefaultBodyLimit::max(128 * 1024)),
-        )
         // Wallet ownership registration — sign once, no wallet proof needed per chat request.
         .route("/wallets/register", post(api::post_register_wallet))
-        // Emergency relay — agent-authenticated via agent_id in body, rate-limited
-        .route("/emergency/relay", post(api::post_emergency_relay))
         // Internal push endpoints — use their own secrets
         .route("/ingest/envelope", post(api::ingest_envelope))
         .route("/hosting/register", post(api::post_hosting_register))
-        // FCM registration & push-receive (agent-authenticated via Ed25519)
-        .route("/fcm/register", post(api::fcm_register))
-        .route("/fcm/sleep", post(api::fcm_sleep))
-        // APNs registration for iOS wake pushes (agent-authenticated via Ed25519)
-        .route("/apns/register", post(api::apns_register))
-        .route(
-            "/agents/{agent_id}/pending",
-            get(api::get_pending).post(api::post_pending),
-        )
         // Agent-authenticated ownership endpoints
         .route(
             "/agents/{agent_id}/propose-owner",
@@ -685,8 +680,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/agents/by-owner/{wallet}", get(api::get_agents_by_owner))
         // High-level public stats for the landing page
         .route("/stats/network", get(api::get_network_stats))
-        .route("/league/current", get(api::get_skr_league))
-        .route("/league/bags-claim", post(api::post_bags_claim))
         .route("/agents", get(api::get_agents))
         // Sponsored token launch — no auth, rate-limited per agent pubkey
         .route("/sponsor/launch", post(api::sponsor_launch))
@@ -727,6 +720,22 @@ async fn main() -> anyhow::Result<()> {
         .route("/campaigns", get(api::get_campaigns).post(api::post_campaign))
         .route("/campaigns/{id}", get(api::get_campaign_by_id))
         .route("/ws/campaigns", get(api::ws_campaigns));
+
+    #[cfg(feature = "pilot")]
+    let public_routes = public_routes
+        .route(
+            "/llm/chat",
+            post(llm_proxy::post_llm_chat).layer(DefaultBodyLimit::max(128 * 1024)),
+        )
+        .route("/emergency/relay", post(api::post_emergency_relay))
+        .route("/fcm/register", post(api::fcm_register))
+        .route("/fcm/sleep", post(api::fcm_sleep))
+        .route("/apns/register", post(api::apns_register))
+        .route(
+            "/agents/{agent_id}/pending",
+            get(api::get_pending).post(api::post_pending),
+        )
+        .route("/agents/{agent_id}/onboarding", post(api::post_agent_onboarding));
 
     // ── Billing routes ────────────────────────────────────────────────
     // POST endpoints: Ed25519-signed by account holder.
@@ -780,7 +789,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/interactions/by/{agent_id}", get(api::get_interactions_by))
         .route("/disputes/{agent_id}", get(api::get_disputes))
         .route("/registry", get(api::get_registry))
-        .route("/agents/{agent_id}/sleeping", get(api::get_sleep_status))
         .route(
             "/blobs",
             post(api::post_blob).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
@@ -790,16 +798,25 @@ async fn main() -> anyhow::Result<()> {
             api::api_key_middleware,
         ));
 
+    #[cfg(feature = "pilot")]
+    let gated_routes = gated_routes
+        .route("/agents/{agent_id}/sleeping", get(api::get_sleep_status));
+
     // ── Admin-key gated routes (/admin/*) — require separate admin_api_key ──
     let admin_routes = Router::new()
+        .route("/admin/gift-codes", get(api::get_admin_gift_codes))
+        .route("/admin/gift-codes/generate", post(api::post_admin_generate_gift_codes))
+        .route("/admin/gift-codes/{code}", delete(api::delete_admin_gift_code));
+
+    #[cfg(feature = "pilot")]
+    let admin_routes = admin_routes
         .route("/admin/billing/accounts", get(api::get_admin_billing_accounts))
         .route("/admin/billing/settlements", get(api::get_admin_settlements))
         .route("/admin/billing/revenue", get(api::get_admin_revenue))
         .route("/admin/billing/settlements/{id}/retry", post(api::post_admin_retry_settlement))
-        .route("/admin/billing/accounts/{id}/skip-settlement", post(api::post_admin_set_skip_settlement))
-        .route("/admin/gift-codes", get(api::get_admin_gift_codes))
-        .route("/admin/gift-codes/generate", post(api::post_admin_generate_gift_codes))
-        .route("/admin/gift-codes/{code}", delete(api::delete_admin_gift_code))
+        .route("/admin/billing/accounts/{id}/skip-settlement", post(api::post_admin_set_skip_settlement));
+
+    let admin_routes = admin_routes
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             api::admin_key_middleware,

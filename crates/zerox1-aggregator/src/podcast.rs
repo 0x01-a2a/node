@@ -37,6 +37,46 @@ pub struct ProduceResponse {
     pub tier_used: String,
 }
 
+/// POST /podcast/enhance — premium ElevenLabs processing on an uploaded MP3.
+/// Pipeline: voice isolation → text-to-dialogue recreation → music jingle.
+#[derive(Debug, Deserialize)]
+pub struct EnhanceRequest {
+    /// Episode ID (must exist from a prior produce call, or new upload).
+    pub episode_id: Option<String>,
+    /// Base64-encoded MP3 audio to enhance (uploaded from phone).
+    pub audio_b64: Option<String>,
+    /// Transcript for text-to-dialogue recreation.
+    pub transcript: Option<serde_json::Value>,
+    /// What to do: "clean" (isolation only), "polish" (full text-to-dialogue),
+    /// "all" (clean + polish + music). Default: "all".
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EnhanceResponse {
+    pub episode_id: String,
+    pub audio_url: String,
+    pub duration_secs: u64,
+    pub enhancements_applied: Vec<String>,
+}
+
+/// POST /podcast/translate — dub an episode into another language.
+#[derive(Debug, Deserialize)]
+pub struct TranslateRequest {
+    /// Episode ID to translate (must have audio in blob storage).
+    pub episode_id: String,
+    /// Target language code (e.g. "es", "ja", "hi", "zh").
+    pub target_language: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TranslateResponse {
+    pub episode_id: String,
+    pub translated_audio_url: String,
+    pub target_language: String,
+    pub duration_secs: u64,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ClipRequest {
     pub episode_id: String,
@@ -256,6 +296,171 @@ async fn generate_tts(
         .await
         .map(|b| b.to_vec())
         .map_err(|e| format!("Failed to read TTS response: {e}"))
+}
+
+/// Voice isolation — remove background noise from audio.
+/// POST https://api.elevenlabs.io/v1/audio-isolation/stream
+/// Input: multipart form with audio file. Output: cleaned audio bytes.
+async fn isolate_voice(
+    client: &reqwest::Client,
+    api_key: &str,
+    audio_bytes: &[u8],
+) -> Result<Vec<u8>, String> {
+    let part = reqwest::multipart::Part::bytes(audio_bytes.to_vec())
+        .file_name("audio.mp3")
+        .mime_str("audio/mpeg")
+        .map_err(|e| format!("Failed to build multipart: {e}"))?;
+    let form = reqwest::multipart::Form::new().part("audio", part);
+
+    let resp = client
+        .post("https://api.elevenlabs.io/v1/audio-isolation/stream")
+        .header("xi-api-key", api_key)
+        .multipart(form)
+        .timeout(std::time::Duration::from_secs(120))
+        .send()
+        .await
+        .map_err(|e| format!("Voice isolation error: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Voice isolation returned {status}: {body}"));
+    }
+
+    resp.bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|e| format!("Failed to read isolation response: {e}"))
+}
+
+/// Text-to-Dialogue — generate a full multi-speaker conversation from a script.
+/// POST https://api.elevenlabs.io/v1/text-to-dialogue/convert
+/// Input: JSON with script text + voice config. Output: audio bytes.
+async fn text_to_dialogue(
+    client: &reqwest::Client,
+    api_key: &str,
+    script: &str,
+) -> Result<Vec<u8>, String> {
+    let resp = client
+        .post("https://api.elevenlabs.io/v1/text-to-dialogue/convert")
+        .header("xi-api-key", api_key)
+        .json(&json!({
+            "text": script,
+            "model_id": "eleven_v3",
+            "output_format": "mp3_44100_128"
+        }))
+        .timeout(std::time::Duration::from_secs(120))
+        .send()
+        .await
+        .map_err(|e| format!("Text-to-dialogue error: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Text-to-dialogue returned {status}: {body}"));
+    }
+
+    resp.bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|e| format!("Failed to read dialogue response: {e}"))
+}
+
+/// Dubbing — translate audio to another language preserving voice.
+/// POST https://api.elevenlabs.io/v1/dubbing
+/// Returns a dubbing project ID; then poll for completion and download.
+async fn create_dubbing(
+    client: &reqwest::Client,
+    api_key: &str,
+    audio_bytes: &[u8],
+    source_lang: &str,
+    target_lang: &str,
+) -> Result<String, String> {
+    let part = reqwest::multipart::Part::bytes(audio_bytes.to_vec())
+        .file_name("episode.mp3")
+        .mime_str("audio/mpeg")
+        .map_err(|e| format!("Multipart error: {e}"))?;
+    let form = reqwest::multipart::Form::new()
+        .part("file", part)
+        .text("source_lang", source_lang.to_string())
+        .text("target_lang", target_lang.to_string())
+        .text("num_speakers", "2")
+        .text("highest_resolution", "false");
+
+    let resp = client
+        .post("https://api.elevenlabs.io/v1/dubbing")
+        .header("xi-api-key", api_key)
+        .multipart(form)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("Dubbing create error: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Dubbing returned {status}: {body}"));
+    }
+
+    let data: serde_json::Value = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
+    data["dubbing_id"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "No dubbing_id in response".to_string())
+}
+
+/// Poll dubbing status and download when complete.
+async fn poll_and_download_dubbing(
+    client: &reqwest::Client,
+    api_key: &str,
+    dubbing_id: &str,
+    target_lang: &str,
+) -> Result<Vec<u8>, String> {
+    // Poll up to 60 times (5s intervals = 5 min max)
+    for _ in 0..60 {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        let status_resp = client
+            .get(&format!(
+                "https://api.elevenlabs.io/v1/dubbing/{}",
+                dubbing_id
+            ))
+            .header("xi-api-key", api_key)
+            .send()
+            .await
+            .map_err(|e| format!("Dubbing poll error: {e}"))?;
+
+        if !status_resp.status().is_success() {
+            continue;
+        }
+
+        let data: serde_json::Value =
+            status_resp.json().await.map_err(|e| format!("Parse: {e}"))?;
+        let status = data["status"].as_str().unwrap_or("");
+
+        if status == "dubbed" {
+            // Download the dubbed audio
+            let dl_resp = client
+                .get(&format!(
+                    "https://api.elevenlabs.io/v1/dubbing/{}/audio/{}",
+                    dubbing_id, target_lang
+                ))
+                .header("xi-api-key", api_key)
+                .send()
+                .await
+                .map_err(|e| format!("Dubbing download error: {e}"))?;
+
+            return dl_resp
+                .bytes()
+                .await
+                .map(|b| b.to_vec())
+                .map_err(|e| format!("Download error: {e}"));
+        } else if status == "failed" {
+            return Err("Dubbing failed".to_string());
+        }
+        // else: still processing, keep polling
+    }
+    Err("Dubbing timed out after 5 minutes".to_string())
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -659,6 +864,334 @@ pub async fn get_episodes(
     let episodes = state.store.list_podcast_episodes(&agent_id);
 
     (StatusCode::OK, Json(json!({ "episodes": episodes }))).into_response()
+}
+
+/// POST /podcast/enhance — premium ElevenLabs processing pipeline.
+/// Requires 01PL. Applies: voice isolation → text-to-dialogue → music.
+pub async fn post_enhance(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<EnhanceRequest>,
+) -> impl IntoResponse {
+    let agent_id = match extract_agent_id(&headers) {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "Missing X-Agent-Id header"})),
+            )
+                .into_response()
+        }
+    };
+
+    // Premium only
+    if !is_premium_eligible(&state.http_client, &state.pl_cache, &agent_id).await {
+        return (
+            StatusCode::PAYMENT_REQUIRED,
+            Json(json!({"error": "Enhance requires 500,000 01PL.", "required_01pl": 500_000})),
+        )
+            .into_response();
+    }
+
+    let elevenlabs_key = match std::env::var("ELEVENLABS_API_KEY") {
+        Ok(k) if !k.is_empty() => k,
+        _ => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "ELEVENLABS_API_KEY not configured"})),
+            )
+                .into_response()
+        }
+    };
+
+    let blob_dir = match state.blob_dir.as_ref() {
+        Some(d) => d.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "Blob storage not configured"})),
+            )
+                .into_response()
+        }
+    };
+
+    // Get the audio — either from base64 upload or existing episode file.
+    let audio_bytes: Vec<u8> = if let Some(ref b64) = req.audio_b64 {
+        match base64::decode(b64) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "Invalid base64 audio"})),
+                )
+                    .into_response()
+            }
+        }
+    } else if let Some(ref eid) = req.episode_id {
+        let path = blob_dir.join(format!("podcast_{}.mp3", eid));
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "Episode audio not found"})),
+                )
+                    .into_response()
+            }
+        }
+    } else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Provide audio_b64 or episode_id"})),
+        )
+            .into_response();
+    };
+
+    let mode = req.mode.as_deref().unwrap_or("all");
+    let episode_id = req
+        .episode_id
+        .unwrap_or_else(|| gen_episode_id());
+    let mut enhancements: Vec<String> = Vec::new();
+    let mut current_audio = audio_bytes;
+
+    // Step 1: Voice isolation (clean background noise)
+    if mode == "clean" || mode == "all" {
+        match isolate_voice(&state.http_client, &elevenlabs_key, &current_audio).await {
+            Ok(cleaned) => {
+                current_audio = cleaned;
+                enhancements.push("voice_isolation".to_string());
+                tracing::info!("Voice isolation complete for {episode_id}");
+            }
+            Err(e) => tracing::warn!("Voice isolation failed (continuing): {e}"),
+        }
+    }
+
+    // Step 2: Text-to-dialogue (full recreation with natural conversation)
+    if (mode == "polish" || mode == "all") && req.transcript.is_some() {
+        // Build a script from the transcript for text-to-dialogue
+        let script = build_dialogue_script(req.transcript.as_ref().unwrap());
+        if !script.is_empty() {
+            match text_to_dialogue(&state.http_client, &elevenlabs_key, &script).await {
+                Ok(dialogue_audio) => {
+                    current_audio = dialogue_audio;
+                    enhancements.push("text_to_dialogue".to_string());
+                    tracing::info!("Text-to-dialogue complete for {episode_id}");
+                }
+                Err(e) => tracing::warn!("Text-to-dialogue failed (keeping isolated audio): {e}"),
+            }
+        }
+    }
+
+    // Step 3: Generate and prepend/append jingle
+    if mode == "all" {
+        let jingle_prompt = "Short podcast intro jingle, upbeat and modern, 8 seconds, electronic lo-fi";
+        if let Ok(jingle) =
+            generate_jingle(&state.http_client, &elevenlabs_key, jingle_prompt, 8000).await
+        {
+            // Prepend jingle + append outro
+            let mut final_audio = jingle.clone();
+            final_audio.extend_from_slice(&current_audio);
+            final_audio.extend_from_slice(&jingle);
+            current_audio = final_audio;
+            enhancements.push("music_jingle".to_string());
+        }
+    }
+
+    // Save enhanced audio
+    let filename = format!("podcast_{}_enhanced.mp3", episode_id);
+    let output_path = blob_dir.join(&filename);
+    if let Err(e) = tokio::fs::write(&output_path, &current_audio).await {
+        tracing::error!("Failed to write enhanced audio: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "Failed to store enhanced audio"})),
+        )
+            .into_response();
+    }
+
+    let duration_secs = current_audio.len() as u64 / 16_000; // rough estimate at 128kbps
+    let audio_url = format!("https://api.0x01.world/blobs/{}", filename);
+
+    (
+        StatusCode::OK,
+        Json(json!(EnhanceResponse {
+            episode_id,
+            audio_url,
+            duration_secs,
+            enhancements_applied: enhancements,
+        })),
+    )
+        .into_response()
+}
+
+/// POST /podcast/translate — dub an episode into another language.
+pub async fn post_translate(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<TranslateRequest>,
+) -> impl IntoResponse {
+    let agent_id = match extract_agent_id(&headers) {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "Missing X-Agent-Id header"})),
+            )
+                .into_response()
+        }
+    };
+
+    // Premium only
+    if !is_premium_eligible(&state.http_client, &state.pl_cache, &agent_id).await {
+        return (
+            StatusCode::PAYMENT_REQUIRED,
+            Json(json!({"error": "Translate requires 500,000 01PL.", "required_01pl": 500_000})),
+        )
+            .into_response();
+    }
+
+    let elevenlabs_key = match std::env::var("ELEVENLABS_API_KEY") {
+        Ok(k) if !k.is_empty() => k,
+        _ => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "ELEVENLABS_API_KEY not configured"})),
+            )
+                .into_response()
+        }
+    };
+
+    let blob_dir = match state.blob_dir.as_ref() {
+        Some(d) => d.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "Blob storage not configured"})),
+            )
+                .into_response()
+        }
+    };
+
+    // Load episode audio
+    let audio_path = blob_dir.join(format!("podcast_{}.mp3", req.episode_id));
+    let enhanced_path = blob_dir.join(format!("podcast_{}_enhanced.mp3", req.episode_id));
+    let source_path = if enhanced_path.exists() {
+        enhanced_path
+    } else {
+        audio_path
+    };
+
+    let audio_bytes = match tokio::fs::read(&source_path).await {
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "Episode audio not found. Produce or enhance first."})),
+            )
+                .into_response()
+        }
+    };
+
+    // Create dubbing project
+    let dubbing_id = match create_dubbing(
+        &state.http_client,
+        &elevenlabs_key,
+        &audio_bytes,
+        "en",
+        &req.target_language,
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Dubbing failed: {e}")})),
+            )
+                .into_response()
+        }
+    };
+
+    // Poll and download
+    let dubbed_audio = match poll_and_download_dubbing(
+        &state.http_client,
+        &elevenlabs_key,
+        &dubbing_id,
+        &req.target_language,
+    )
+    .await
+    {
+        Ok(audio) => audio,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Dubbing failed: {e}")})),
+            )
+                .into_response()
+        }
+    };
+
+    // Save translated audio
+    let filename = format!(
+        "podcast_{}_{}.mp3",
+        req.episode_id, req.target_language
+    );
+    let output_path = blob_dir.join(&filename);
+    if let Err(e) = tokio::fs::write(&output_path, &dubbed_audio).await {
+        tracing::error!("Failed to write dubbed audio: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "Failed to store translated audio"})),
+        )
+            .into_response();
+    }
+
+    let duration_secs = dubbed_audio.len() as u64 / 16_000;
+    let audio_url = format!("https://api.0x01.world/blobs/{}", filename);
+
+    let _ = agent_id; // used for gate check above
+
+    (
+        StatusCode::OK,
+        Json(json!(TranslateResponse {
+            episode_id: req.episode_id,
+            translated_audio_url: audio_url,
+            target_language: req.target_language,
+            duration_secs,
+        })),
+    )
+        .into_response()
+}
+
+/// Build a dialogue script from transcript for text-to-dialogue API.
+/// Format: "Speaker 1: text\nSpeaker 2: text\n..."
+fn build_dialogue_script(transcript: &serde_json::Value) -> String {
+    let messages = match transcript.as_array() {
+        Some(m) => m,
+        None => return String::new(),
+    };
+
+    let mut script = String::new();
+    for msg in messages {
+        let role = msg["role"].as_str().unwrap_or("user");
+        let text = msg["text"].as_str().unwrap_or("");
+        if text.is_empty() {
+            continue;
+        }
+        let speaker = if role == "user" { "Host" } else { "Co-host" };
+        script.push_str(&format!("{}: {}\n", speaker, text));
+    }
+
+    // Text-to-dialogue has a 2000 char limit per request.
+    if script.len() > 2000 {
+        script.truncate(2000);
+        // Trim to last complete line
+        if let Some(pos) = script.rfind('\n') {
+            script.truncate(pos);
+        }
+    }
+
+    script
 }
 
 use std::collections::HashMap;

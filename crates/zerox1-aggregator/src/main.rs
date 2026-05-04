@@ -745,6 +745,14 @@ async fn main() -> anyhow::Result<()> {
             "/podcast/produce",
             post(podcast::post_produce).layer(DefaultBodyLimit::max(512 * 1024)),
         )
+        .route(
+            "/podcast/enhance",
+            post(podcast::post_enhance).layer(DefaultBodyLimit::max(50 * 1024 * 1024)), // 50MB for audio upload
+        )
+        .route(
+            "/podcast/translate",
+            post(podcast::post_translate),
+        )
         .route("/podcast/clip", post(podcast::post_clip))
         .route("/podcast/publish", post(podcast::post_publish))
         .route("/podcast/episodes", get(podcast::get_episodes));

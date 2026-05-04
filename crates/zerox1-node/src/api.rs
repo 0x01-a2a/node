@@ -986,6 +986,7 @@ pub fn build_router(state: ApiState, cors_origins: Vec<String>) -> axum::Router 
         .route("/agent/memory/write", post(agent_memory_write))
         .route("/agent/persona", get(agent_persona_read))
         .route("/agent/persona/write", post(agent_persona_write))
+        .route("/agent/conversation/export", get(agent_conversation_export))
         .route("/agent/profile", get(agent_profile_read).post(agent_profile_write))
         // Skill manager — safe Rust-side file operations (no shell injection)
         .route("/skill/list", get(skill_list_handler))
@@ -6213,6 +6214,67 @@ async fn agent_persona_write(
         )
             .into_response(),
     }
+}
+
+/// GET /agent/conversation/export — export recent conversation history for podcast production.
+///
+/// Reads conversation-category memory entries from the zeroclaw gateway's memory API.
+/// Falls back to an empty transcript if the gateway is unreachable or has no history.
+///
+/// Response: `{ "messages": [{ "role": "user"|"assistant", "text": "...", "ts": unix_ms }] }`
+async fn agent_conversation_export(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+) -> Response {
+    if let Some(resp) = require_read_or_master_access(&state, &headers) {
+        return resp;
+    }
+
+    // Try the zeroclaw gateway memory API first (conversation category).
+    // The gateway runs on 127.0.0.1:9093 (iOS) or 127.0.0.1:42617 (Android).
+    let gateway_ports = [9093u16, 42617];
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_default();
+
+    for port in gateway_ports {
+        let url = format!(
+            "http://127.0.0.1:{}/api/memory?category=conversation&limit=200",
+            port
+        );
+        if let Ok(resp) = client.get(&url).send().await {
+            if resp.status().is_success() {
+                if let Ok(data) = resp.json::<serde_json::Value>().await {
+                    // Transform memory entries into podcast-friendly transcript format.
+                    let messages: Vec<serde_json::Value> = data["entries"]
+                        .as_array()
+                        .unwrap_or(&vec![])
+                        .iter()
+                        .filter_map(|entry| {
+                            let value = entry.get("value")?.as_str()?;
+                            let key = entry.get("key")?.as_str().unwrap_or("");
+                            let role = if key.contains("user") || key.contains("human") {
+                                "user"
+                            } else {
+                                "assistant"
+                            };
+                            Some(serde_json::json!({
+                                "role": role,
+                                "text": value,
+                                "ts": entry.get("timestamp").and_then(|t| t.as_i64()).unwrap_or(0),
+                            }))
+                        })
+                        .collect();
+
+                    return Json(serde_json::json!({ "messages": messages })).into_response();
+                }
+            }
+        }
+    }
+
+    // Fallback: return empty transcript — agent can still produce from its in-memory context.
+    Json(serde_json::json!({ "messages": [] })).into_response()
 }
 
 /// GET /agent/profile — read operator onboarding profile (profile.json in log_dir).

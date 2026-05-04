@@ -125,8 +125,7 @@ jobs:
   #   cargo build --release -p zerox1-node --features zerox1-node/ios-ffi \
   #     --target aarch64-apple-ios-sim    # simulator
 
-  # ── Build zerox1-mailbox (release artifact bundled into GitHub release) ──
-  # Aggregator is built and deployed separately via deploy-aggregator.yml.
+  # ── Build zerox1-aggregator and zerox1-mailbox (bundled into GitHub release) ──
   build-server-services:
     name: Build server services
     runs-on: ubuntu-22.04
@@ -145,6 +144,20 @@ jobs:
             ~/.cargo/git/db
           key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-registry-${{ runner.os }}-
+
+      - name: Build aggregator
+        run: |
+          cargo build --release -p zerox1-aggregator \
+            --features zerox1-aggregator/pilot,zerox1-aggregator/data-bounty
+        env:
+          CARGO_TERM_COLOR: always
+
+      - name: Upload aggregator artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zerox1-aggregator
+          path: target/release/zerox1-aggregator
+          if-no-files-found: error
 
       - name: Build mailbox
         run: cargo build --release -p zerox1-mailbox
@@ -314,12 +327,13 @@ jobs:
 
       - name: Rename artifacts for release
         run: |
-          cp artifacts/zerox1-node-darwin-arm64/zerox1-node  zerox1-node-darwin-arm64
-          cp artifacts/zerox1-node-darwin-x64/zerox1-node    zerox1-node-darwin-x64
-          cp artifacts/zerox1-node-linux-x64/zerox1-node     zerox1-node-linux-x64
-          cp artifacts/zerox1-node-win32-x64/zerox1-node.exe zerox1-node-win32-x64.exe
-          cp artifacts/zerox1-mailbox/zerox1-mailbox         zerox1-mailbox-linux-x64
-          cp artifacts/zerox1-node-android-arm64/zerox1-node zerox1-node-android-arm64
+          cp artifacts/zerox1-node-darwin-arm64/zerox1-node      zerox1-node-darwin-arm64
+          cp artifacts/zerox1-node-darwin-x64/zerox1-node        zerox1-node-darwin-x64
+          cp artifacts/zerox1-node-linux-x64/zerox1-node         zerox1-node-linux-x64
+          cp artifacts/zerox1-node-win32-x64/zerox1-node.exe     zerox1-node-win32-x64.exe
+          cp artifacts/zerox1-aggregator/zerox1-aggregator       zerox1-aggregator-linux-x64
+          cp artifacts/zerox1-mailbox/zerox1-mailbox             zerox1-mailbox-linux-x64
+          cp artifacts/zerox1-node-android-arm64/zerox1-node     zerox1-node-android-arm64
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -329,6 +343,7 @@ jobs:
             zerox1-node-darwin-x64
             zerox1-node-linux-x64
             zerox1-node-win32-x64.exe
+            zerox1-aggregator-linux-x64
             zerox1-mailbox-linux-x64
             zerox1-node-android-arm64
           generate_release_notes: true

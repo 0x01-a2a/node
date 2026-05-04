@@ -1,0 +1,59 @@
+name: Patch Release — Add Aggregator Binary
+
+# One-shot workflow: build zerox1-aggregator and attach it to an existing
+# GitHub release. Used when a release was created before the aggregator
+# build was part of release.yml.
+#
+# Usage:
+#   gh workflow run patch-release-aggregator.yml -f tag=v0.7.0
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to attach the binary to (e.g. v0.7.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build-and-upload:
+    name: Build aggregator and upload to release
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-${{ runner.os }}-
+
+      - name: Build aggregator
+        run: |
+          cargo build --release -p zerox1-aggregator \
+            --features zerox1-aggregator/pilot,zerox1-aggregator/data-bounty
+        env:
+          CARGO_TERM_COLOR: always
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          cp target/release/zerox1-aggregator zerox1-aggregator-linux-x64
+          gh release upload "$TAG" zerox1-aggregator-linux-x64 --clobber

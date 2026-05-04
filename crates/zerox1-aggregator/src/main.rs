@@ -3,6 +3,8 @@ use zerox1_aggregator::api;
 use zerox1_aggregator::billing;
 #[cfg(feature = "pilot")]
 use zerox1_aggregator::llm_proxy;
+#[cfg(feature = "pilot")]
+use zerox1_aggregator::podcast;
 #[allow(unused_imports)]
 use zerox1_aggregator::mpp;
 use zerox1_aggregator::registry_8004;
@@ -737,7 +739,15 @@ async fn main() -> anyhow::Result<()> {
             "/agents/{agent_id}/pending",
             get(api::get_pending).post(api::post_pending),
         )
-        .route("/agents/{agent_id}/onboarding", post(api::post_agent_onboarding));
+        .route("/agents/{agent_id}/onboarding", post(api::post_agent_onboarding))
+        // Podcast production endpoints
+        .route(
+            "/podcast/produce",
+            post(podcast::post_produce).layer(DefaultBodyLimit::max(512 * 1024)),
+        )
+        .route("/podcast/clip", post(podcast::post_clip))
+        .route("/podcast/publish", post(podcast::post_publish))
+        .route("/podcast/episodes", get(podcast::get_episodes));
 
     // ── Billing routes ────────────────────────────────────────────────
     // POST endpoints: Ed25519-signed by account holder.

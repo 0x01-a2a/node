@@ -1259,6 +1259,21 @@ CREATE TABLE IF NOT EXISTS agent_onboarding (
     created_at INTEGER NOT NULL
 );
 ",
+    // v24: Podcast episodes produced by agents.
+    "
+CREATE TABLE IF NOT EXISTS podcast_episodes (
+    episode_id    TEXT    PRIMARY KEY,
+    agent_id      TEXT    NOT NULL,
+    title         TEXT    NOT NULL,
+    audio_url     TEXT    NOT NULL,
+    duration_secs INTEGER NOT NULL DEFAULT 0,
+    tier_used     TEXT    NOT NULL DEFAULT 'free',
+    published_rss INTEGER NOT NULL DEFAULT 0,
+    published_tg  INTEGER NOT NULL DEFAULT 0,
+    created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_podcast_agent ON podcast_episodes(agent_id);
+",
 ];
 
 struct Db(rusqlite::Connection);
@@ -5620,6 +5635,102 @@ impl ReputationStore {
             )?;
         }
         Ok(())
+    }
+    // ── Podcast episodes ───────────────────────────────────────────────────
+
+    pub fn insert_podcast_episode(
+        &self,
+        episode_id: &str,
+        agent_id: &str,
+        title: &str,
+        audio_url: &str,
+        duration_secs: u64,
+        tier: &str,
+    ) {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            let _ = conn.0.execute(
+                "INSERT OR IGNORE INTO podcast_episodes
+                 (episode_id, agent_id, title, audio_url, duration_secs, tier_used, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    episode_id,
+                    agent_id,
+                    title,
+                    audio_url,
+                    duration_secs as i64,
+                    tier,
+                    now_secs() as i64,
+                ],
+            );
+        }
+    }
+
+    pub fn get_podcast_episode(&self, episode_id: &str) -> Option<serde_json::Value> {
+        let db = self.db.lock().unwrap();
+        let conn = db.as_ref()?;
+        conn.0
+            .query_row(
+                "SELECT episode_id, agent_id, title, audio_url, duration_secs, tier_used, created_at
+                 FROM podcast_episodes WHERE episode_id = ?1",
+                rusqlite::params![episode_id],
+                |row| {
+                    Ok(serde_json::json!({
+                        "episode_id": row.get::<_, String>(0)?,
+                        "agent_id": row.get::<_, String>(1)?,
+                        "title": row.get::<_, String>(2)?,
+                        "audio_url": row.get::<_, String>(3)?,
+                        "duration_secs": row.get::<_, i64>(4)?,
+                        "tier_used": row.get::<_, String>(5)?,
+                        "created_at": row.get::<_, i64>(6)?,
+                    }))
+                },
+            )
+            .ok()
+    }
+
+    pub fn list_podcast_episodes(&self, agent_id: &str) -> Vec<serde_json::Value> {
+        let db = self.db.lock().unwrap();
+        let conn = match db.as_ref() {
+            Some(c) => c,
+            None => return vec![],
+        };
+        let mut stmt = match conn.0.prepare(
+            "SELECT episode_id, title, audio_url, duration_secs, tier_used, created_at
+             FROM podcast_episodes WHERE agent_id = ?1 ORDER BY created_at DESC LIMIT 100",
+        ) {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+        stmt.query_map(rusqlite::params![agent_id], |row| {
+            Ok(serde_json::json!({
+                "episode_id": row.get::<_, String>(0)?,
+                "title": row.get::<_, String>(1)?,
+                "audio_url": row.get::<_, String>(2)?,
+                "duration_secs": row.get::<_, i64>(3)?,
+                "tier_used": row.get::<_, String>(4)?,
+                "published_at": row.get::<_, i64>(5)?,
+            }))
+        })
+        .ok()
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+    }
+
+    pub fn mark_podcast_published(&self, episode_id: &str, channel: &str) {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            let col = match channel {
+                "rss" => "published_rss",
+                "telegram" => "published_tg",
+                _ => return,
+            };
+            let sql = format!(
+                "UPDATE podcast_episodes SET {} = 1 WHERE episode_id = ?1",
+                col
+            );
+            let _ = conn.0.execute(&sql, rusqlite::params![episode_id]);
+        }
     }
 } // end impl ReputationStore
 

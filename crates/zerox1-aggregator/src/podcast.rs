@@ -296,66 +296,100 @@ pub async fn post_produce(
         "free"
     };
 
-    // Get ElevenLabs API key from env (set on aggregator, not per-agent)
-    let elevenlabs_key = match std::env::var("ELEVENLABS_API_KEY") {
-        Ok(k) if !k.is_empty() => k,
-        _ => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error": "Podcast production is not configured (ELEVENLABS_API_KEY missing)"})),
-            )
-                .into_response()
-        }
-    };
+    let elevenlabs_key = std::env::var("ELEVENLABS_API_KEY").unwrap_or_default();
 
     let episode_id = gen_episode_id();
     let title = req
         .title
         .unwrap_or_else(|| format!("Episode {}", &episode_id[..8]));
 
-    // Generate intro jingle (both tiers get this)
-    let jingle_prompt = format!(
-        "Short podcast intro jingle, upbeat and modern, 8 seconds, electronic lo-fi"
-    );
-    let jingle = match generate_jingle(&state.http_client, &elevenlabs_key, &jingle_prompt, 8000)
-        .await
-    {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            tracing::error!("Jingle generation failed: {e}");
+    let blob_dir = match state.blob_dir.as_ref() {
+        Some(d) => d.clone(),
+        None => {
             return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Jingle generation failed: {e}")})),
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "Blob storage not configured"})),
             )
-                .into_response();
+                .into_response()
         }
     };
 
-    // For premium tier: generate TTS for agent lines
-    let mut agent_audio_parts: Vec<Vec<u8>> = Vec::new();
-    if tier == "premium" {
-        // Default agent voice — Rachel (ElevenLabs stock voice for narration)
-        let agent_voice_id = "21m00Tcm4TlvDq8ikWAM"; // Rachel
+    // ── Collect audio segments ────────────────────────────────────────────
+    // The transcript contains messages with optional audio_uri fields.
+    // Download each audio segment to a temp file for FFmpeg concatenation.
+    let tmp_dir = blob_dir.join(format!("tmp_podcast_{}", &episode_id));
+    if let Err(e) = tokio::fs::create_dir_all(&tmp_dir).await {
+        tracing::error!("Failed to create temp dir: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "Failed to create temp directory"})),
+        )
+            .into_response();
+    }
 
-        if let Some(messages) = req.transcript.as_array() {
-            for msg in messages {
-                if msg["role"].as_str() == Some("assistant") {
-                    if let Some(text) = msg["text"].as_str() {
-                        if text.len() > 10 {
-                            match generate_tts(
-                                &state.http_client,
-                                &elevenlabs_key,
-                                text,
-                                agent_voice_id,
-                            )
-                            .await
-                            {
-                                Ok(audio) => agent_audio_parts.push(audio),
-                                Err(e) => {
-                                    tracing::warn!("TTS generation failed for segment: {e}");
-                                    // Continue — skip this segment rather than failing entire episode
-                                }
-                            }
+    let mut segment_paths: Vec<std::path::PathBuf> = Vec::new();
+
+    // Static jingle (bundled on aggregator filesystem or generated once).
+    // For free tier: use a pre-generated static jingle if available, else skip.
+    // For premium tier: generate fresh jingle via ElevenLabs.
+    let jingle_path = blob_dir.join("podcast_jingle.mp3");
+    if tier == "premium" && !elevenlabs_key.is_empty() {
+        let jingle_prompt = "Short podcast intro jingle, upbeat and modern, 8 seconds, electronic lo-fi";
+        if let Ok(jingle_bytes) =
+            generate_jingle(&state.http_client, &elevenlabs_key, jingle_prompt, 8000).await
+        {
+            let _ = tokio::fs::write(&jingle_path, &jingle_bytes).await;
+        }
+    }
+    if tokio::fs::metadata(&jingle_path).await.is_ok() {
+        segment_paths.push(jingle_path.clone());
+    }
+
+    // Download/collect conversation audio segments from transcript.
+    if let Some(messages) = req.transcript.as_array() {
+        for (i, msg) in messages.iter().enumerate() {
+            if let Some(audio_url) = msg["audio_uri"].as_str().or(msg["audioUri"].as_str()) {
+                if audio_url.is_empty() {
+                    continue;
+                }
+                let seg_path = tmp_dir.join(format!("seg_{:04}.mp3", i));
+                // Download from blob storage or local reference
+                let url = if audio_url.starts_with("http") {
+                    audio_url.to_string()
+                } else {
+                    // Local file path from the device — the node should have uploaded
+                    // it to blob storage before calling produce. Skip if not a URL.
+                    continue;
+                };
+                match state.http_client.get(&url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        if let Ok(bytes) = resp.bytes().await {
+                            let _ = tokio::fs::write(&seg_path, &bytes).await;
+                            segment_paths.push(seg_path);
+                        }
+                    }
+                    _ => {
+                        tracing::warn!("Failed to download audio segment: {url}");
+                    }
+                }
+            } else if tier == "premium"
+                && !elevenlabs_key.is_empty()
+                && msg["role"].as_str() == Some("assistant")
+            {
+                // Premium: generate TTS for agent text lines without audio
+                if let Some(text) = msg["text"].as_str() {
+                    if text.len() > 10 {
+                        let seg_path = tmp_dir.join(format!("seg_{:04}.mp3", i));
+                        if let Ok(tts_bytes) = generate_tts(
+                            &state.http_client,
+                            &elevenlabs_key,
+                            text,
+                            "21m00Tcm4TlvDq8ikWAM", // Rachel voice
+                        )
+                        .await
+                        {
+                            let _ = tokio::fs::write(&seg_path, &tts_bytes).await;
+                            segment_paths.push(seg_path);
                         }
                     }
                 }
@@ -363,31 +397,98 @@ pub async fn post_produce(
         }
     }
 
-    // Store episode audio in blob storage
-    // In a full implementation, we'd concatenate jingle + user audio CIDs + agent TTS
-    // using FFmpeg. For now, store the jingle as the episode (MVP — proves the pipeline works).
-    let audio_bytes = jingle; // TODO: concatenate with real audio segments via FFmpeg
-    let duration_secs = 8; // jingle duration; real implementation calculates from full mix
+    // Append outro jingle
+    if tokio::fs::metadata(&jingle_path).await.is_ok() {
+        segment_paths.push(jingle_path);
+    }
 
-    let audio_url = if let Some(ref blob_dir) = state.blob_dir {
-        let filename = format!("podcast_{}.mp3", episode_id);
-        let path = blob_dir.join(&filename);
-        if let Err(e) = tokio::fs::write(&path, &audio_bytes).await {
-            tracing::error!("Failed to write podcast blob: {e}");
+    // ── Concatenate with FFmpeg ───────────────────────────────────────────
+    let output_path = blob_dir.join(format!("podcast_{}.mp3", episode_id));
+    let duration_secs: u64;
+
+    if segment_paths.is_empty() {
+        // No audio segments — return error
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "No audio segments found in transcript. Record a voice conversation first."})),
+        )
+            .into_response();
+    }
+
+    if segment_paths.len() == 1 {
+        // Single segment — just copy it
+        let _ = tokio::fs::copy(&segment_paths[0], &output_path).await;
+        duration_secs = 30; // estimate
+    } else {
+        // Build FFmpeg concat file
+        let concat_list_path = tmp_dir.join("concat.txt");
+        let concat_content: String = segment_paths
+            .iter()
+            .map(|p| format!("file '{}'\n", p.display()))
+            .collect();
+        if let Err(e) = tokio::fs::write(&concat_list_path, &concat_content).await {
+            tracing::error!("Failed to write concat list: {e}");
+            let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Failed to store audio"})),
+                Json(json!({"error": "Failed to prepare audio concatenation"})),
             )
                 .into_response();
         }
-        format!("https://api.0x01.world/blobs/{}", filename)
-    } else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "Blob storage not configured"})),
-        )
-            .into_response();
-    };
+
+        // Run FFmpeg
+        let ffmpeg_result = tokio::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", concat_list_path.to_str().unwrap_or(""),
+                "-c:a", "libmp3lame",
+                "-b:a", "128k",
+                "-ar", "44100",
+                output_path.to_str().unwrap_or(""),
+            ])
+            .output()
+            .await;
+
+        match ffmpeg_result {
+            Ok(output) if output.status.success() => {
+                tracing::info!("FFmpeg concat succeeded for episode {}", episode_id);
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::error!("FFmpeg concat failed: {stderr}");
+                let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "Audio concatenation failed"})),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::error!("FFmpeg not found or failed to execute: {e}");
+                let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "FFmpeg not available on server. Install ffmpeg to enable podcast production."})),
+                )
+                    .into_response();
+            }
+        }
+
+        // Get duration from output file size (rough estimate: 128kbps = 16KB/sec)
+        let file_size = tokio::fs::metadata(&output_path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+        duration_secs = file_size / 16_000;
+    }
+
+    // Cleanup temp dir
+    let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+
+    let audio_url = format!("https://api.0x01.world/blobs/podcast_{}.mp3", episode_id);
 
     // Store episode metadata in DB
     state.store.insert_podcast_episode(

@@ -987,6 +987,7 @@ pub fn build_router(state: ApiState, cors_origins: Vec<String>) -> axum::Router 
         .route("/agent/persona", get(agent_persona_read))
         .route("/agent/persona/write", post(agent_persona_write))
         .route("/agent/conversation/export", get(agent_conversation_export))
+        .route("/podcast/produce-local", post(podcast_produce_local))
         .route("/agent/profile", get(agent_profile_read).post(agent_profile_write))
         // Skill manager — safe Rust-side file operations (no shell injection)
         .route("/skill/list", get(skill_list_handler))
@@ -6275,6 +6276,155 @@ async fn agent_conversation_export(
 
     // Fallback: return empty transcript — agent can still produce from its in-memory context.
     Json(serde_json::json!({ "messages": [] })).into_response()
+}
+
+/// POST /podcast/produce-local — concatenate audio segments on-device into a single MP3.
+///
+/// Body: `{ "title": "...", "transcript": [{ "role": "user", "audio_uri": "/path/to/file.m4a" }, ...] }`
+///
+/// Reads local audio files from the transcript, concatenates them using raw byte append
+/// (works for same-format files) or FFmpeg if available, and saves the result to the
+/// skill workspace. Returns the local file path.
+async fn podcast_produce_local(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if let Some(resp) = require_api_secret_or_unauthorized(&state, &headers) {
+        return resp;
+    }
+
+    let workspace = skill_workspace!(state);
+    let title = body["title"].as_str().unwrap_or("Episode");
+
+    // Collect audio file paths from transcript
+    let mut audio_paths: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(messages) = body["transcript"].as_array() {
+        for msg in messages {
+            let uri = msg["audio_uri"]
+                .as_str()
+                .or_else(|| msg["audioUri"].as_str())
+                .unwrap_or("");
+            if uri.is_empty() {
+                continue;
+            }
+            // Strip file:// prefix if present
+            let path_str = uri.strip_prefix("file://").unwrap_or(uri);
+            let path = std::path::PathBuf::from(path_str);
+            if path.exists() {
+                audio_paths.push(path);
+            }
+        }
+    }
+
+    if audio_paths.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "No audio files found in transcript. Record voice messages first."
+            })),
+        )
+            .into_response();
+    }
+
+    // Generate episode ID and output path
+    let episode_id = format!("{:016x}", rand::random::<u64>());
+    let podcast_dir = workspace.join("podcasts");
+    let _ = std::fs::create_dir_all(&podcast_dir);
+    let output_path = podcast_dir.join(format!("{}_{}.mp3", episode_id, sanitize_filename(title)));
+
+    // Try FFmpeg concat first (best quality — handles format conversion)
+    let ffmpeg_success = try_ffmpeg_concat(&audio_paths, &output_path).await;
+
+    if !ffmpeg_success {
+        // Fallback: raw byte concatenation (works for same-format files like m4a/mp4)
+        let mut output = Vec::new();
+        for path in &audio_paths {
+            if let Ok(bytes) = tokio::fs::read(path).await {
+                output.extend_from_slice(&bytes);
+            }
+        }
+        if output.is_empty() {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to read audio files"})),
+            )
+                .into_response();
+        }
+        if let Err(e) = tokio::fs::write(&output_path, &output).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("Failed to write output: {e}")})),
+            )
+                .into_response();
+        }
+    }
+
+    // Get file size to estimate duration (rough: 128kbps = 16KB/sec)
+    let file_size = tokio::fs::metadata(&output_path)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let duration_secs = file_size / 16_000;
+
+    let file_uri = format!("file://{}", output_path.display());
+
+    Json(serde_json::json!({
+        "episode_id": episode_id,
+        "title": title,
+        "audio_url": file_uri,
+        "duration_secs": duration_secs,
+        "segments_count": audio_paths.len(),
+    }))
+    .into_response()
+}
+
+/// Try to concat audio files using FFmpeg. Returns true on success.
+async fn try_ffmpeg_concat(
+    inputs: &[std::path::PathBuf],
+    output: &std::path::Path,
+) -> bool {
+    // Build concat list file
+    let concat_dir = output.parent().unwrap_or(std::path::Path::new("/tmp"));
+    let list_path = concat_dir.join(".concat_list.txt");
+    let list_content: String = inputs
+        .iter()
+        .map(|p| format!("file '{}'\n", p.display()))
+        .collect();
+
+    if tokio::fs::write(&list_path, &list_content).await.is_err() {
+        return false;
+    }
+
+    let result = tokio::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", list_path.to_str().unwrap_or(""),
+            "-c:a", "libmp3lame",
+            "-b:a", "128k",
+            "-ar", "44100",
+            output.to_str().unwrap_or(""),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+
+    let _ = tokio::fs::remove_file(&list_path).await;
+
+    matches!(result, Ok(status) if status.success())
+}
+
+/// Sanitize a string for use as a filename (remove special chars, limit length).
+fn sanitize_filename(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == ' ')
+        .take(40)
+        .collect::<String>()
+        .trim()
+        .replace(' ', "_")
 }
 
 /// GET /agent/profile — read operator onboarding profile (profile.json in log_dir).

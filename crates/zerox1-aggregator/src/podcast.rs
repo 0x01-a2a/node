@@ -339,8 +339,8 @@ async fn isolate_voice(
 /// Requires: Eleven v3 model, max 2000 chars total, max 10 unique voices.
 ///
 /// Default voices:
-///   Host (owner): "pNInz6obpgDQGcFmaJgB" (Adam — warm male)
-///   Co-host (agent): "21m00Tcm4TlvDq8ikWAM" (Rachel — clear female)
+///   Host (owner): "CwhRBWXzGAHq8TQ4Fs17" (Roger — laid-back male)
+///   Co-host (agent): "EXAVITQu4vr4xnSDxMaL" (Sarah — confident female)
 async fn text_to_dialogue(
     client: &reqwest::Client,
     api_key: &str,
@@ -594,7 +594,7 @@ pub async fn post_produce(
                             &state.http_client,
                             &elevenlabs_key,
                             text,
-                            "21m00Tcm4TlvDq8ikWAM", // Rachel voice
+                            "EXAVITQu4vr4xnSDxMaL", // Rachel voice
                         )
                         .await
                         {
@@ -1173,10 +1173,10 @@ pub async fn post_translate(
 ///
 /// Voices:
 ///   User/Host: "pNInz6obpgDQGcFmaJgB" (Adam)
-///   Agent/Co-host: "21m00Tcm4TlvDq8ikWAM" (Rachel)
+///   Agent/Co-host: "EXAVITQu4vr4xnSDxMaL" (Rachel)
 fn build_dialogue_inputs(transcript: &serde_json::Value) -> Vec<serde_json::Value> {
-    const HOST_VOICE: &str = "pNInz6obpgDQGcFmaJgB";   // Adam
-    const COHOST_VOICE: &str = "21m00Tcm4TlvDq8ikWAM"; // Rachel
+    const HOST_VOICE: &str = "CwhRBWXzGAHq8TQ4Fs17";   // Roger
+    const COHOST_VOICE: &str = "EXAVITQu4vr4xnSDxMaL"; // Sarah
 
     let messages = match transcript.as_array() {
         Some(m) => m,

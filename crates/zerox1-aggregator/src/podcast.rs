@@ -333,19 +333,24 @@ async fn isolate_voice(
         .map_err(|e| format!("Failed to read isolation response: {e}"))
 }
 
-/// Text-to-Dialogue — generate a full multi-speaker conversation from a script.
-/// POST https://api.elevenlabs.io/v1/text-to-dialogue/convert
-/// Input: JSON with script text + voice config. Output: audio bytes.
+/// Text-to-Dialogue — generate a full multi-speaker conversation.
+/// POST https://api.elevenlabs.io/v1/text-to-dialogue
+/// Input: { inputs: [{text, voice_id}], model_id, output_format }
+/// Requires: Eleven v3 model, max 2000 chars total, max 10 unique voices.
+///
+/// Default voices:
+///   Host (owner): "pNInz6obpgDQGcFmaJgB" (Adam — warm male)
+///   Co-host (agent): "21m00Tcm4TlvDq8ikWAM" (Rachel — clear female)
 async fn text_to_dialogue(
     client: &reqwest::Client,
     api_key: &str,
-    script: &str,
+    inputs: &[serde_json::Value],
 ) -> Result<Vec<u8>, String> {
     let resp = client
-        .post("https://api.elevenlabs.io/v1/text-to-dialogue/convert")
+        .post("https://api.elevenlabs.io/v1/text-to-dialogue")
         .header("xi-api-key", api_key)
         .json(&json!({
-            "text": script,
+            "inputs": inputs,
             "model_id": "eleven_v3",
             "output_format": "mp3_44100_128"
         }))
@@ -968,10 +973,9 @@ pub async fn post_enhance(
 
     // Step 2: Text-to-dialogue (full recreation with natural conversation)
     if (mode == "polish" || mode == "all") && req.transcript.is_some() {
-        // Build a script from the transcript for text-to-dialogue
-        let script = build_dialogue_script(req.transcript.as_ref().unwrap());
-        if !script.is_empty() {
-            match text_to_dialogue(&state.http_client, &elevenlabs_key, &script).await {
+        let inputs = build_dialogue_inputs(req.transcript.as_ref().unwrap());
+        if !inputs.is_empty() {
+            match text_to_dialogue(&state.http_client, &elevenlabs_key, &inputs).await {
                 Ok(dialogue_audio) => {
                     current_audio = dialogue_audio;
                     enhancements.push("text_to_dialogue".to_string());
@@ -1163,35 +1167,48 @@ pub async fn post_translate(
         .into_response()
 }
 
-/// Build a dialogue script from transcript for text-to-dialogue API.
-/// Format: "Speaker 1: text\nSpeaker 2: text\n..."
-fn build_dialogue_script(transcript: &serde_json::Value) -> String {
+/// Build inputs array for the text-to-dialogue API.
+/// Format: [{ "text": "...", "voice_id": "..." }, ...]
+/// Max 2000 chars total, max 10 unique voices.
+///
+/// Voices:
+///   User/Host: "pNInz6obpgDQGcFmaJgB" (Adam)
+///   Agent/Co-host: "21m00Tcm4TlvDq8ikWAM" (Rachel)
+fn build_dialogue_inputs(transcript: &serde_json::Value) -> Vec<serde_json::Value> {
+    const HOST_VOICE: &str = "pNInz6obpgDQGcFmaJgB";   // Adam
+    const COHOST_VOICE: &str = "21m00Tcm4TlvDq8ikWAM"; // Rachel
+
     let messages = match transcript.as_array() {
         Some(m) => m,
-        None => return String::new(),
+        None => return vec![],
     };
 
-    let mut script = String::new();
+    let mut inputs = Vec::new();
+    let mut total_chars = 0usize;
+
     for msg in messages {
         let role = msg["role"].as_str().unwrap_or("user");
         let text = msg["text"].as_str().unwrap_or("");
-        if text.is_empty() {
+        if text.is_empty() || text.len() < 5 {
             continue;
         }
-        let speaker = if role == "user" { "Host" } else { "Co-host" };
-        script.push_str(&format!("{}: {}\n", speaker, text));
-    }
 
-    // Text-to-dialogue has a 2000 char limit per request.
-    if script.len() > 2000 {
-        script.truncate(2000);
-        // Trim to last complete line
-        if let Some(pos) = script.rfind('\n') {
-            script.truncate(pos);
+        // Respect 2000 char limit
+        let remaining = 2000usize.saturating_sub(total_chars);
+        if remaining < 20 {
+            break;
         }
+        let trimmed = if text.len() > remaining { &text[..remaining] } else { text };
+        total_chars += trimmed.len();
+
+        let voice_id = if role == "user" { HOST_VOICE } else { COHOST_VOICE };
+        inputs.push(json!({
+            "text": trimmed,
+            "voice_id": voice_id,
+        }));
     }
 
-    script
+    inputs
 }
 
 use std::collections::HashMap;

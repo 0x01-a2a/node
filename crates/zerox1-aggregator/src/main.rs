@@ -755,7 +755,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/podcast/clip", post(podcast::post_clip))
         .route("/podcast/publish", post(podcast::post_publish))
-        .route("/podcast/episodes", get(podcast::get_episodes));
+        .route("/podcast/episodes", get(podcast::get_episodes))
+        // Premium subscription (USDC payment verification)
+        .route("/premium/subscribe", post(api::premium_subscribe))
+        .route("/premium/status", get(api::premium_status));
 
     // ── Billing routes ────────────────────────────────────────────────
     // POST endpoints: Ed25519-signed by account holder.

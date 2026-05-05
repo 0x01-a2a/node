@@ -1274,6 +1274,17 @@ CREATE TABLE IF NOT EXISTS podcast_episodes (
 );
 CREATE INDEX IF NOT EXISTS idx_podcast_agent ON podcast_episodes(agent_id);
 ",
+    // v25: Premium subscriptions (USDC payments).
+    "
+CREATE TABLE IF NOT EXISTS premium_subscriptions (
+    agent_id    TEXT    NOT NULL,
+    tx_sig      TEXT    NOT NULL UNIQUE,
+    amount_usdc REAL    NOT NULL,
+    paid_at     INTEGER NOT NULL,
+    expires_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_premium_agent ON premium_subscriptions(agent_id);
+",
 ];
 
 struct Db(rusqlite::Connection);
@@ -5731,6 +5742,55 @@ impl ReputationStore {
             );
             let _ = conn.0.execute(&sql, rusqlite::params![episode_id]);
         }
+    }
+
+    // ── Premium subscriptions ────────────────────────────────────────────────
+
+    /// Record a USDC premium payment. expires_at = paid_at + 30 days.
+    pub fn record_premium_payment(&self, agent_id: &str, tx_sig: &str, amount_usdc: f64) {
+        let db = self.db.lock().unwrap();
+        if let Some(ref conn) = *db {
+            let paid_at = now_secs() as i64;
+            let expires_at = paid_at + 30 * 86_400; // 30 days
+            let _ = conn.0.execute(
+                "INSERT OR IGNORE INTO premium_subscriptions (agent_id, tx_sig, amount_usdc, paid_at, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![agent_id, tx_sig, amount_usdc, paid_at, expires_at],
+            );
+        }
+    }
+
+    /// Check if agent has an active (non-expired) premium subscription.
+    pub fn is_premium_subscriber(&self, agent_id: &str) -> bool {
+        let db = self.db.lock().unwrap();
+        let conn = match db.as_ref() {
+            Some(c) => c,
+            None => return false,
+        };
+        let now = now_secs() as i64;
+        conn.0
+            .query_row(
+                "SELECT 1 FROM premium_subscriptions WHERE agent_id = ?1 AND expires_at > ?2 LIMIT 1",
+                rusqlite::params![agent_id, now],
+                |_| Ok(true),
+            )
+            .unwrap_or(false)
+    }
+
+    /// Get premium expiry timestamp for an agent (0 if not subscribed).
+    pub fn premium_expires_at(&self, agent_id: &str) -> i64 {
+        let db = self.db.lock().unwrap();
+        let conn = match db.as_ref() {
+            Some(c) => c,
+            None => return 0,
+        };
+        conn.0
+            .query_row(
+                "SELECT MAX(expires_at) FROM premium_subscriptions WHERE agent_id = ?1",
+                rusqlite::params![agent_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
     }
 } // end impl ReputationStore
 

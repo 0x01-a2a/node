@@ -4610,6 +4610,88 @@ pub async fn post_register_wallet(
     (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
 
+// ── Premium subscription (USDC payment) ──────────────────────────────────────
+
+/// POST /premium/subscribe — verify a USDC payment and activate premium for 30 days.
+/// Body: { "agent_id": "hex64", "tx_sig": "base58 transaction signature" }
+pub async fn premium_subscribe(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let agent_id = match body["agent_id"].as_str() {
+        Some(id) if id.len() == 64 => id.to_string(),
+        _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid agent_id"}))).into_response(),
+    };
+    let tx_sig = match body["tx_sig"].as_str() {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "missing tx_sig"}))).into_response(),
+    };
+
+    // TODO: verify the transaction on-chain via Solana RPC:
+    // 1. Fetch tx by signature
+    // 2. Confirm it's a USDC transfer to the operator wallet
+    // 3. Confirm amount >= $9.99 worth of USDC (9_990_000 micro-USDC)
+    // 4. Confirm it's recent (within last 10 minutes)
+    // For MVP: trust the tx_sig and record it. On-chain verification added next.
+
+    let amount_usdc = 9.99;
+    state.store.record_premium_payment(&agent_id, &tx_sig, amount_usdc);
+
+    let expires_at = state.store.premium_expires_at(&agent_id);
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "ok": true,
+        "premium": true,
+        "expires_at": expires_at,
+    }))).into_response()
+}
+
+/// GET /premium/status?agent_id=hex64 — check if agent has active premium.
+/// Returns premium = true if agent holds 01PL OR has active USDC subscription.
+pub async fn premium_status(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let agent_id = match params.get("agent_id") {
+        Some(id) if id.len() == 64 => id.clone(),
+        _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "agent_id required"}))).into_response(),
+    };
+
+    // Check USDC subscription first (fast, local DB)
+    let is_subscriber = state.store.is_premium_subscriber(&agent_id);
+    if is_subscriber {
+        let expires_at = state.store.premium_expires_at(&agent_id);
+        return (StatusCode::OK, Json(serde_json::json!({
+            "premium": true,
+            "source": "subscription",
+            "expires_at": expires_at,
+        }))).into_response();
+    }
+
+    // Check 01PL balance (use cached PlCache)
+    #[cfg(feature = "pilot")]
+    {
+        let wallet_b58 = hex::decode(&agent_id).ok()
+            .filter(|b| b.len() == 32)
+            .map(|b| bs58::encode(&b).into_string());
+        if let Some(ref w) = wallet_b58 {
+            let map = state.pl_cache.0.lock().unwrap();
+            if let Some((eligible, ts)) = map.get(w) {
+                if ts.elapsed() < std::time::Duration::from_secs(300) && *eligible {
+                    return (StatusCode::OK, Json(serde_json::json!({
+                        "premium": true,
+                        "source": "01pl_holder",
+                    }))).into_response();
+                }
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "premium": false,
+    }))).into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

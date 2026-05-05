@@ -1,0 +1,72 @@
+name: Build Android Node Binary
+
+# Cross-compiles zerox1-node for aarch64-linux-android.
+# Output: libzerox1_node.so artifact ready to commit to the mobile repo's jniLibs.
+#
+# Triggered manually or on pushes to main that touch node source.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/zerox1-node/**'
+      - 'crates/zerox1-common/**'
+      - 'crates/zerox1-protocol/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    name: Build zerox1-node (Android aarch64)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain + Android target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-android-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-android-${{ runner.os }}-
+
+      - name: Build zerox1-node for Android
+        run: |
+          NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="${NDK_BIN}/aarch64-linux-android24-clang"
+          export CXX_aarch64_linux_android="${NDK_BIN}/aarch64-linux-android24-clang++"
+          export AR_aarch64_linux_android="${NDK_BIN}/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="${NDK_BIN}/aarch64-linux-android24-clang"
+          cargo build --release --target aarch64-linux-android -p zerox1-node
+        env:
+          CARGO_TERM_COLOR: always
+
+      - name: Strip and rename
+        run: |
+          STRIP="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          cp target/aarch64-linux-android/release/zerox1-node libzerox1_node.so
+          "$STRIP" --strip-unneeded libzerox1_node.so
+          ls -lh libzerox1_node.so
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libzerox1-node-android-arm64
+          path: libzerox1_node.so
+          if-no-files-found: error
+          retention-days: 30

@@ -82,7 +82,11 @@ pub struct ClipRequest {
     pub episode_id: String,
     pub start_secs: u64,
     pub end_secs: u64,
-    pub style: Option<String>, // "waveform" or "avatar"
+    /// Background video: "particles", "streaks", "gradient", "flow", "neon".
+    /// Defaults to "particles".
+    pub background: Option<String>,
+    /// Transcript for burned-in captions. If omitted, no captions.
+    pub transcript: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -726,7 +730,14 @@ pub async fn post_produce(
         .into_response()
 }
 
-/// POST /podcast/clip
+/// POST /podcast/clip — generate a vertical video clip (MP4) from a podcast episode.
+///
+/// Combines:
+/// 1. Background loop video from /var/lib/zerox1/podcast-backgrounds/
+/// 2. Podcast audio (extracted segment from the episode MP3)
+/// 3. Burned-in captions from transcript (if provided)
+///
+/// Requires FFmpeg on the server.
 pub async fn post_clip(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -752,37 +763,154 @@ pub async fn post_clip(
             .into_response();
     }
 
-    // Verify episode exists
-    let episode = state.store.get_podcast_episode(&req.episode_id);
-    if episode.is_none() {
+    let blob_dir = match state.blob_dir.as_ref() {
+        Some(d) => d.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "Blob storage not configured"})),
+            )
+                .into_response()
+        }
+    };
+
+    // Find the episode audio — check both produced and enhanced versions
+    let audio_path = {
+        let enhanced = blob_dir.join(format!("podcast_{}_enhanced.mp3", req.episode_id));
+        let produced = blob_dir.join(format!("podcast_{}.mp3", req.episode_id));
+        if enhanced.exists() { enhanced } else { produced }
+    };
+
+    if !audio_path.exists() {
         return (
             StatusCode::NOT_FOUND,
-            Json(json!({"error": "Episode not found"})),
+            Json(json!({"error": "Episode audio not found. Produce or enhance first."})),
         )
             .into_response();
     }
 
-    // In a full implementation: extract audio segment, generate waveform video
-    // with burned-in captions via FFmpeg. For MVP, return a placeholder.
+    // Select background video
+    let bg_dir = std::path::PathBuf::from("/var/lib/zerox1/podcast-backgrounds");
+    let bg_name = match req.background.as_deref().unwrap_or("particles") {
+        "particles" => "01_particles.mp4",
+        "streaks"   => "02_streaks.mp4",
+        "gradient"  => "03_gradient.mp4",
+        "flow"      => "04_flow.mp4",
+        "neon"      => "05_neon.mp4",
+        _           => "01_particles.mp4",
+    };
+    let bg_path = bg_dir.join(bg_name);
+    if !bg_path.exists() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": format!("Background video '{}' not found on server", bg_name)})),
+        )
+            .into_response();
+    }
+
     let clip_id = gen_episode_id();
-    let clip_url = format!("https://api.0x01.world/blobs/clip_{}.mp4", clip_id);
     let duration_secs = req.end_secs - req.start_secs;
+    let tmp_dir = blob_dir.join(format!("tmp_clip_{}", clip_id));
+    let _ = tokio::fs::create_dir_all(&tmp_dir).await;
 
-    // TODO: actual video generation via FFmpeg + caption burn-in
-    // For now, return the contract response shape so the skill works end-to-end.
+    // Step 1: Extract audio segment from the episode
+    let segment_path = tmp_dir.join("segment.mp3");
+    let extract_result = tokio::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-i", audio_path.to_str().unwrap_or(""),
+            "-ss", &req.start_secs.to_string(),
+            "-t", &duration_secs.to_string(),
+            "-c:a", "copy",
+            segment_path.to_str().unwrap_or(""),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
 
-    (
-        StatusCode::OK,
-        Json(json!(ClipResponse {
-            clip_url,
-            duration_secs,
-            caption_srt: format!(
-                "1\n00:00:00,000 --> 00:00:{:02},000\n[Clip from episode]\n",
-                duration_secs
-            ),
-        })),
-    )
-        .into_response()
+    if !matches!(extract_result, Ok(s) if s.success()) {
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "Failed to extract audio segment"})),
+        )
+            .into_response();
+    }
+
+    // Step 2: Build caption filter from transcript (if provided)
+    let caption_filter = if let Some(ref transcript) = req.transcript {
+        build_caption_filter(transcript, req.start_secs, req.end_secs)
+    } else {
+        String::new()
+    };
+
+    // Step 3: Combine background + audio + captions → MP4
+    let output_path = blob_dir.join(format!("clip_{}.mp4", clip_id));
+    let vf = if caption_filter.is_empty() {
+        "null".to_string()
+    } else {
+        caption_filter
+    };
+
+    let clip_result = tokio::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-stream_loop", "-1",
+            "-i", bg_path.to_str().unwrap_or(""),
+            "-i", segment_path.to_str().unwrap_or(""),
+            "-vf", &vf,
+            "-shortest",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            output_path.to_str().unwrap_or(""),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+
+    // Cleanup temp dir
+    let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+
+    match clip_result {
+        Ok(s) if s.success() => {
+            let file_size = tokio::fs::metadata(&output_path)
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0);
+
+            let clip_url = format!("https://api.0x01.world/blobs/clip_{}.mp4", clip_id);
+
+            // Generate SRT from transcript
+            let srt = if let Some(ref transcript) = req.transcript {
+                build_srt(transcript, req.start_secs, req.end_secs)
+            } else {
+                format!("1\n00:00:00,000 --> 00:00:{:02},000\n[Podcast clip]\n", duration_secs)
+            };
+
+            (
+                StatusCode::OK,
+                Json(json!(ClipResponse {
+                    clip_url,
+                    duration_secs,
+                    caption_srt: srt,
+                })),
+            )
+                .into_response()
+        }
+        _ => {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "FFmpeg video generation failed"})),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// POST /podcast/publish
@@ -1211,6 +1339,115 @@ fn build_dialogue_inputs(transcript: &serde_json::Value) -> Vec<serde_json::Valu
     }
 
     inputs
+}
+
+/// Build FFmpeg drawtext filter for burned-in captions from transcript.
+/// Generates a chain of drawtext filters with enable='between(t,start,end)'.
+fn build_caption_filter(transcript: &serde_json::Value, clip_start: u64, clip_end: u64) -> String {
+    let messages = match transcript.as_array() {
+        Some(m) => m,
+        None => return String::new(),
+    };
+
+    let mut filters = Vec::new();
+    let mut offset_secs = 0f64;
+
+    for msg in messages {
+        let role = msg["role"].as_str().unwrap_or("user");
+        let text = msg["text"].as_str().unwrap_or("").trim();
+        if text.is_empty() { continue; }
+
+        let words = text.split_whitespace().count() as f64;
+        let dur = (words / 2.5).max(1.0); // ~150 wpm
+
+        let msg_start = offset_secs;
+        let msg_end = offset_secs + dur;
+        offset_secs = msg_end;
+
+        // Only include captions that overlap with the clip range
+        let rel_start = msg_start - clip_start as f64;
+        let rel_end = msg_end - clip_start as f64;
+        if rel_end < 0.0 || rel_start > (clip_end - clip_start) as f64 { continue; }
+
+        let start = rel_start.max(0.0);
+        let end = rel_end.min((clip_end - clip_start) as f64);
+
+        let speaker = if role == "user" { "Host" } else { "Co-host" };
+        // Truncate long captions for readability
+        let display_text = if text.len() > 80 { &text[..80] } else { text };
+        // Escape FFmpeg special chars
+        let escaped = display_text
+            .replace('\\', "\\\\")
+            .replace('\'', "'\\\\\\''")
+            .replace(':', "\\:")
+            .replace('%', "%%");
+
+        filters.push(format!(
+            "drawtext=text='[{}] {}':fontsize=28:fontcolor=white:borderw=2:bordercolor=black:x=(w-tw)/2:y=h-120:enable='between(t,{:.1},{:.1})'",
+            speaker, escaped, start, end
+        ));
+    }
+
+    if filters.is_empty() {
+        return String::new();
+    }
+
+    filters.join(",")
+}
+
+/// Build SRT subtitle text for a clip range from transcript.
+fn build_srt(transcript: &serde_json::Value, clip_start: u64, clip_end: u64) -> String {
+    let messages = match transcript.as_array() {
+        Some(m) => m,
+        None => return String::new(),
+    };
+
+    let mut srt = String::new();
+    let mut index = 1;
+    let mut offset_secs = 0f64;
+
+    for msg in messages {
+        let role = msg["role"].as_str().unwrap_or("user");
+        let text = msg["text"].as_str().unwrap_or("").trim();
+        if text.is_empty() { continue; }
+
+        let words = text.split_whitespace().count() as f64;
+        let dur = (words / 2.5).max(1.0);
+
+        let msg_start = offset_secs;
+        let msg_end = offset_secs + dur;
+        offset_secs = msg_end;
+
+        let rel_start = msg_start - clip_start as f64;
+        let rel_end = msg_end - clip_start as f64;
+        if rel_end < 0.0 || rel_start > (clip_end - clip_start) as f64 { continue; }
+
+        let start = rel_start.max(0.0);
+        let end = rel_end.min((clip_end - clip_start) as f64);
+
+        let speaker = if role == "user" { "Host" } else { "Co-host" };
+        let display_text = if text.len() > 120 { &text[..120] } else { text };
+
+        srt.push_str(&format!(
+            "{}\n{} --> {}\n[{}] {}\n\n",
+            index,
+            format_srt_time(start),
+            format_srt_time(end),
+            speaker,
+            display_text,
+        ));
+        index += 1;
+    }
+
+    srt
+}
+
+fn format_srt_time(secs: f64) -> String {
+    let h = (secs / 3600.0) as u32;
+    let m = ((secs % 3600.0) / 60.0) as u32;
+    let s = (secs % 60.0) as u32;
+    let ms = ((secs * 1000.0) % 1000.0) as u32;
+    format!("{:02}:{:02}:{:02},{:03}", h, m, s, ms)
 }
 
 use std::collections::HashMap;

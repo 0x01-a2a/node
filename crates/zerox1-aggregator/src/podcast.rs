@@ -889,11 +889,12 @@ pub async fn post_enhance(
         }
     };
 
-    // Premium only
-    if !is_premium_eligible(&state.http_client, &state.pl_cache, &agent_id).await {
+    // Premium only — check USDC subscription first, then 01PL balance
+    let is_subscriber = state.store.is_premium_subscriber(&agent_id);
+    if !is_subscriber && !is_premium_eligible(&state.http_client, &state.pl_cache, &agent_id).await {
         return (
             StatusCode::PAYMENT_REQUIRED,
-            Json(json!({"error": "Enhance requires 500,000 01PL.", "required_01pl": 500_000})),
+            Json(json!({"error": "Premium required. Subscribe for $9.99/mo or hold 500,000 01PL.", "required_01pl": 500_000})),
         )
             .into_response();
     }
@@ -1045,11 +1046,12 @@ pub async fn post_translate(
         }
     };
 
-    // Premium only
-    if !is_premium_eligible(&state.http_client, &state.pl_cache, &agent_id).await {
+    // Premium only — check USDC subscription first, then 01PL balance
+    let is_subscriber = state.store.is_premium_subscriber(&agent_id);
+    if !is_subscriber && !is_premium_eligible(&state.http_client, &state.pl_cache, &agent_id).await {
         return (
             StatusCode::PAYMENT_REQUIRED,
-            Json(json!({"error": "Translate requires 500,000 01PL.", "required_01pl": 500_000})),
+            Json(json!({"error": "Premium required. Subscribe for $9.99/mo or hold 500,000 01PL.", "required_01pl": 500_000})),
         )
             .into_response();
     }

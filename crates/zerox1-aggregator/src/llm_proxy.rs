@@ -37,7 +37,7 @@ const GEMINI_COMPAT_URL: &str =
 
 /// Model used for all proxy requests — not configurable by callers.
 #[cfg(feature = "pilot")]
-const GEMINI_MODEL: &str = "gemini-3-flash-preview";
+const GEMINI_MODEL: &str = "gemini-3.1-flash-preview";
 
 /// Solana mainnet RPC endpoint for 01PL balance checks.
 #[cfg(feature = "pilot")]

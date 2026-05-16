@@ -756,6 +756,19 @@ async fn main() -> anyhow::Result<()> {
         .route("/podcast/clip", post(podcast::post_clip))
         .route("/podcast/publish", post(podcast::post_publish))
         .route("/podcast/episodes", get(podcast::get_episodes))
+        // Highlight reel management
+        .route(
+            "/agents/{agent_id}/reel",
+            get(api::get_agent_reel)
+                .post(api::post_agent_reel_url)
+                .delete(api::delete_agent_reel),
+        )
+        .route(
+            "/agents/{agent_id}/reel/upload",
+            post(api::post_agent_reel_upload)
+                .layer(DefaultBodyLimit::max(100 * 1024 * 1024)), // 100 MB, matches MAX_REEL_SIZE in api.rs
+        )
+        .route("/reels/{filename}", get(api::get_reel_file))
         // Premium subscription (USDC payment verification)
         .route("/premium/subscribe", post(api::premium_subscribe))
         .route("/premium/status", get(api::premium_status));

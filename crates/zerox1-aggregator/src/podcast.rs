@@ -743,7 +743,7 @@ pub async fn post_clip(
     headers: axum::http::HeaderMap,
     Json(req): Json<ClipRequest>,
 ) -> impl IntoResponse {
-    let _agent_id = match extract_agent_id(&headers) {
+    let agent_id_str = match extract_agent_id(&headers) {
         Some(id) => id,
         None => {
             return (
@@ -885,6 +885,9 @@ pub async fn post_clip(
                 .unwrap_or(0);
 
             let clip_url = format!("https://api.0x01.world/blobs/clip_{}.mp4", clip_id);
+
+            // Register this clip as the agent's highlight reel
+            state.store.set_reel_url(&agent_id_str, &clip_url);
 
             // Generate SRT from transcript
             let srt = if let Some(ref transcript) = req.transcript {

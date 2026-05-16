@@ -37,7 +37,7 @@ const GEMINI_COMPAT_URL: &str =
 
 /// Model used for all proxy requests — not configurable by callers.
 #[cfg(feature = "pilot")]
-const GEMINI_MODEL: &str = "gemini-3.1-flash-preview";
+const GEMINI_MODEL: &str = "gemini-3-flash-preview";
 
 /// Solana mainnet RPC endpoint for 01PL balance checks.
 #[cfg(feature = "pilot")]
@@ -208,7 +208,12 @@ pub async fn fetch_lifetime_fees_allowance(
         _ => max_cap,
     };
 
-    cache.set(mint, allowance);
+    // I10: Don't cache zero — a token may get its first trade between now and the
+    // next request. Caching zero for the full 1-hour TTL would lock out new traders
+    // for up to an hour after their first Bags.fm transaction settles.
+    if allowance > 0 {
+        cache.set(mint, allowance);
+    }
     allowance
 }
 
@@ -298,8 +303,13 @@ async fn check_eligible(
     for wallet in &to_fetch {
         cache.set(wallet, eligible);
     }
-    for wallet in wallets.iter().map(String::as_str).filter(|w| cache.get(w) == Some(false)) {
-        cache.set(wallet, eligible);
+    // C5: only promote previously-cached-false wallets when the combined balance IS
+    // sufficient. Overwriting with `eligible=false` here would ignore their actual
+    // cached balance and keep them blocked even if they hold enough 01PL.
+    if eligible {
+        for wallet in wallets.iter().map(String::as_str).filter(|w| cache.get(w) == Some(false)) {
+            cache.set(wallet, true);
+        }
     }
 
     eligible
@@ -351,6 +361,10 @@ pub async fn post_llm_chat(
     }
 
     // ── 01 Pilot gate: agent must have a launched Bags token ─────────────
+    // I8 (cold restart): state.store.get() only checks the in-memory agent map.
+    // On a cold restart agents are not yet loaded into memory, so this returns None
+    // even for agents that have a valid token_address in the DB, causing a false 403.
+    // TODO: fall back to DB lookup on cold restart (e.g. store.get_token_address_from_db(&agent_id))
     let reputation = state.store.get(&agent_id);
     let token_mint = reputation.as_ref().and_then(|rep| rep.token_address.clone());
     let Some(mint) = token_mint else {
@@ -375,6 +389,16 @@ pub async fn post_llm_chat(
         //
         // Returns 0 if the token has zero lifetime fees (no real trading yet).
         let bags_api_key = state.bags_api_key.as_deref().unwrap_or("");
+        // C6: an empty bags_api_key means the fee gate is not configured.
+        // Without a valid API key we cannot verify trading history, so we must deny
+        // rather than silently fail open and grant free compute.
+        if bags_api_key.is_empty() {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "LLM proxy fee gate not configured"})),
+            )
+                .into_response();
+        }
         let fee_allowance = fetch_lifetime_fees_allowance(
             &state.http_client,
             &state.token_fees_cache,

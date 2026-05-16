@@ -3690,12 +3690,11 @@ pub async fn sponsor_launch(
         Ok(r) => {
             let status = r.status();
             let text = r.text().await.unwrap_or_default();
-            tracing::error!("sponsor_launch: fee-share/config {status}: {text}");
+            tracing::error!("sponsor_launch: fee-share/config {status}: {text} request_body={fee_share_body}");
             remove_sponsor_reservation(&state, &dedup_key);
             return (StatusCode::BAD_GATEWAY, Json(json!({
                 "error": format!("bags fee-share/config failed ({status})"),
                 "bags_response": text,
-                "request_body": fee_share_body,
             }))).into_response();
         }
         Err(e) => {
@@ -4627,12 +4626,23 @@ pub async fn premium_subscribe(
         _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "missing tx_sig"}))).into_response(),
     };
 
-    // TODO: verify the transaction on-chain via Solana RPC:
+    // Validate tx_sig format: Solana transaction signatures are base58-encoded
+    // 64-byte values, which encode to exactly 88 base58 characters.
+    if tx_sig.len() != 88 || bs58::decode(&tx_sig).into_vec().is_err() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid tx_sig format"}))).into_response();
+    }
+
+    // Require the agent to already be registered in the store.
+    // This prevents trivial abuse with random/fake agent_ids.
+    if state.store.get(&agent_id).is_none() {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "agent not registered"}))).into_response();
+    }
+
+    // TODO: verify tx_sig on-chain via Solana RPC before recording.
     // 1. Fetch tx by signature
     // 2. Confirm it's a USDC transfer to the operator wallet
     // 3. Confirm amount >= $9.99 worth of USDC (9_990_000 micro-USDC)
     // 4. Confirm it's recent (within last 10 minutes)
-    // For MVP: trust the tx_sig and record it. On-chain verification added next.
 
     let amount_usdc = 9.99;
     state.store.record_premium_payment(&agent_id, &tx_sig, amount_usdc);

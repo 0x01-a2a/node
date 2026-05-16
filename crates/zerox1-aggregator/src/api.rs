@@ -3444,6 +3444,15 @@ pub async fn sponsor_launch(
     // agent_id_hex (trimmed) is the dedup key stored in sponsor_launches.
     let dedup_key = req.agent_id_hex.trim().to_lowercase();
 
+    // ── Persistent dedup: check if agent already has a launched token in the store ──
+    if let Some(rep) = state.store.get(&dedup_key) {
+        if rep.token_address.is_some() {
+            return (StatusCode::CONFLICT, Json(json!({
+                "error": "agent already has a launched token"
+            }))).into_response();
+        }
+    }
+
     // ── One launch per agent pubkey ───────────────────────────────────────
     {
         let mut launched = state.sponsor_launches.lock().unwrap();

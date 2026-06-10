@@ -21,20 +21,16 @@ fn make_state() -> ApiState {
         "test-agent".to_string(),
         Some("test-secret".to_string()),
         vec![],
-        0,
-        "http://localhost:1".to_string(),
         "http://localhost:1".to_string(),
         reqwest::Client::new(),
         #[cfg(feature = "pilot")]
         None,           // llm_proxy_url
         None,           // registry_8004_collection
         signing_key,
-        None,           // kora
         #[cfg(feature = "pilot")]
         Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())), // exempt_agents
         PathBuf::from("/tmp/test-exempt-api"),
         None,           // skill_workspace
-        None,           // mpp
         None,           // file_delivery
         None,           // task_log
     );

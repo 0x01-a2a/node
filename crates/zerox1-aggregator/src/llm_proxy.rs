@@ -1,17 +1,13 @@
 //! LLM proxy — forwards requests to Gemini 3 Flash on behalf of agents.
 //!
 //! # Tiers
-//! - Free:     agent holds < PRESENCE_THRESHOLD 01PL → capped at `free_daily_tokens` tokens/day
-//! - Eligible: agent holds ≥ PRESENCE_THRESHOLD 01PL → uncapped
+//! - Free:     agent's registered wallet holds < PRESENCE_THRESHOLD 01PL → capped at
+//!             `free_daily_tokens` tokens/day (tracked per-agent in `llm_usage`).
+//! - Eligible: agent's registered wallet holds ≥ PRESENCE_THRESHOLD 01PL → uncapped.
 //!
-//! # Access gates (checked in order)
-//! 1. Agent must have a launched Bags.fm token.
-//! 2. Agent's token must have ≥ MIN_TOKEN_BUYERS external buyers on-chain.
-//!    Checked via `getTokenLargestAccounts` (Solana mainnet); cached 1 h per mint.
-//!    This ensures only tokens with real community trading activity get compute.
-//!    Rationale: 01 earns via Bags.fm partner trading fees — no buyers = no revenue.
-//! 3. Free-tier: global daily budget circuit breaker, then per-agent daily cap.
-//! 4. Eligible (01PL holders): bypass budget caps entirely.
+//! All Bags.fm token-launch / trading-fee gating has been removed in the web3 strip.
+//! The only on-chain read that remains is the 01PL holding check, which is a
+//! lightweight Solana JSON-RPC `getTokenAccountsByOwner` call with a 5-minute cache.
 
 use std::{
     collections::HashMap,
@@ -55,23 +51,6 @@ const PRESENCE_THRESHOLD: u64 = 500_000_000_000;
 #[cfg(feature = "pilot")]
 const CACHE_TTL: Duration = Duration::from_secs(300);
 
-/// How long to cache a token's lifetime fees result.
-/// 1 hour — fees accumulate slowly; fresh enough for cost control.
-const TOKEN_CACHE_TTL: Duration = Duration::from_secs(3_600);
-
-/// Bags.fm partner fee share: 01 earns 20% of all trading fees on every agent token.
-/// Used to compute how much daily LLM compute a token's trading history justifies.
-const PARTNER_FEE_BPS: u64 = 2_000; // 20% expressed as basis points out of 10_000
-
-/// Minimum floor for fee-derived daily token allowance (tokens).
-/// Even a token with tiny fees gets some access rather than zero.
-const MIN_DERIVED_DAILY_TOKENS: u64 = 1_000;
-
-/// Scale factor: lamports of 01 revenue → daily LLM tokens.
-/// 100 lamports of 01 partner revenue = 1 daily LLM token.
-/// At $150/SOL: 10M lamports earned → 100k tokens/day (full free tier).
-const LAMPORTS_PER_DAILY_TOKEN: u64 = 100;
-
 /// Maximum number of messages in a single request.
 #[cfg(feature = "pilot")]
 const MAX_MESSAGES: usize = 200;
@@ -108,113 +87,6 @@ impl PlCache {
         let mut map = self.0.lock().unwrap();
         map.insert(wallet.to_string(), (eligible, Instant::now()));
     }
-}
-
-// ── In-memory token fees cache ─────────────────────────────────────────────
-
-/// Caches computed daily token allowance per mint (1-hour TTL).
-/// Value is the derived daily LLM token allowance, or 0 if no trading history.
-#[derive(Clone)]
-pub struct TokenFeesCache(pub Arc<Mutex<HashMap<String, (u64, Instant)>>>);
-
-impl Default for TokenFeesCache {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TokenFeesCache {
-    pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(HashMap::new())))
-    }
-
-    fn get(&self, mint: &str) -> Option<u64> {
-        let map = self.0.lock().unwrap();
-        if let Some((allowance, ts)) = map.get(mint) {
-            if ts.elapsed() < TOKEN_CACHE_TTL {
-                return Some(*allowance);
-            }
-        }
-        None
-    }
-
-    fn set(&self, mint: &str, allowance: u64) {
-        let mut map = self.0.lock().unwrap();
-        map.insert(mint.to_string(), (allowance, Instant::now()));
-    }
-}
-
-/// Fetches lifetime trading fees for the token from Bags.fm API, computes
-/// the daily LLM token allowance proportional to 01's partner revenue share.
-///
-/// Formula:
-///   01_earned_lamports = lifetime_fees_lamports × PARTNER_FEE_BPS / 10_000
-///   daily_tokens       = clamp(01_earned / LAMPORTS_PER_DAILY_TOKEN,
-///                              MIN_DERIVED_DAILY_TOKENS, max_cap)
-///
-/// Returns 0 if the token has zero lifetime fees (no trading at all).
-/// Fails open (returns max_cap) on API/network errors to avoid blocking users.
-pub async fn fetch_lifetime_fees_allowance(
-    client: &reqwest::Client,
-    cache: &TokenFeesCache,
-    mint: &str,
-    bags_api_key: &str,
-    max_cap: u64,
-) -> u64 {
-    if let Some(cached) = cache.get(mint) {
-        return cached;
-    }
-
-    let url = format!(
-        "https://public-api-v2.bags.fm/api/v1/token-launch/lifetime-fees?tokenMint={}",
-        mint
-    );
-
-    let result = client
-        .get(&url)
-        .header("x-api-key", bags_api_key)
-        .timeout(Duration::from_secs(8))
-        .send()
-        .await;
-
-    let allowance = match result {
-        Ok(resp) if resp.status().is_success() => {
-            match resp.json::<Value>().await {
-                Ok(json) if json["success"].as_bool() == Some(true) => {
-                    // Fees are returned as a lamport string for bigint safety.
-                    let fees_lamports: u64 = json["response"]
-                        .as_str()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
-
-                    if fees_lamports == 0 {
-                        // No trading has happened yet — deny access.
-                        0
-                    } else {
-                        let earned = fees_lamports * PARTNER_FEE_BPS / 10_000;
-                        let derived = earned / LAMPORTS_PER_DAILY_TOKEN;
-                        derived.clamp(MIN_DERIVED_DAILY_TOKENS, max_cap)
-                    }
-                }
-                // Token not found on Bags — no fees, deny.
-                Ok(_) => 0,
-                // Parse error — fail open.
-                Err(_) => max_cap,
-            }
-        }
-        // 400 = token not found / no fees on Bags side — deny.
-        Ok(resp) if resp.status().as_u16() == 400 => 0,
-        // Any other error (network, 5xx) — fail open so we don't block users for our infra issues.
-        _ => max_cap,
-    };
-
-    // I10: Don't cache zero — a token may get its first trade between now and the
-    // next request. Caching zero for the full 1-hour TTL would lock out new traders
-    // for up to an hour after their first Bags.fm transaction settles.
-    if allowance > 0 {
-        cache.set(mint, allowance);
-    }
-    allowance
 }
 
 // ── Request / response types ──────────────────────────────────────────────
@@ -303,9 +175,6 @@ async fn check_eligible(
     for wallet in &to_fetch {
         cache.set(wallet, eligible);
     }
-    // C5: only promote previously-cached-false wallets when the combined balance IS
-    // sufficient. Overwriting with `eligible=false` here would ignore their actual
-    // cached balance and keep them blocked even if they hold enough 01PL.
     if eligible {
         for wallet in wallets.iter().map(String::as_str).filter(|w| cache.get(w) == Some(false)) {
             cache.set(wallet, true);
@@ -360,87 +229,21 @@ pub async fn post_llm_chat(
             .into_response();
     }
 
-    // ── 01 Pilot gate: agent must have a launched Bags token ─────────────
-    // I8 (cold restart): state.store.get() only checks the in-memory agent map.
-    // On a cold restart agents are not yet loaded into memory, so this returns None
-    // even for agents that have a valid token_address in the DB, causing a false 403.
-    // TODO: fall back to DB lookup on cold restart (e.g. store.get_token_address_from_db(&agent_id))
-    let reputation = state.store.get(&agent_id);
-    let token_mint = reputation.as_ref().and_then(|rep| rep.token_address.clone());
-    let Some(mint) = token_mint else {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "LLM proxy requires a launched agent token (01 Pilot only)"})),
-        )
-            .into_response();
-    };
-
-    // ── 01PL eligibility — checked before fees gate ───────────────────────
-    // Holders of ≥ 500,000 01PL bypass the trading-history requirement and all
-    // daily caps. Their token holding is the signal of platform commitment.
+    // ── 01PL eligibility ──────────────────────────────────────────────────
+    // Holders of ≥ 500,000 01PL bypass the free-tier daily cap.
     let registered_wallets = state.store.get_agent_wallets(&agent_id);
     let eligible = check_eligible(&state.http_client, &state.pl_cache, &registered_wallets).await;
 
     if !eligible {
-        // ── Dynamic daily allowance from Bags.fm lifetime trading fees ────
-        // 01 earns PARTNER_FEE_BPS of every trading fee on this token.
-        // The agent's LLM allowance scales with how much revenue their token
-        // has generated for the platform — aligning compute access with value created.
-        //
-        // Returns 0 if the token has zero lifetime fees (no real trading yet).
-        let bags_api_key = state.bags_api_key.as_deref().unwrap_or("");
-        // C6: an empty bags_api_key means the fee gate is not configured.
-        // Without a valid API key we cannot verify trading history, so we must deny
-        // rather than silently fail open and grant free compute.
-        if bags_api_key.is_empty() {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(json!({"error": "LLM proxy fee gate not configured"})),
-            )
-                .into_response();
-        }
-        let fee_allowance = fetch_lifetime_fees_allowance(
-            &state.http_client,
-            &state.token_fees_cache,
-            &mint,
-            bags_api_key,
-            state.llm_proxy_free_daily_tokens,
-        ).await;
-
-        if fee_allowance == 0 {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(json!({
-                    "error": "agent token has no trading history yet — shill your token to unlock LLM access",
-                    "hint": "any community trading on Bags.fm unlocks proportional daily compute",
-                })),
-            )
-                .into_response();
-        }
-
-        // ── Global circuit breaker ────────────────────────────────────────
-        let global_used = state.store.llm_global_today_tokens();
-        if global_used >= state.llm_global_daily_budget {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "error": "global daily LLM budget reached — try again tomorrow or hold 500,000 01PL for unlimited access",
-                    "resets": "UTC midnight",
-                })),
-            )
-                .into_response();
-        }
-
-        // ── Per-agent cap (fee-derived) ───────────────────────────────────
+        // ── Per-agent free-tier daily cap ────────────────────────────────
         let used = state.store.llm_today_tokens(&agent_id);
-        if used >= fee_allowance {
+        if used >= state.llm_proxy_free_daily_tokens {
             return (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(json!({
                     "error": "daily token limit reached",
                     "used": used,
-                    "limit": fee_allowance,
-                    "hint": "more trading volume on your token increases your daily allowance",
+                    "limit": state.llm_proxy_free_daily_tokens,
                     "upgrade": "hold 500,000 01PL for unlimited access",
                 })),
             )

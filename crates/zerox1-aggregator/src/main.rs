@@ -6,7 +6,6 @@ use zerox1_aggregator::llm_proxy;
 #[cfg(feature = "pilot")]
 use zerox1_aggregator::podcast;
 #[allow(unused_imports)]
-use zerox1_aggregator::mpp;
 use zerox1_aggregator::registry_8004;
 use zerox1_aggregator::store;
 
@@ -17,7 +16,6 @@ use axum::{
     Router,
 };
 use clap::Parser;
-use ed25519_dalek::SigningKey as EdSigningKey;
 use tokio::sync::broadcast;
 
 use api::AppState;
@@ -53,13 +51,6 @@ struct Config {
     /// When absent, wake-push is disabled (sleep-state tracking still works).
     #[arg(long, env = "NTFY_SERVER", default_value = "https://ntfy.sh")]
     ntfy_server: Option<String>,
-
-    /// Shared secret for POST /hosting/register.
-    /// Host nodes must include `Authorization: Bearer <secret>` in their
-    /// heartbeat requests. When absent, the endpoint is unauthenticated
-    /// (dev/local only — always set this in production).
-    #[arg(long, env = "AGGREGATOR_HOSTING_SECRET")]
-    hosting_secret: Option<String>,
 
     /// Path to the Apple Push Notification .p8 auth key file.
     /// Required to send APNs silent pushes to sleeping iOS agents.
@@ -235,35 +226,6 @@ struct Config {
     #[arg(long, env = "SUI_PRIVATE_KEY")]
     sui_private_key: Option<String>,
 
-    // ── MPP protocol fee gate ─────────────────────────────────────────────
-
-    /// Enable the MPP protocol-fee gate. When set, BEACON messages from agents
-    /// that haven't paid are silently dropped (soft gate). Disabled by default (beta).
-    #[arg(long, env = "AGGREGATOR_PROTOCOL_FEE_ENABLED", default_value_t = false)]
-    protocol_fee_enabled: bool,
-
-    /// Daily protocol fee for hosted agents in USDC (float). Default: 0.2 USDC.
-    #[arg(long, env = "AGGREGATOR_PROTOCOL_FEE_HOSTED_USDC", default_value_t = 0.2f64)]
-    protocol_fee_hosted_usdc: f64,
-
-    /// Daily protocol fee for self-hosted agents in USDC (float). Default: 1.0 USDC.
-    #[arg(long, env = "AGGREGATOR_PROTOCOL_FEE_SELF_HOSTED_USDC", default_value_t = 1.0f64)]
-    protocol_fee_self_hosted_usdc: f64,
-
-    /// Base58 Solana pubkey of the aggregator operator's wallet.
-    /// When set, the USDC ATA is derived from this and used as the payment recipient.
-    #[arg(long, env = "AGGREGATOR_PROTOCOL_FEE_RECIPIENT")]
-    protocol_fee_recipient: Option<String>,
-
-    /// Solana RPC URL used for verifying protocol-fee payments via getTransaction.
-    /// Defaults to devnet. Override with the mainnet endpoint for production.
-    #[arg(
-        long,
-        env = "AGGREGATOR_PROTOCOL_FEE_RPC_URL",
-        default_value = "https://api.devnet.solana.com"
-    )]
-    protocol_fee_rpc_url: String,
-
     // ── Identity verification ─────────────────────────────────────────────
 
     /// Disable the 8004 identity gate.
@@ -276,66 +238,6 @@ struct Config {
     /// Useful for genesis/genesis-relay nodes and internal tooling.
     #[arg(long, env = "AGGREGATOR_EXEMPT_AGENTS", value_delimiter = ',')]
     exempt_agents: Vec<String>,
-
-    // ── Sponsored token launch ────────────────────────────────────────────
-
-    /// Base58-encoded Ed25519 private key (64 bytes: seed || pubkey) for the
-    /// sponsor wallet that pays Bags.fm launch fees on behalf of new agents.
-    /// The same format as Phantom / Solana CLI keypair export.
-    /// When absent, POST /sponsor/launch returns 503.
-    #[arg(long, env = "SPONSOR_SIGNING_KEY")]
-    sponsor_signing_key: Option<String>,
-
-    /// Bags.fm API key used for sponsored token launches.
-    /// Required when SPONSOR_SIGNING_KEY is set.
-    #[arg(long, env = "BAGS_API_KEY")]
-    bags_api_key: Option<String>,
-
-    /// Solana RPC URL used for sponsored launch transactions.
-    #[arg(
-        long,
-        env = "SPONSOR_RPC_URL",
-        default_value = "https://api.mainnet-beta.solana.com"
-    )]
-    sponsor_rpc_url: String,
-
-    /// Public URL of the default agent avatar image (PNG/JPG, ≤1 MB).
-    /// Fetched once per launch when the mobile client sends no custom image.
-    /// Host it anywhere accessible from the aggregator server.
-    /// Example: https://0x01.world/default-agent.png
-    #[arg(long, env = "SPONSOR_DEFAULT_IMAGE_URL")]
-    sponsor_default_image_url: Option<String>,
-
-    /// Bags.fm partner wallet (base58 Solana pubkey) to receive partner fee share.
-    /// Must be set together with BAGS_PARTNER_CONFIG.
-    #[arg(long, env = "BAGS_PARTNER_WALLET")]
-    bags_partner_wallet: Option<String>,
-
-    /// Bags.fm partner config account address (base58) returned by partner registration.
-    /// Must be set together with BAGS_PARTNER_WALLET.
-    #[arg(long, env = "BAGS_PARTNER_CONFIG")]
-    bags_partner_config: Option<String>,
-
-    /// SOL to spend on an initial buy for each sponsored launch (lamports).
-    /// Default: 100_000_000 (0.1 SOL). Set to 0 to disable.
-    #[arg(long, env = "SPONSOR_INITIAL_BUY_LAMPORTS", default_value_t = 100_000_000)]
-    sponsor_initial_buy_lamports: u64,
-
-    /// Enable gift-code gating for sponsored launches.
-    /// When set, POST /sponsor/launch requires either a valid gift code or a
-    /// confirmed self-pay SOL transaction. Default: false (everyone sponsored).
-    #[arg(long, env = "GIFT_CODE_GATING", default_value_t = false)]
-    gift_code_gating: bool,
-
-    /// Self-pay SOL fee in lamports for users without a gift code.
-    /// Only used when GIFT_CODE_GATING is enabled.
-    #[arg(long, env = "SELF_PAY_FEE_LAMPORTS", default_value_t = 20_000_000)]
-    self_pay_fee_lamports: u64,
-
-    /// Base58 Solana wallet address that receives self-pay SOL transfers.
-    /// Required for the self-pay path when GIFT_CODE_GATING is enabled.
-    #[arg(long, env = "SELF_PAY_FEE_WALLET")]
-    self_pay_fee_wallet: Option<String>,
 
     /// Comma-separated list of gift codes to ensure exist in the DB at startup.
     /// Codes are inserted with INSERT OR IGNORE — safe to repeat across restarts.
@@ -365,11 +267,6 @@ struct Config {
     #[arg(long, env = "LLM_PROXY_FREE_DAILY_TOKENS", default_value_t = 100_000)]
     llm_proxy_free_daily_tokens: u64,
 
-    /// Hard global daily token budget across ALL agents (circuit breaker).
-    /// Free-tier requests are blocked once this is hit; 01PL-eligible agents bypass it.
-    /// Default: 50_000_000 (~$7.50/day at Gemini 3 Flash pricing).
-    #[arg(long, env = "LLM_GLOBAL_DAILY_BUDGET", default_value_t = 50_000_000)]
-    llm_global_daily_budget: u64,
 }
 
 #[tokio::main]
@@ -438,13 +335,6 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    if config.hosting_secret.is_none() {
-        tracing::warn!(
-            "No --hosting-secret set. POST /hosting/register is unauthenticated. \
-             Set AGGREGATOR_HOSTING_SECRET in production."
-        );
-    }
-
     // ── APNs config ───────────────────────────────────────────────────────
     #[cfg(feature = "pilot")]
     let apns_config: Option<std::sync::Arc<api::ApnsConfig>> = match (
@@ -507,13 +397,6 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "sui-settlement")]
     let sui_client = build_sui_client(&config);
 
-    // Derive MPP fields before partial-moving config fields.
-    let protocol_fee_recipient_ata = derive_protocol_fee_ata(&config);
-    let protocol_fee_enabled = config.protocol_fee_enabled;
-    let protocol_fee_hosted_usdc = (config.protocol_fee_hosted_usdc * 1_000_000.0) as u64;
-    let protocol_fee_self_hosted_usdc = (config.protocol_fee_self_hosted_usdc * 1_000_000.0) as u64;
-    let protocol_fee_rpc_url = config.protocol_fee_rpc_url.clone();
-
     // ── Identity verification: build exempt set ──────────────────────────
     let identity_dev_mode = config.registry_8004_disabled;
     if identity_dev_mode {
@@ -539,37 +422,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // ── Sponsor signing key ───────────────────────────────────────────────
-    let sponsor_signing_key = config.sponsor_signing_key.as_deref().and_then(|s| {
-        match bs58::decode(s).into_vec() {
-            Ok(bytes) if bytes.len() == 64 => {
-                let seed: [u8; 32] = bytes[..32].try_into().ok()?;
-                let key = EdSigningKey::from_bytes(&seed);
-                let pubkey = bs58::encode(key.verifying_key().to_bytes()).into_string();
-                tracing::info!("Sponsor wallet: {pubkey}");
-                Some(std::sync::Arc::new(key))
-            }
-            Ok(bytes) if bytes.len() == 32 => {
-                let seed: [u8; 32] = bytes.try_into().ok()?;
-                let key = EdSigningKey::from_bytes(&seed);
-                let pubkey = bs58::encode(key.verifying_key().to_bytes()).into_string();
-                tracing::info!("Sponsor wallet: {pubkey}");
-                Some(std::sync::Arc::new(key))
-            }
-            _ => {
-                tracing::warn!("SPONSOR_SIGNING_KEY is set but not a valid base58 keypair — sponsored launches disabled");
-                None
-            }
-        }
-    });
-    if sponsor_signing_key.is_none() && config.bags_api_key.is_some() {
-        tracing::warn!("BAGS_API_KEY is set but SPONSOR_SIGNING_KEY is missing — sponsored launches disabled");
-    }
-
     let state = AppState {
         store,
         ingest_secret: config.ingest_secret,
-        hosting_secret: config.hosting_secret,
         blob_dir: config.blob_dir,
         reel_dir: config.reel_dir,
         #[cfg(feature = "pilot")]
@@ -592,33 +447,14 @@ async fn main() -> anyhow::Result<()> {
         campaign_rate_limit: std::sync::Arc::new(std::sync::Mutex::new(
             (0u32, std::time::Instant::now()),
         )),
-        protocol_fee_enabled,
-        protocol_fee_hosted_usdc,
-        protocol_fee_self_hosted_usdc,
-        protocol_fee_recipient_ata,
-        protocol_fee_challenges: std::sync::Arc::new(tokio::sync::Mutex::new(
-            std::collections::HashMap::new(),
-        )),
-        protocol_fee_rpc_url,
         identity_dev_mode,
         exempt_agents: std::sync::Arc::new(exempt_set),
         identity_cache: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
-        sponsor_signing_key,
-        bags_api_key: config.bags_api_key,
-        sponsor_rpc_url: config.sponsor_rpc_url,
-        sponsor_default_image_url: config.sponsor_default_image_url,
-        bags_partner_wallet: config.bags_partner_wallet,
-        bags_partner_config: config.bags_partner_config,
-        sponsor_launches: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         admin_api_key: config.admin_api_key,
-        sponsor_initial_buy_lamports: config.sponsor_initial_buy_lamports,
         #[cfg(feature = "pilot")]
         apns_config,
-        gift_code_gating: config.gift_code_gating,
-        self_pay_fee_lamports: config.self_pay_fee_lamports,
-        self_pay_fee_wallet: config.self_pay_fee_wallet,
         #[cfg(feature = "pilot")]
         twilio_account_sid: config.twilio_account_sid,
         #[cfg(feature = "pilot")]
@@ -637,10 +473,6 @@ async fn main() -> anyhow::Result<()> {
         gemini_api_key: config.gemini_api_key,
         #[cfg(feature = "pilot")]
         llm_proxy_free_daily_tokens: config.llm_proxy_free_daily_tokens,
-        #[cfg(feature = "pilot")]
-        llm_global_daily_budget: config.llm_global_daily_budget,
-        #[cfg(feature = "pilot")]
-        token_fees_cache: zerox1_aggregator::llm_proxy::TokenFeesCache::new(),
         #[cfg(feature = "pilot")]
         pl_cache: zerox1_aggregator::llm_proxy::PlCache::new(),
     };
@@ -664,7 +496,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/wallets/register", post(api::post_register_wallet))
         // Internal push endpoints — use their own secrets
         .route("/ingest/envelope", post(api::ingest_envelope))
-        .route("/hosting/register", post(api::post_hosting_register))
         // Agent-authenticated ownership endpoints
         .route(
             "/agents/{agent_id}/propose-owner",
@@ -685,33 +516,18 @@ async fn main() -> anyhow::Result<()> {
         // High-level public stats for the landing page
         .route("/stats/network", get(api::get_network_stats))
         .route("/agents", get(api::get_agents))
-        // Sponsored token launch — no auth, rate-limited per agent pubkey
-        .route("/sponsor/launch", post(api::sponsor_launch))
-        // Gift-code gating helpers — no auth, public
-        .route("/sponsor/launch-info", get(api::sponsor_launch_info))
+        // Gift-code validation — no auth, public
         .route("/sponsor/validate-code", post(api::validate_gift_code))
-        // Sponsored fee-share config — called by local nodes to pay on-chain creation fees
-        .route("/sponsor/fee-share-config", post(api::sponsor_fee_share_config))
         // Mobile app read endpoints — must be public (mobile has no API key)
         .route("/agents/{agent_id}/profile", get(api::get_agent_profile))
         .route("/activity", get(api::get_activity))
         .route("/ws/activity", get(api::ws_activity))
         .route("/broadcasts", get(api::get_broadcasts))
         .route("/bounties", get(api::get_bounties))
-        .route("/hosting/nodes", get(api::get_hosting_nodes))
         // Agent search — public discovery feature, no API key required
         .route("/agents/search", get(api::search_agents))
         .route("/agents/search/name", get(api::search_agents_by_name))
         .route("/blobs/{cid}", get(api::get_blob))
-        // MPP protocol fee endpoints — public (agents call these directly)
-        .route(
-            "/mpp/protocol-fee/challenge",
-            get(api::mpp_protocol_fee_challenge),
-        )
-        .route(
-            "/mpp/protocol-fee/verify",
-            post(api::mpp_protocol_fee_verify),
-        )
         // Identity verification endpoint — called by nodes to check BEACON senders.
         // Public: nodes have no API key; ingest_secret only applies to /ingest/*.
         .route(
@@ -1134,50 +950,6 @@ fn is_safe_attestation_url(url: &str) -> bool {
 // ============================================================================
 // Celo settlement helpers
 // ============================================================================
-
-/// Derive the protocol-fee recipient USDC ATA from the operator's wallet pubkey.
-///
-/// Uses the SPL Associated Token Account program derivation.
-/// Returns `None` if `--protocol-fee-recipient` is not set or is invalid.
-fn derive_protocol_fee_ata(config: &Config) -> Option<String> {
-    use solana_sdk::pubkey::Pubkey;
-    use std::str::FromStr;
-
-    let recipient_str = config.protocol_fee_recipient.as_deref()?;
-    let wallet: Pubkey = match Pubkey::from_str(recipient_str) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(
-                "MPP: invalid --protocol-fee-recipient '{}': {e}",
-                recipient_str
-            );
-            return None;
-        }
-    };
-
-    let usdc_mint_str = if config.protocol_fee_rpc_url.contains("devnet") {
-        "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
-    } else {
-        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-    };
-    let mint: Pubkey = usdc_mint_str.parse().expect("valid USDC mint");
-    let spl_token: Pubkey = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-        .parse()
-        .expect("valid SPL token program");
-    let ata_program: Pubkey = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bJo"
-        .parse()
-        .expect("valid ATA program");
-    let (ata, _) = Pubkey::find_program_address(
-        &[&wallet.to_bytes(), &spl_token.to_bytes(), &mint.to_bytes()],
-        &ata_program,
-    );
-    tracing::info!(
-        "MPP protocol fee: recipient_ata={} daily_hosted={:.2} USDC",
-        ata,
-        config.protocol_fee_hosted_usdc,
-    );
-    Some(ata.to_string())
-}
 
 /// Build a `CeloClient` from aggregator config, if all required fields are set.
 /// Returns `None` with a warn log if any required field is missing.

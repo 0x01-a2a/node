@@ -1285,6 +1285,31 @@ CREATE TABLE IF NOT EXISTS premium_subscriptions (
 );
 CREATE INDEX IF NOT EXISTS idx_premium_agent ON premium_subscriptions(agent_id);
 ",
+    // Strip web3 economy + hosting tables. 01 Pilot is moving to Sui via Tai;
+    // until Tai mainnet ships, the mobile app runs as a free zeroclaw experience
+    // with the 500k 01PL gate as the only retained Solana read-path
+    // (handled in llm_proxy.rs, no DB tables required).
+    //
+    // Drop order respects FK dependencies (hosted_agents -> hosting_nodes,
+    // billing_transactions -> billing_accounts).
+    "
+DROP TABLE IF EXISTS hosted_agents;
+DROP TABLE IF EXISTS hosting_nodes;
+DROP TABLE IF EXISTS billing_transactions;
+DROP TABLE IF EXISTS billing_accounts;
+DROP TABLE IF EXISTS settlement_queue;
+DROP TABLE IF EXISTS agent_protocol_payments;
+DROP TABLE IF EXISTS sponsor_launch_payments;
+DROP TABLE IF EXISTS agent_wallets;
+DROP TABLE IF EXISTS premium_subscriptions;
+",
+    // v28: Idempotent drop of the MPP protocol payment ledger.
+    // The table was originally created in v13 as `agent_protocol_payments`
+    // and is already covered by v27's broader cleanup, but this migration
+    // explicitly drops it as part of removing the MPP fee gate.
+    "
+DROP TABLE IF EXISTS agent_protocol_payments;
+",
 ];
 
 struct Db(rusqlite::Connection);
@@ -2365,19 +2390,6 @@ pub struct NetworkStats {
     pub beacon_bpm: u64,
     /// Unix timestamp (seconds) when the aggregator process started.
     pub started_at: u64,
-}
-
-/// A hosting node entry returned by GET /hosting/nodes.
-#[derive(Debug, Clone, Serialize)]
-pub struct HostingNode {
-    pub node_id: String,
-    pub name: String,
-    pub fee_bps: u32,
-    pub api_url: String,
-    pub first_seen: u64,
-    pub last_seen: u64,
-    /// Live count of hosted agents on this node.
-    pub hosted_count: u32,
 }
 
 /// A pending ownership proposal recorded by POST /agents/:id/propose-owner.
@@ -4811,77 +4823,6 @@ impl ReputationStore {
         }
         vec![]
     }
-    // ── Hosting node registry ─────────────────────────────────────────────
-
-    /// Upsert a hosting node heartbeat.
-    ///
-    /// Sets `first_seen` only on INSERT; always updates `last_seen`.
-    pub fn register_hosting_node(&self, node_id: &str, name: &str, fee_bps: u32, api_url: &str) {
-        let now = now_secs() as i64;
-        let db = self.db.lock().unwrap();
-        if let Some(ref conn) = *db {
-            let _ = conn.0.execute(
-                "INSERT INTO hosting_nodes (node_id, name, fee_bps, api_url, first_seen, last_seen)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-                 ON CONFLICT(node_id) DO UPDATE SET
-                     name      = excluded.name,
-                     fee_bps   = excluded.fee_bps,
-                     api_url   = excluded.api_url,
-                     last_seen = excluded.last_seen",
-                rusqlite::params![node_id, name, fee_bps as i64, api_url, now],
-            );
-        }
-    }
-
-    /// Return hosting nodes seen within the last 120 seconds, ordered by most recent.
-    pub fn list_hosting_nodes(&self) -> Vec<HostingNode> {
-        let cutoff = now_secs() as i64 - 120;
-        let db = self.db.lock().unwrap();
-        if let Some(ref conn) = *db {
-            let mut stmt = match conn.0.prepare(
-                "SELECT hn.node_id, hn.name, hn.fee_bps, hn.api_url, hn.first_seen,
-                        hn.last_seen, COUNT(ha.agent_id) as hosted_count
-                 FROM hosting_nodes hn
-                 LEFT JOIN hosted_agents ha ON hn.node_id = ha.host_node_id
-                 WHERE hn.last_seen > ?1
-                 GROUP BY hn.node_id
-                 ORDER BY hn.last_seen DESC",
-            ) {
-                Ok(s) => s,
-                Err(_) => return vec![],
-            };
-            let rows = stmt.query_map([cutoff], |row| {
-                Ok(HostingNode {
-                    node_id: row.get(0)?,
-                    name: row.get(1)?,
-                    fee_bps: row.get::<_, i64>(2)? as u32,
-                    api_url: row.get(3)?,
-                    first_seen: row.get::<_, i64>(4)? as u64,
-                    last_seen: row.get::<_, i64>(5)? as u64,
-                    hosted_count: row.get::<_, i64>(6)? as u32,
-                })
-            });
-            if let Ok(iter) = rows {
-                return iter.flatten().collect();
-            }
-        }
-        vec![]
-    }
-
-    /// Upsert a hosted-agent record.
-    #[allow(dead_code)]
-    pub fn register_hosted_agent(&self, agent_id: &str, host_node_id: &str) {
-        let now = now_secs() as i64;
-        let db = self.db.lock().unwrap();
-        if let Some(ref conn) = *db {
-            let _ = conn.0.execute(
-                "INSERT INTO hosted_agents (agent_id, host_node_id, registered_at)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(agent_id, host_node_id) DO UPDATE SET registered_at = excluded.registered_at",
-                rusqlite::params![agent_id, host_node_id, now],
-            );
-        }
-    }
     // ── DataBounty campaigns ──────────────────────────────────────────────────
 
     #[cfg(feature = "data-bounty")]
@@ -5515,46 +5456,6 @@ impl ReputationStore {
             )
             .unwrap_or(0);
         rows > 0
-    }
-    // ── MPP protocol payment helpers ──────────────────────────────────────
-
-    /// Record a successful MPP protocol payment for an agent.
-    pub fn record_protocol_payment(&self, agent_id: &str, kind: &str) -> rusqlite::Result<()> {
-        let db = self.db.lock().unwrap();
-        if let Some(ref conn) = *db {
-            let now = now_secs() as i64;
-            conn.0.execute(
-                "INSERT INTO agent_protocol_payments (agent_id, last_paid, kind)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(agent_id) DO UPDATE SET
-                     last_paid = excluded.last_paid,
-                     kind      = excluded.kind",
-                rusqlite::params![agent_id, now, kind],
-            )?;
-        }
-        Ok(())
-    }
-
-    /// Check whether an agent has a valid protocol payment (within last 86400s).
-    pub fn protocol_payment_valid(&self, agent_id: &str) -> bool {
-        let db = self.db.lock().unwrap();
-        if let Some(ref conn) = *db {
-            let result: rusqlite::Result<i64> = conn.0.query_row(
-                "SELECT last_paid FROM agent_protocol_payments WHERE agent_id = ?1",
-                rusqlite::params![agent_id],
-                |row| row.get(0),
-            );
-            match result {
-                Ok(last_paid) => {
-                    let now = now_secs() as i64;
-                    (now - last_paid) < 86_400
-                }
-                Err(_) => false,
-            }
-        } else {
-            // No DB configured — allow all (in-memory mode).
-            true
-        }
     }
     /// Returns tokens used today (UTC day = unix_secs/86400) by this agent.
     pub fn llm_today_tokens(&self, agent_id: &str) -> u64 {

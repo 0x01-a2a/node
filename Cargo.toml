@@ -19,7 +19,7 @@ strip = true
 panic = "abort"
 
 [workspace.package]
-version = "0.7.1"
+version = "0.9.0"
 edition = "2021"
 authors = ["zerox1"]
 license = "AGPL-3.0-or-later"
@@ -37,9 +37,8 @@ tiny-keccak = { version = "2", features = ["keccak"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 
-# Solana (used by 8004 registry, bags, trade, sweep — NOT settlement)
+# Solana (read-only RPC for the 500k $01PL LLM proxy gate)
 solana-sdk = "2.1"
-solana-rpc-client = "2.1"
 
 # libp2p
 libp2p = { version = "0.54", features = [

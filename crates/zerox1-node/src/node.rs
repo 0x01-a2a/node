@@ -12,7 +12,6 @@ use libp2p::{
     autonat, dcutr, gossipsub, identify, kad, mdns, ping, relay, request_response,
     swarm::SwarmEvent, PeerId, Swarm,
 };
-use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 
 use zerox1_protocol::{
     batch::{FeedbackEvent, TaskSelection, TypedBid, VerifierAssignment},
@@ -22,8 +21,6 @@ use zerox1_protocol::{
     payload::{BroadcastPayload, FeedbackPayload},
 };
 
-use solana_sdk::pubkey::Pubkey;
-
 use crate::{
     api::{
         ApiEvent, ApiState, BatchSnapshot, OutboundRequest, PeerSnapshot, PortfolioEvent,
@@ -32,7 +29,6 @@ use crate::{
     batch::{current_epoch, now_micros, BatchAccumulator},
     config::Config,
     identity::AgentIdentity,
-    kora::KoraClient,
     logger::EnvelopeLogger,
     network::{Zx01Behaviour, Zx01BehaviourEvent},
     peer_state::PeerStateMap,
@@ -79,12 +75,6 @@ pub struct Zx01Node {
     pub logger: EnvelopeLogger,
     pub batch: BatchAccumulator,
 
-    /// Nonblocking Solana RPC client (slot polling + batch submission).
-    rpc: RpcClient,
-    /// Kora paymaster client — present when --kora-url is configured.
-    /// Enables gasless on-chain transactions (gas reimbursed in USDC, §4.4).
-    #[allow(dead_code)]
-    kora: Option<KoraClient>,
     /// True when running with --registry-8004-disabled (open/dev mode).
     dev_mode: bool,
     /// Visualization API shared state (always present; server only started when
@@ -104,8 +94,6 @@ pub struct Zx01Node {
     /// Receives gossipsub topic subscription requests from the API (/ws/topics).
     sub_topic_rx: tokio::sync::mpsc::Receiver<String>,
 
-    /// USDC mint pubkey — used for inactivity slash bounty payout.
-    usdc_mint: Option<Pubkey>,
     /// Reputation aggregator base URL — FEEDBACK/VERDICT envelopes are pushed here.
     aggregator_url: Option<String>,
     /// Shared secret sent in Authorization header when pushing to the aggregator.
@@ -155,17 +143,9 @@ impl Zx01Node {
         }
         let epoch = current_epoch();
         let log_dir = config.log_dir.clone();
-        let rpc = RpcClient::new(config.rpc_url.clone());
-        // "none" disables Kora entirely; otherwise use the configured URL.
-        let kora = if config.kora_url.eq_ignore_ascii_case("none") {
-            None
-        } else {
-            Some(KoraClient::new(&config.kora_url))
-        };
         // Dev mode: 8004 registry gate disabled — all agents allowed through.
         let dev_mode = config.registry_8004_disabled;
         let http_client = reqwest::Client::new();
-        let usdc_mint = config.usdc_mint_pubkey().ok().flatten();
         let aggregator_url = validated_aggregator_url(config.aggregator_url.clone());
         let aggregator_secret = config.aggregator_secret.clone();
         let app_webhook_url = config.app_webhook_url.clone();
@@ -211,180 +191,21 @@ impl Zx01Node {
 
         let exempt_agents = std::sync::Arc::new(std::sync::RwLock::new(exempt_set));
 
-        // ── Bags fee-sharing: resolve distribution address at startup ─────────
-        #[cfg(feature = "bags")]
-        let bags_config: Option<std::sync::Arc<crate::bags::BagsConfig>> = 'bags: {
-            use std::str::FromStr as _;
-            if config.bags_fee_bps == 0 {
-                None
-            } else {
-                if config.bags_fee_bps > 500 {
-                    anyhow::bail!(
-                        "--bags-fee-bps {} exceeds maximum allowed value of 500 (5%)",
-                        config.bags_fee_bps
-                    );
-                }
-                let distribution_wallet = if let Some(ref w) = config.bags_wallet {
-                    solana_sdk::pubkey::Pubkey::from_str(w)
-                        .map_err(|e| anyhow::anyhow!("Invalid --bags-wallet '{w}': {e}"))?
-                } else {
-                    let api_client = crate::bags::BagsApiClient::new(
-                        config.bags_api_url.clone(),
-                        http_client.clone(),
-                    )?;
-                    match api_client.resolve_distribution_address().await {
-                        Ok(wallet) => wallet,
-                        Err(e) => {
-                            tracing::warn!(
-                                "Bags fee-sharing disabled for this run: Bags API unavailable and \
-                                 --bags-wallet not set: {e}"
-                            );
-                            break 'bags None;
-                        }
-                    }
-                };
-                tracing::info!(
-                    "Bags fee-sharing enabled: {} bps → {}",
-                    config.bags_fee_bps,
-                    distribution_wallet
-                );
-                Some(std::sync::Arc::new(crate::bags::BagsConfig {
-                    fee_bps: config.bags_fee_bps,
-                    distribution_wallet,
-                    min_fee_micro: 1_000,
-                }))
-            }
-        };
-
-        #[cfg(feature = "bags")]
-        if config.bags_api_key.is_none()
-            && (config.bags_partner_wallet.is_some() || config.bags_partner_key.is_some())
-        {
-            tracing::warn!(
-                "Bags partner settings were provided without --bags-api-key; token launch endpoints will stay disabled"
-            );
-        }
-
-        #[cfg(feature = "bags")]
-        let bags_launch: Option<std::sync::Arc<crate::bags::BagsLaunchClient>> =
-            config.bags_api_key.as_ref().map(|key| {
-                let partner_wallet_set = config
-                    .bags_partner_wallet
-                    .as_ref()
-                    .map(|v| !v.trim().is_empty())
-                    .unwrap_or(false);
-                let partner_config_set = config
-                    .bags_partner_key
-                    .as_ref()
-                    .map(|v| !v.trim().is_empty())
-                    .unwrap_or(false);
-
-                if partner_wallet_set && partner_config_set {
-                    tracing::info!("Bags launch API enabled with partner fee-sharing");
-                } else if partner_wallet_set || partner_config_set {
-                    tracing::warn!(
-                        "Bags partner mode is partially configured; set both --bags-partner-wallet and --bags-partner-key"
-                    );
-                } else {
-                    tracing::info!("Bags launch API enabled (API key configured)");
-                }
-
-                std::sync::Arc::new(crate::bags::BagsLaunchClient::new(
-                    key.clone(),
-                    config.bags_partner_wallet.clone(),
-                    config.bags_partner_key.clone(),
-                    http_client.clone(),
-                ))
-            });
-
-        // ── MPP config: derive ATA from recipient wallet if enabled ──────────
-        let mpp_config: Option<crate::mpp::MppConfig> = if config.mpp_enabled {
-            match &config.mpp_recipient {
-                Some(recipient_str) => match recipient_str.parse::<Pubkey>() {
-                    Ok(recipient_wallet) => {
-                        let usdc_mint_str = if config.rpc_url.contains("devnet") {
-                            crate::api::USDC_MINT_DEVNET
-                        } else {
-                            crate::api::USDC_MINT_MAINNET
-                        };
-                        match usdc_mint_str.parse::<Pubkey>() {
-                            Ok(mint) => {
-                                let recipient_ata =
-                                    crate::api::derive_ata(&recipient_wallet, &mint);
-                                let daily_fee = (config.mpp_fee_usdc * 1_000_000.0) as u64;
-                                tracing::info!(
-                                    "MPP gate enabled: recipient_ata={} daily_fee={} micro-USDC",
-                                    recipient_ata,
-                                    daily_fee
-                                );
-                                Some(crate::mpp::MppConfig {
-                                    recipient_ata,
-                                    daily_fee,
-                                    usdc_mint: mint,
-                                    enabled: true,
-                                })
-                            }
-                            Err(e) => {
-                                tracing::warn!("MPP: invalid USDC mint pubkey: {e}");
-                                None
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "MPP: invalid --mpp-recipient pubkey '{recipient_str}': {e}"
-                        );
-                        None
-                    }
-                },
-                None => {
-                    tracing::warn!(
-                        "MPP: --mpp-enabled set but --mpp-recipient not provided. Gate disabled."
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
         let (api, outbound_rx, hosted_outbound_rx, sub_topic_rx) = ApiState::new(
             identity.agent_id,
             config.agent_name.clone(),
             config.api_secret.clone(),
             config.api_read_keys.clone(),
-            config.hosting_fee_bps,
             config.rpc_url.clone(),
-            config.trade_rpc_url.clone(),
-            #[cfg(feature = "trade")]
-            config.jupiter_api_url.clone(),
-            #[cfg(feature = "trade")]
-            config.jupiter_api_key.clone(),
-            #[cfg(feature = "trade")]
-            config.jupiter_fee_bps,
-            #[cfg(feature = "trade")]
-            config.jupiter_fee_account.clone(),
-            #[cfg(feature = "trade")]
-            config.launchlab_share_fee_wallet.clone(),
             http_client.clone(),
             #[cfg(feature = "pilot")]
             config.aggregator_url.clone(),
-            #[cfg(feature = "bags")]
-            config.aggregator_url.clone(),
-            #[cfg(feature = "bags")]
-            config.aggregator_secret.clone(),
             config.registry_8004_collection.clone(),
             std::sync::Arc::new(identity.signing_key.clone()),
-            kora.clone(),
             #[cfg(feature = "pilot")]
             std::sync::Arc::clone(&exempt_agents),
             exempt_persist_path,
-            #[cfg(feature = "bags")]
-            bags_config,
-            #[cfg(feature = "bags")]
-            bags_launch,
             config.skill_workspace.clone(),
-            mpp_config,
             // Use the aggregator as a blob relay for large DELIVER payloads.
             // Enabled whenever an aggregator URL is configured; the node signs
             // uploads with its own identity key (no extra credentials needed).
@@ -432,12 +253,6 @@ impl Zx01Node {
             );
         }
 
-        if kora.is_some() {
-            tracing::info!("Kora paymaster enabled — on-chain transactions use gasless USDC path.");
-        } else {
-            tracing::info!("No --kora-url set — on-chain transactions require SOL for gas.");
-        }
-
         if let Some(ref url) = app_webhook_url {
             if app_webhook_types.is_empty() {
                 tracing::info!("App webhook: {} (all msg types)", url);
@@ -454,8 +269,6 @@ impl Zx01Node {
             reputation: ReputationTracker::new(),
             logger,
             batch,
-            rpc,
-            kora,
             dev_mode,
             api,
             nonce: 0,
@@ -466,7 +279,6 @@ impl Zx01Node {
             outbound_rx,
             hosted_outbound_rx,
             sub_topic_rx,
-            usdc_mint,
             aggregator_url,
             aggregator_secret,
             app_webhook_url,
@@ -548,60 +360,7 @@ impl Zx01Node {
             }
         }
 
-        // ── Hosting registration heartbeat ────────────────────────────────────
-        // When --hosting is set, advertise this node to the aggregator every 60s.
-        if self.config.hosting {
-            if let Some(ref agg_url) = self.aggregator_url.clone() {
-                let agg_url_log = agg_url.clone();
-                let agg_url = agg_url.clone();
-                let public_url = self.config.public_api_url.clone().unwrap_or_default();
-                let node_id = hex::encode(self.identity.agent_id);
-                let name = self.config.agent_name.clone();
-                let fee_bps = self.config.hosting_fee_bps;
-                let aggregator_secret = self.config.aggregator_secret.clone();
-                let signing_key = self.identity.signing_key.clone();
-
-                tokio::spawn(async move {
-                    let client = reqwest::Client::new();
-                    loop {
-                        let body = serde_json::json!({
-                            "node_id": node_id,
-                            "name":    name,
-                            "fee_bps": fee_bps,
-                            "api_url": public_url,
-                        });
-                        let body_bytes = match serde_json::to_vec(&body) {
-                            Ok(b) => b,
-                            Err(e) => {
-                                tracing::error!("Failed to serialize hosting heartbeat body: {e}");
-                                break;
-                            }
-                        };
-                        let signature = signing_key.sign(&body_bytes);
-
-                        let mut req = client
-                            .post(format!("{agg_url}/hosting/register"))
-                            .header("X-Signature", hex::encode(signature.to_bytes()))
-                            .body(body_bytes);
-
-                        if let Some(ref secret) = aggregator_secret {
-                            req = req.header("Authorization", format!("Bearer {secret}"));
-                        }
-                        if let Err(e) = req.send().await {
-                            tracing::warn!("Hosting registration heartbeat failed: {e}");
-                        }
-                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                    }
-                });
-
-                tracing::info!("Hosting mode enabled — advertising to aggregator at {agg_url_log}");
-            } else {
-                tracing::warn!(
-                    "--hosting set but no --aggregator-url configured; \
-                     hosting registration heartbeat disabled."
-                );
-            }
-        }
+        // Hosting registration removed — peer hosting returns via Tai on Sui.
 
         // ── Auto-onboard: stake + lease ───────────────────────────────────────
         #[cfg(feature = "settlement")]
@@ -845,13 +604,15 @@ impl Zx01Node {
     // ========================================================================
 
     async fn poll_slot(&mut self) {
-        match self.rpc.get_slot().await {
-            Ok(slot) => {
-                self.current_slot = slot;
-                self.api.set_current_slot(slot);
-            }
-            Err(e) => tracing::trace!("Slot poll failed: {e}"),
-        }
+        // Slot polling was previously backed by a Solana RPC client.
+        // With the Solana dependency removed, advance a monotonic counter
+        // based on wall-clock seconds so envelope ordering still works.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.current_slot = now;
+        self.api.set_current_slot(now);
     }
 
     // ========================================================================
@@ -2487,24 +2248,16 @@ impl Zx01Node {
     // ========================================================================
 
     async fn check_inactive_agents(&self) {
+        // On-chain inactivity slashing was Solana-backed and has been removed
+        // along with the Solana dependency. Reputation degradation is now
+        // handled purely off-chain via the aggregator.
         if self.dev_mode {
             return;
         }
-        let _usdc_mint = match self.usdc_mint {
-            Some(ref m) => *m,
-            None => {
-                tracing::debug!("Skipping inactivity check — no --usdc-mint configured.");
-                return;
-            }
-        };
-
         let agents = self.peer_states.all_agent_ids();
         if agents.is_empty() {
             return;
         }
-
-        tracing::debug!("Running inactivity check for {} known agents", agents.len());
-        // On-chain inactivity slashing has been moved to settlement/solana.
         tracing::debug!("Inactivity check skipped (settlement decoupled).");
     }
 

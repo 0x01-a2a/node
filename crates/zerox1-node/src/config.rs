@@ -1,7 +1,6 @@
 use clap::Parser;
 use libp2p::Multiaddr;
-use solana_sdk::pubkey::Pubkey;
-use std::{path::PathBuf, str::FromStr};
+use std::path::PathBuf;
 
 // ============================================================================
 // 0x01 bootstrap fleet (always-on libp2p nodes for mesh entry)
@@ -55,13 +54,6 @@ pub struct Config {
     #[arg(long, default_value = ".")]
     pub log_dir: PathBuf,
 
-    /// Kora paymaster URL for gasless on-chain transactions (USDC gas payment).
-    /// Defaults to the 0x01-hosted Kora instance.
-    /// Override with --kora-url to use your own node, or set to "none" to
-    /// disable Kora entirely (transactions will require SOL for gas).
-    #[arg(long, env = "ZX01_KORA_URL", default_value = "https://kora.0x01.world")]
-    pub kora_url: String,
-
     /// Visualization API listen address (HTTP + WebSocket).
     /// Enables: GET /peers, GET /reputation/:id, GET /batch/:id/:epoch, GET /ws/events
     /// Example: 127.0.0.1:8080
@@ -88,12 +80,6 @@ pub struct Config {
     /// Example: "https://app.0x01.world,http://localhost:3000"
     #[arg(long, env = "ZX01_API_CORS_ORIGINS", value_delimiter = ',')]
     pub api_cors_origins: Vec<String>,
-
-    /// USDC SPL token mint address (base58).
-    /// Required for inactivity slash enforcement — enables the node to receive
-    /// slash bounties into its USDC ATA.
-    #[arg(long, env = "ZX01_USDC_MINT")]
-    pub usdc_mint: Option<String>,
 
     /// Reputation aggregator URL.
     /// When set, FEEDBACK and VERDICT envelopes are pushed to this service.
@@ -128,27 +114,6 @@ pub struct Config {
     /// notification can wake the app when a PROPOSE arrives while offline.
     #[arg(long, env = "ZX01_FCM_TOKEN")]
     pub fcm_token: Option<String>,
-
-    /// Enable hosting mode.
-    /// When set, this node registers itself with the aggregator as a hosting
-    /// provider and accepts hosted-agent sessions via the /hosted/* API.
-    #[arg(long, env = "ZX01_HOSTING", default_value_t = false)]
-    pub hosting: bool,
-
-    /// Fee charged to hosted agents in basis points (1 bps = 0.01%).
-    /// Only meaningful when --hosting is set.
-    #[arg(long, env = "ZX01_HOSTING_FEE_BPS", default_value_t = 0)]
-    pub hosting_fee_bps: u32,
-
-    /// Public HTTP listen address for the hosted-agent API (e.g. "0.0.0.0:9091").
-    /// Defaults to --api-addr when --hosting is set.
-    #[arg(long, env = "ZX01_PUBLIC_API_ADDR")]
-    pub public_api_addr: Option<String>,
-
-    /// Public URL advertised in the aggregator so agents know how to reach this node.
-    /// Example: "https://host.example.com:9091"
-    #[arg(long, env = "ZX01_PUBLIC_API_URL")]
-    pub public_api_url: Option<String>,
 
     /// Geographic region identifier for this node, used as a latency reference point.
     /// When set, the node measures RTT to every connected peer and reports it to the
@@ -201,89 +166,6 @@ pub struct Config {
     #[arg(long, env = "ZX01_EXEMPT_AGENTS", value_delimiter = ',')]
     pub exempt_agents: Vec<String>,
 
-    /// Bags fee-sharing: basis points of each swap output / escrow settlement to
-    /// route to the Bags distribution contract. 0 = disabled. Max 500 (5%).
-    #[cfg(feature = "bags")]
-    #[arg(long, env = "ZX01_BAGS_FEE_BPS", default_value_t = 0)]
-    pub bags_fee_bps: u16,
-
-    /// Bags distribution wallet (base58 Solana pubkey).
-    /// If omitted, the address is resolved from the Bags API at startup.
-    #[cfg(feature = "bags")]
-    #[arg(long, env = "ZX01_BAGS_WALLET")]
-    pub bags_wallet: Option<String>,
-
-    /// Bags API base URL used to resolve the distribution wallet when
-    /// --bags-wallet is not set.
-    #[cfg(feature = "bags")]
-    #[arg(long, env = "ZX01_BAGS_API_URL", default_value = "https://api.bags.fm")]
-    pub bags_api_url: String,
-
-    /// Bags.fm API key for the token-launch endpoints.
-    /// Required to use POST /bags/launch, POST /bags/claim, GET /bags/positions.
-    /// Obtain from bags.fm — free tier allows 1 000 requests/hr.
-    #[cfg(feature = "bags")]
-    #[arg(long, env = "ZX01_BAGS_API_KEY")]
-    pub bags_api_key: Option<String>,
-
-    /// Optional Bags partner wallet for partner-attributed launches.
-    /// Must be paired with --bags-partner-key / ZX01_BAGS_PARTNER_KEY.
-    #[cfg(feature = "bags")]
-    #[arg(long, env = "ZX01_BAGS_PARTNER_WALLET")]
-    pub bags_partner_wallet: Option<String>,
-
-    /// Optional Bags partner config PDA for partner-attributed launches.
-    /// Must be paired with --bags-partner-wallet / ZX01_BAGS_PARTNER_WALLET.
-    /// The node passes both values on /fee-share/config and skips the legacy
-    /// post-claim SOL protocol fee skim when partner mode is fully configured.
-    #[cfg(feature = "bags")]
-    #[arg(long, env = "ZX01_BAGS_PARTNER_KEY")]
-    pub bags_partner_key: Option<String>,
-
-    /// Solana RPC endpoint for trading operations (Jupiter swaps, Bags fee distribution,
-    /// USDC hot-wallet sweep).  Defaults to mainnet so financial operations are always
-    /// on the real network regardless of the mesh --rpc-url (which defaults to devnet).
-    ///
-    /// Override with ZX01_TRADE_RPC_URL to use a paid RPC (Helius, QuickNode, etc.).
-    #[arg(
-        long,
-        env = "ZX01_TRADE_RPC_URL",
-        default_value = "https://api.mainnet-beta.solana.com"
-    )]
-    pub trade_rpc_url: String,
-
-    /// Jupiter API base URL. Defaults to the free public lite endpoint (no API key).
-    /// Set to https://api.jup.ag with ZX01_JUPITER_API_KEY for higher rate limits.
-    #[arg(long, env = "ZX01_JUPITER_API_URL")]
-    pub jupiter_api_url: Option<String>,
-
-    /// Optional Jupiter API key for higher-rate-limit and advanced endpoints
-    /// such as Trigger and Recurring orders.
-    #[arg(long, env = "ZX01_JUPITER_API_KEY")]
-    pub jupiter_api_key: Option<String>,
-
-    /// Jupiter platform fee in basis points (1 bps = 0.01%).
-    /// Deducted from swap output and routed to `jupiter_fee_account`.
-    /// Max 100 bps (1%). Set 0 to disable. Default: 50 (0.5%).
-    #[cfg(feature = "trade")]
-    #[arg(long, env = "ZX01_JUPITER_FEE_BPS", default_value_t = 50)]
-    pub jupiter_fee_bps: u16,
-
-    /// Jupiter referral fee token account (base58 Solana token ATA).
-    /// Create via referral.jup.ag — receives platform fees from all swaps.
-    /// When unset, platform fees are not collected.
-    #[cfg(feature = "trade")]
-    #[arg(long, env = "ZX01_JUPITER_FEE_ACCOUNT")]
-    pub jupiter_fee_account: Option<String>,
-
-    /// Raydium LaunchLab share fee receiver wallet (base58 Solana pubkey).
-    /// Earns 0.1% of every LaunchLab bonding-curve buy/sell routed through
-    /// this node. Fees are paid atomically on-chain — no claiming step.
-    /// When unset, no share fee is collected.
-    #[cfg(feature = "trade")]
-    #[arg(long, env = "ZX01_LAUNCHLAB_SHARE_FEE_WALLET")]
-    pub launchlab_share_fee_wallet: Option<String>,
-
     // ── App Webhook ───────────────────────────────────────────────────────
     /// HTTP(S) URL that receives a POST for every validated inbound envelope.
     ///
@@ -326,24 +208,6 @@ pub struct Config {
     /// by NodeService.
     #[arg(long, env = "ZX01_TASK_LOG_PATH")]
     pub task_log_path: Option<PathBuf>,
-
-    // ── MPP — Machine Payment Protocol daily gate ─────────────────────────
-    /// Enable the MPP hosting-fee gate (HTTP 402).
-    /// When set, hosted agents must pay 1 USDC/day before using /hosted/send
-    /// or /ws/hosted/inbox. Disabled by default (beta).
-    #[arg(long, env = "ZX01_MPP_ENABLED", default_value_t = false)]
-    pub mpp_enabled: bool,
-
-    /// Daily hosting fee in USDC (floating point). Default: 1.0 USDC.
-    /// Converted to micro-USDC (× 1_000_000) at startup.
-    #[arg(long, env = "ZX01_MPP_FEE_USDC", default_value_t = 1.0f64)]
-    pub mpp_fee_usdc: f64,
-
-    /// Node operator wallet pubkey (base58 Solana pubkey).
-    /// When set and --mpp-enabled, the hosting-fee USDC ATA is derived from
-    /// this wallet and used as the payment recipient in MPP challenges.
-    #[arg(long, env = "ZX01_MPP_RECIPIENT")]
-    pub mpp_recipient: Option<String>,
 
     // ── Celo EVM settlement ───────────────────────────────────────────────
     /// Celo JSON-RPC endpoint.
@@ -500,16 +364,6 @@ impl Config {
         }
         peers
     }
-
-    /// Parse USDC mint as Pubkey, if provided.
-    pub fn usdc_mint_pubkey(&self) -> anyhow::Result<Option<Pubkey>> {
-        match &self.usdc_mint {
-            None => Ok(None),
-            Some(s) => Ok(Some(
-                Pubkey::from_str(s).map_err(|e| anyhow::anyhow!("invalid usdc_mint: {e}"))?,
-            )),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -555,32 +409,4 @@ mod tests {
         assert_eq!(cfg.all_bootstrap_peers().len(), 1);
     }
 
-    // --- usdc_mint_pubkey ---
-
-    #[test]
-    fn usdc_mint_pubkey_none_when_absent() {
-        assert!(base_config().usdc_mint_pubkey().unwrap().is_none());
-    }
-
-    #[test]
-    fn usdc_mint_pubkey_parses_devnet_address() {
-        let cfg = Config::try_parse_from([
-            "zerox1-node",
-            "--usdc-mint",
-            "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
-        ])
-        .unwrap();
-        let pk = cfg.usdc_mint_pubkey().unwrap().unwrap();
-        assert_eq!(
-            pk.to_string(),
-            "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
-        );
-    }
-
-    #[test]
-    fn usdc_mint_pubkey_rejects_garbage() {
-        let mut cfg = base_config();
-        cfg.usdc_mint = Some("not-a-valid-pubkey!!!".to_string());
-        assert!(cfg.usdc_mint_pubkey().is_err());
-    }
 }

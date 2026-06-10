@@ -34,9 +34,6 @@ bs58 = "0.5"
 
 libp2p = { workspace = true }
 
-solana-rpc-client = { workspace = true }
-solana-sdk = { workspace = true }
-
 async-trait = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
@@ -58,11 +55,9 @@ zerox1-filedelivery-aggregator = { workspace = true }
 [features]
 default = []
 ios-ffi = []
-trade = []
-bags  = ["trade"]
 # pilot — 01 Pilot mobile app: hosted-agent sessions, ZeroClaw process management,
-# LLM relay. Implies bags (economy + Bags.fm integration).
-pilot = ["bags"]
+# LLM relay.
+pilot = []
 settlement = []
 
 [dev-dependencies]

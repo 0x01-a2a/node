@@ -96,7 +96,7 @@ pub struct Config {
     /// When set, this node accepts circuit relay reservations from peers so
     /// that NAT-restricted nodes (e.g. mobile phones) can project their
     /// presence through this node. Enable only on always-on infrastructure
-    /// nodes (GCP genesis fleet) — it consumes bandwidth proportional to
+    /// nodes (the genesis fleet) — it consumes bandwidth proportional to
     /// the number of relayed circuits.
     #[arg(long, env = "ZX01_RELAY_SERVER", default_value = "false")]
     pub relay_server: bool,

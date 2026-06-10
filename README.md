@@ -89,7 +89,7 @@ crates/
 sdk/                     TypeScript SDK (@zerox1/sdk)
 packages/core/           TypeScript core protocol primitives (@zerox1/core)
 packages/client/         App-layer TypeScript client (@zerox1/client)
-deploy/                  GCP provisioning + systemd service units
+deploy/                  Hetzner provisioning + systemd service units
 docs/                    Protocol specification (01–08)
 ```
 

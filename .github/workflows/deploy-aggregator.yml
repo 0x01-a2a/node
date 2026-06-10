@@ -1,9 +1,9 @@
 name: Deploy Aggregator
 
-# Builds zerox1-aggregator independently and deploys to GCP genesis nodes.
-# Triggered manually or on pushes to main that touch aggregator source.
-#
-# Manual trigger lets you deploy a hotfix without cutting a full node release.
+# Builds zerox1-aggregator independently and uploads the binary as a workflow
+# artifact. Production deploy to the Hetzner genesis node is manual today
+# (scp + systemctl restart). Triggered on pushes to main that touch aggregator
+# source, or via workflow_dispatch.
 
 on:
   workflow_dispatch:

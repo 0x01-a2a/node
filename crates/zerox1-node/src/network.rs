@@ -127,7 +127,7 @@ async fn write_framed<T: AsyncWrite + Unpin>(io: &mut T, data: &[u8]) -> io::Res
 
 /// Build the libp2p swarm.
 ///
-/// `is_relay_server` — when true (genesis/GCP nodes), this node accepts
+/// `is_relay_server` — when true (genesis nodes), this node accepts
 /// circuit relay reservations from peers. When false (regular and mobile
 /// nodes), the relay server limits are set to zero so no circuits are relayed,
 /// but the relay client is still active for outbound relay use.
@@ -189,7 +189,7 @@ pub fn build_swarm(
                 request_response::Config::default(),
             );
 
-            // Relay server: active on genesis/GCP nodes; disabled elsewhere.
+            // Relay server: active on genesis nodes; disabled elsewhere.
             let relay_cfg = if is_relay_server {
                 relay::Config::default()
             } else {

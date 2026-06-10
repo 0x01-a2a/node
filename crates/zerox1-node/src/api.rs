@@ -2750,7 +2750,7 @@ pub(crate) async fn resolve_active_hosted_signing_key(
 // They are registered on the same local API server (127.0.0.1:9090 by default),
 // so they are only reachable by someone with SSH access to the host.
 //
-// Usage (from GCP instance or via ssh -L tunnel):
+// Usage (from the genesis instance or via ssh -L tunnel):
 //   # Add Guardian NPC
 //   curl -X POST http://127.0.0.1:9090/admin/exempt \
 //        -H 'Authorization: Bearer <api_secret>' \
